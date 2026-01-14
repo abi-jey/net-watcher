@@ -34,7 +34,6 @@
 - **One-Command Install**: `curl ... | bash` installation option
 - **Architecture Detection**: Automatic detection of system architecture
 - **Checksum Verification**: SHA256/SHA512 verification for all releases
-- **Docker Support**: Multi-architecture Docker images
 
 ## 🔧 Installation
 
@@ -43,11 +42,6 @@
 curl -L https://github.com/abja/net-watcher/releases/download/v{{VERSION}}/net-watcher-linux-amd64 -o net-watcher
 chmod +x net-watcher
 sudo ./net-watcher install
-```
-
-### Docker
-```bash
-docker run --privileged --network=host abja/net-watcher:{{VERSION}}
 ```
 
 ### From Source

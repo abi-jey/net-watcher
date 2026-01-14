@@ -261,7 +261,6 @@ net-watcher/
 ├── scripts/
 │   └── release-helper.sh   # Release automation
 ├── Makefile                # Build system
-├── Dockerfile              # Container builds
 ├── install.sh              # Installation script
 ├── net-watcher.service     # Systemd service file
 ├── go.mod                  # Go modules
@@ -330,7 +329,6 @@ sudo setcap -v cap_net_raw+ep /usr/local/bin/net-watcher
 - Checksum generation (SHA256/SHA512)
 - Multi-architecture support
 - GitHub release creation
-- Docker image building
 ```
 
 ## 📝 Performance

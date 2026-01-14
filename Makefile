@@ -147,19 +147,6 @@ run-debug: build-debug
 	@echo "Running ${BINARY_NAME} in debug mode..."
 	sudo ./${BINARY_NAME}-debug serve --debug
 
-# Docker build
-.PHONY: docker-build
-docker-build:
-	@echo "Building Docker image..."
-	docker build -t abja/net-watcher:${VERSION} .
-	docker tag abja/net-watcher:${VERSION} abja/net-watcher:latest
-
-# Docker run
-.PHONY: docker-run
-docker-run:
-	@echo "Running ${BINARY_NAME} in Docker..."
-	docker run --rm --privileged --network=host abja/net-watcher
-
 # Show version info
 .PHONY: version
 version:
@@ -192,7 +179,5 @@ help:
 	@echo "  release        Create release artifacts"
 	@echo "  install-local  Install binary locally"
 	@echo "  run-debug      Run debug version"
-	@echo "  docker-build   Build Docker image"
-	@echo "  docker-run     Run in Docker container"
 	@echo "  version        Show version info"
 	@echo "  help           Show this help"
