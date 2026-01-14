@@ -1,0 +1,37 @@
+{
+  "branches": [
+    "main",
+    {
+      "name": "develop",
+      "prerelease": "dev"
+    },
+    {
+      "name": "alpha",
+      "prerelease": "alpha"
+    },
+    {
+      "name": "beta",
+      "prerelease": "beta"
+    }
+  ],
+  "tagFormat": "v${version}",
+  "plugins": [
+    "@semantic-release/commit-analyzer",
+    "@semantic-release/release-notes-generator",
+    "@semantic-release/changelog",
+    "@semantic-release/npm",
+    "@semantic-release/github"
+  ],
+  "analyzeCommits": true,
+  "generateNotes": true,
+  "changelogTitle": "Net Watcher Release Notes",
+  "changelogFile": "CHANGELOG.md",
+  "repositoryUrl": "https://github.com/abja/net-watcher",
+  "npmPublish": false,
+  "githubAssets": [
+    {
+      "path": "package.json",
+      "label": "Package Info"
+    }
+  ]
+}

@@ -1,0 +1,83 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Debug Serve",
+            "type": "go",
+            "request": "launch",
+            "mode": "auto",
+            "program": "${workspaceFolder}",
+            "args": [
+                "serve",
+                "--interface", "eth0",
+                "--debug"
+            ],
+            "env": {
+                "NETWATCHER_DB": "/tmp/net-watcher-debug.db"
+            },
+            "console": "integratedTerminal",
+            "showLog": true
+        },
+        {
+            "name": "Debug Inspect",
+            "type": "go", 
+            "request": "launch",
+            "mode": "auto",
+            "program": "${workspaceFolder}",
+            "args": [
+                "inspect",
+                "--limit", "10"
+            ],
+            "env": {
+                "NETWATCHER_DB": "/tmp/net-watcher-debug.db"
+            },
+            "console": "integratedTerminal",
+            "showLog": true
+        },
+        {
+            "name": "Debug with Custom Interface",
+            "type": "go",
+            "request": "launch", 
+            "mode": "auto",
+            "program": "${workspaceFolder}",
+            "args": [
+                "serve",
+                "--interface", "${input:interfaceName}",
+                "--batch-size", "50",
+                "--debug"
+            ],
+            "env": {
+                "NETWATCHER_DB": "/tmp/net-watcher-${input:interfaceName}.db"
+            },
+            "console": "integratedTerminal",
+            "showLog": true
+        },
+        {
+            "name": "Attach to Running Process",
+            "type": "go",
+            "request": "attach",
+            "mode": "local",
+            "processId": "${command:pickProcess}"
+        },
+        {
+            "name": "Debug Install",
+            "type": "go",
+            "request": "launch",
+            "mode": "auto", 
+            "program": "${workspaceFolder}",
+            "args": [
+                "install"
+            ],
+            "console": "integratedTerminal",
+            "showLog": true
+        }
+    ],
+    "inputs": [
+        {
+            "id": "interfaceName",
+            "description": "Enter network interface name",
+            "default": "eth0",
+            "type": "promptString"
+        }
+    ]
+}

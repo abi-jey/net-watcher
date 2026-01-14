@@ -1,0 +1,59 @@
+{
+  "name": "net-watcher",
+  "version": "1.0.0",
+  "description": "Secure network traffic recorder for DNS monitoring",
+  "author": "Abbas Jafari",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/abja/net-watcher.git"
+  },
+  "homepage": "https://github.com/abja/net-watcher",
+  "bugs": {
+    "url": "https://github.com/abja/net-watcher/issues"
+  },
+  "keywords": [
+    "dns",
+    "network",
+    "monitoring",
+    "security",
+    "packet-capture",
+    "golang",
+    "net-watcher"
+  ],
+  "engines": {
+    "go": ">= 1.21"
+  },
+  "bin": {
+    "net-watcher": "./net-watcher"
+  },
+  "scripts": {
+    "build": "go build -ldflags=\"-s -w\" -o net-watcher .",
+    "build:debug": "go build -gcflags=\"all=-N -l\" -o net-watcher-debug .",
+    "build:all": "make build-all",
+    "build:release": "CGO_ENABLED=0 go build -ldflags=\"-s -w\" -a -installsuffix cgo -o net-watcher .",
+    "test": "go test -v -race ./...",
+    "test:coverage": "go test -v -race -coverprofile=coverage.out ./...",
+    "lint": "golangci-lint run",
+    "vet": "go vet ./...",
+    "fmt": "go fmt ./...",
+    "clean": "go clean -cache",
+    "install": "sudo ./install.sh",
+    "docker:build": "make docker-build",
+    "docker:run": "make docker-run",
+    "version": "./net-watcher version",
+    "release": "semantic-release",
+    "release:dry": "semantic-release --dry-run",
+    "generate:build-info": "node scripts/generate-build-info.js",
+    "update:deps": "go get -u ./..."
+  },
+  "devDependencies": {
+    "semantic-release": "^19.0.5",
+    "@semantic-release/changelog": "^3.0.9",
+    "@semantic-release/commit-analyzer": "^11.0.3",
+    "@semantic-release/git": "^10.0.3",
+    "@semantic-release/github": "^10.0.6",
+    "@semantic-release/npm": "^11.0.3",
+    "@semantic-release/release-notes-generator": "^14.0.2"
+  }
+}
