@@ -92,18 +92,17 @@ net-watcher --help
 - **Pure Go**: Static binaries with no external dependencies
 - **Input Validation**: Comprehensive packet validation and bounds checking
 
-### Multi-Platform Support
-- **Pure Go Linux**: AF_PACKET for optimal performance
-- **Cross-Platform Fallback**: libpcap for macOS/Windows
-- **Automated Builds**: Multi-architecture releases via GitHub Actions
+### Linux-Only, Pure Go
+- **AF_PACKET**: Direct kernel packet capture via raw sockets
+- **No CGO**: Pure Go implementation with zero C dependencies
+- **Static Binary**: Single binary deployment with no external libraries
 
 ## 🔧 Installation
 
 ### System Requirements
-- **Linux**: libpcap-dev (development only)
-- **macOS**: libpcap (development only)
-- **Windows**: Npcap (development only)
-- **Production**: Pure Go binaries (no dependencies required)
+- **Linux only** (uses AF_PACKET raw sockets)
+- **Go 1.21+** for building from source
+- **CAP_NET_RAW** capability for packet capture
 
 ### Automated Installation
 ```bash
@@ -131,7 +130,7 @@ sudo ./net-watcher install
 
 ### Prerequisites
 - Go 1.21+ for development builds
-- libpcap-dev for platform-specific development (not required for releases)
+- Linux only (uses AF_PACKET raw sockets)
 
 ### Build Commands
 ```bash
@@ -253,24 +252,18 @@ net-watcher/
 ├── main.go                 # Entry point with CLI routing
 ├── internal/
 │   ├── database/
-│   │   ├── schema.go     # Database operations
-│   │   └── models.go     # Data models
-│   ├── capture/
-│   │   ├── afpacket_linux.go  # Linux packet capture
-│   │   └── pcap_fallback.go    # Non-Linux fallback
-│   └── config/
-│       └── config.go      # Configuration management
+│   │   ├── schema.go       # Database operations
+│   │   └── models.go       # Data models
+│   └── capture/
+│       └── sniffer.go      # AF_PACKET DNS capture (Linux)
 ├── pkg/cli/
-│   └── commands.go        # CLI command implementations
+│   └── commands.go         # CLI command implementations
 ├── scripts/
-│   ├── release-helper.sh   # Release automation
-│   └── generate-build-info.js  # Build info generation
-├── .github/workflows/
-│   ├── release-enhanced.yml  # Release automation
-│   ├── ci.yml              # CI testing
-│   └── security.yml         # Security scanning
+│   └── release-helper.sh   # Release automation
 ├── Makefile                # Build system
 ├── Dockerfile              # Container builds
+├── install.sh              # Installation script
+├── net-watcher.service     # Systemd service file
 ├── go.mod                  # Go modules
 └── README.md               # This file
 ```

@@ -2,10 +2,7 @@ module github.com/abja/net-watcher
 
 go 1.24.0
 
-require (
-	github.com/google/gopacket v1.1.19
-	modernc.org/sqlite v1.44.0
-)
+require modernc.org/sqlite v1.44.0
 
 require (
 	github.com/dustin/go-humanize v1.0.1 // indirect

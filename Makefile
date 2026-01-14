@@ -20,27 +20,21 @@ build:
 	@echo "Building ${BINARY_NAME} ${VERSION}..."
 	go build ${LDFLAGS} -o ${BINARY_NAME} .
 
-# Build for Linux
+# Build for Linux amd64
 .PHONY: build-linux
 build-linux:
-	@echo "Building ${BINARY_NAME} ${VERSION} for Linux..."
+	@echo "Building ${BINARY_NAME} ${VERSION} for Linux amd64..."
 	${CGO_FLAGS} GOOS=linux GOARCH=amd64 go build ${LDFLAGS} -o ${BINARY_NAME}-linux-amd64 .
 
-# Build for macOS
-.PHONY: build-darwin
-build-darwin:
-	@echo "Building ${BINARY_NAME} ${VERSION} for macOS..."
-	${CGO_FLAGS} GOOS=darwin GOARCH=amd64 go build ${LDFLAGS} -o ${BINARY_NAME}-darwin-amd64 .
+# Build for Linux arm64
+.PHONY: build-linux-arm64
+build-linux-arm64:
+	@echo "Building ${BINARY_NAME} ${VERSION} for Linux arm64..."
+	${CGO_FLAGS} GOOS=linux GOARCH=arm64 go build ${LDFLAGS} -o ${BINARY_NAME}-linux-arm64 .
 
-# Build for Windows
-.PHONY: build-windows
-build-windows:
-	@echo "Building ${BINARY_NAME} ${VERSION} for Windows..."
-	${CGO_FLAGS} GOOS=windows GOARCH=amd64 go build ${LDFLAGS} -o ${BINARY_NAME}-windows-amd64.exe .
-
-# Build all platforms
+# Build all Linux platforms
 .PHONY: build-all
-build-all: build-linux build-darwin build-windows
+build-all: build-linux build-linux-arm64
 
 # Debug build
 .PHONY: build-debug
