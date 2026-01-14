@@ -1,0 +1,24 @@
+{
+    "go.toolsManagement.checkForUpdates": "local",
+    "go.useLanguageServer": true,
+    "go.gopath": "",
+    "go.goroot": "",
+    "go.formatTool": "goimports",
+    "go.lintTool": "golint",
+    "go.vetOnSave": "package",
+    "go.buildOnSave": "package",
+    "go.lintOnSave": "package",
+    "go.coverOnSave": true,
+    "go.testFlags": ["-v"],
+    "go.buildFlags": [],
+    "go.testTimeout": "30s",
+    "go.coverageDecorator": {
+        "type": "gutter",
+        "coveredHighlightColor": "rgba(64,128,64,0.5)",
+        "uncoveredHighlightColor": "rgba(128,64,64,0.25)"
+    },
+    "debug.allowBreakpointsEverywhere": true,
+    "debug.terminal.clearBeforeReusing": true,
+    "debug.hideLauncherWhileDebugging": true,
+    "debug.internalConsoleOptions": "openOnSessionStart"
+}
