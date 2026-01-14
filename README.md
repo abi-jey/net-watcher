@@ -101,7 +101,7 @@ net-watcher --help
 
 ### System Requirements
 - **Linux only** (uses AF_PACKET raw sockets)
-- **Go 1.21+** for building from source
+- **Go 1.25+** for building from source
 - **CAP_NET_RAW** capability for packet capture
 
 ### Automated Installation
@@ -129,7 +129,7 @@ sudo ./net-watcher install
 ## 🔧 Development
 
 ### Prerequisites
-- Go 1.21+ for development builds
+- Go 1.25+ for development builds
 - Linux only (uses AF_PACKET raw sockets)
 
 ### Build Commands
@@ -318,7 +318,7 @@ sudo setcap -v cap_net_raw+ep /usr/local/bin/net-watcher
 ## 📦 CI/CD Pipeline
 
 ### Automated Workflows
-- **Multi-Version Testing**: Go 1.21, 1.22, 1.23
+- **Go Version**: Go 1.25
 - **Cross-Platform Builds**: Linux, macOS, Windows (amd64/arm64)
 - **Security Scanning**: Gosec, Trivy, Snyk, CodeQL
 - **Release Automation**: Semantic versioning with changelog generation

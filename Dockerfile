@@ -1,5 +1,5 @@
 # Multi-stage Docker build for net-watcher
-FROM golang:1.23-alpine AS builder
+FROM golang:1.25-alpine AS builder
 
 # Install dependencies for building (if needed)
 RUN apk add --no-cache git ca-certificates
