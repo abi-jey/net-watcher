@@ -22,15 +22,6 @@ jobs:
           - goos: linux
             goarch: arm64
             filename: net-watcher-linux-arm64
-          - goos: darwin
-            goarch: amd64
-            filename: net-watcher-darwin-amd64
-          - goos: darwin
-            goarch: arm64
-            filename: net-watcher-darwin-arm64
-          - goos: windows
-            goarch: amd64
-            filename: net-watcher-windows-amd64.exe
     steps:
     - name: Checkout code
       uses: actions/checkout@v4

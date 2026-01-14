@@ -71,11 +71,8 @@ jobs:
     needs: test
     strategy:
       matrix:
-        goos: [linux, darwin, windows]
+        goos: [linux]
         goarch: [amd64, arm64]
-        exclude:
-          - goos: windows
-            goarch: arm64
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
@@ -104,11 +101,7 @@ jobs:
         GOARCH: ${{ matrix.goarch }}
         CGO_ENABLED: 0  # Ensure CGO is disabled for pure Go binary
       run: |
-        if [ "${{ matrix.goos }}" = "windows" ]; then
-          go build -ldflags="-s -w" -o net-watcher-${{ matrix.goos }}-${{ matrix.goarch }}.exe .
-        else
-          go build -ldflags="-s -w" -o net-watcher-${{ matrix.goos }}-${{ matrix.goarch }} .
-        fi
+        go build -ldflags="-s -w" -o net-watcher-${{ matrix.goos }}-${{ matrix.goarch }} .
 
     - name: Upload build artifacts
       uses: actions/upload-artifact@v4

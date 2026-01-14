@@ -75,13 +75,10 @@ generate_version_info() {
 build_release() {
     echo_info "Building release artifacts..."
     
-    # Build for multiple platforms
+    # Build for Linux only (uses AF_PACKET raw sockets)
     platforms=(
         "linux/amd64:net-watcher-linux-amd64"
         "linux/arm64:net-watcher-linux-arm64"
-        "darwin/amd64:net-watcher-darwin-amd64"
-        "darwin/arm64:net-watcher-darwin-arm64"
-        "windows/amd64:net-watcher-windows-amd64.exe"
     )
     
     for platform in "${platforms[@]}"; do
