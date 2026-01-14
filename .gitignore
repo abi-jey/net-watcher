@@ -7,6 +7,8 @@
 *.dll
 *.so
 *.dylib
+net-watcher
+net-watcher-*
 
 # Test binary, built with `go test -c`
 *.test

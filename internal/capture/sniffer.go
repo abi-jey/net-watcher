@@ -184,7 +184,8 @@ func (d *DNSSniffer) parsePacket(data []byte) (*database.DNSEvent, error) {
 
 		// Check destination port (bytes 2-3 of UDP header)
 		dstPort := binary.BigEndian.Uint16(data[udpStart+2 : udpStart+4])
-		if dstPort != 53 {
+		srcPort := binary.BigEndian.Uint16(data[udpStart : udpStart+2])
+		if dstPort != 53 && srcPort != 53 {
 			return nil, fmt.Errorf("not DNS packet (port %d)", dstPort)
 		}
 
@@ -215,7 +216,8 @@ func (d *DNSSniffer) parsePacket(data []byte) (*database.DNSEvent, error) {
 
 		// Check destination port
 		dstPort := binary.BigEndian.Uint16(data[udpStart+2 : udpStart+4])
-		if dstPort != 53 {
+		srcPort := binary.BigEndian.Uint16(data[udpStart : udpStart+2])
+		if dstPort != 53 && srcPort != 53 {
 			return nil, fmt.Errorf("not DNS packet (port %d)", dstPort)
 		}
 
