@@ -9,6 +9,9 @@
 *.dylib
 net-watcher
 net-watcher-*
+netwatcher.db
+netwatcher.db-shm
+netwatcher.db-wal
 
 # Test binary, built with `go test -c`
 *.test
