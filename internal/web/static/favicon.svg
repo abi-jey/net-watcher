@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+  <defs>
+    <linearGradient id="grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#6366f1;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#0ea5e9;stop-opacity:1" />
+    </linearGradient>
+    <linearGradient id="waveGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" style="stop-color:#ffffff;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#c4b5fd;stop-opacity:1" />
+    </linearGradient>
+  </defs>
+  
+  <!-- Background circle -->
+  <circle cx="50" cy="50" r="45" fill="url(#grad)"/>
+  
+  <!-- Network globe pattern -->
+  <circle cx="50" cy="50" r="30" fill="none" stroke="rgba(255,255,255,0.3)" stroke-width="1.5"/>
+  <ellipse cx="50" cy="50" rx="30" ry="12" fill="none" stroke="rgba(255,255,255,0.3)" stroke-width="1.5"/>
+  <ellipse cx="50" cy="50" rx="12" ry="30" fill="none" stroke="rgba(255,255,255,0.3)" stroke-width="1.5"/>
+  
+  <!-- Signal wave -->
+  <path d="M25 50 Q35 35, 50 50 T75 50" fill="none" stroke="url(#waveGrad)" stroke-width="4" stroke-linecap="round"/>
+  
+  <!-- Nodes -->
+  <circle cx="25" cy="50" r="4" fill="#ffffff"/>
+  <circle cx="50" cy="35" r="4" fill="#ffffff"/>
+  <circle cx="75" cy="50" r="4" fill="#ffffff"/>
+  <circle cx="50" cy="65" r="4" fill="#ffffff"/>
+  
+  <!-- Center eye/watcher -->
+  <circle cx="50" cy="50" r="8" fill="#ffffff"/>
+  <circle cx="50" cy="50" r="4" fill="#1e293b"/>
+</svg>

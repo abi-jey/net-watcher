@@ -370,6 +370,27 @@ NETWATCHER_BATCH_SIZE="100"
 NETWATCHER_DEBUG="false"
 ```
 
+## 🗺️ Roadmap
+
+### Phase 1: Stability & Enrichment (v1.x)
+Goal: A stable, standalone service with rich data context and streamlined operations.
+- **One-Command Service**: Robust `install.sh` for systemd integration and immediate UI serving.
+- **Traffic Enrichment**: 
+  - **GeoIP**: Automatic resolution of country/city for remote IPs.
+  - **IP Ownership**: Fetch ASN/ISP data (Whois/RDAP) to identify traffic sources (e.g., "Google LLC", "AWS").
+- **TCP Diagnostics**: 
+  - **Health Metrics**: Monitor retransmissions, jitter (time variation), and ghost connections.
+  - **Quality Analysis**: Detect unstable or high-latency TCP flows.
+- **Release Pipeline**: Strict semantic versioning and automated releases.
+- **Traffic Monitoring**: Reliable packet capture with zero-copy optimizations.
+
+### Phase 2: Distributed Architecture (Future)
+Goal: Centralized observability for multiple nodes.
+- **Ingest Mode**: Lightweight agents that forward traffic instead of storing it locally.
+- **Command Center**: Centralized server for aggregating data from multiple ingestion nodes.
+- **Stateless Operation**: Option for nodes to run without a local SQLite database.
+- **Alerting System**: Configurable triggers for specific network events or anomalies.
+
 ## 🤝 Contributing
 
 ### Development Workflow
@@ -380,7 +401,7 @@ NETWATCHER_DEBUG="false"
 5. Submit pull request
 
 ### Commit Format
-``bash
+```bash
 feat: add IPv6 support
 fix: resolve memory leak in packet processing
 security: update dependencies due to CVE-2024-1234
@@ -410,4 +431,4 @@ MIT License - see [LICENSE](LICENSE) file for details.
 | `version` | Show version | `net-watcher version --verbose` |
 | `install` | Setup service | `sudo ./install.sh` |
 
-Net-Watcher provides enterprise-grade network monitoring with minimal dependencies and maximum security.
+Net-Watcher provides robust network monitoring with minimal dependencies and maximum security.

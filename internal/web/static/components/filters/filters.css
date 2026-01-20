@@ -1,0 +1,254 @@
+/* Net Watcher - Filter & Form Styles */
+
+/* Filters */
+.filters {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 20px;
+    margin-bottom: 24px;
+}
+
+.filters-row {
+    display: flex;
+    gap: 16px;
+    flex-wrap: wrap;
+    align-items: flex-end;
+}
+
+.filter-group {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    flex: 1;
+    min-width: 180px;
+}
+
+.filter-group-multiselect {
+    flex: 1.5;
+    min-width: 280px;
+}
+
+.filter-group-actions {
+    flex: 0 0 auto;
+    min-width: auto;
+}
+
+.filter-label {
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--text-secondary);
+}
+
+.filter-input {
+    background: var(--bg-dark);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px 14px;
+    color: var(--text-primary);
+    font-size: 14px;
+    transition: all 0.15s ease;
+}
+
+.filter-input:focus {
+    outline: none;
+    border-color: var(--primary);
+    box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.2);
+}
+
+.filter-input::placeholder {
+    color: var(--text-muted);
+}
+
+.filter-input.searching {
+    border-color: var(--secondary);
+    box-shadow: 0 0 0 3px rgba(14, 165, 233, 0.2);
+}
+
+/* Multi-select dropdown */
+.multi-select-wrapper {
+    position: relative;
+}
+
+.multi-select-trigger {
+    background: var(--bg-dark);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 8px 14px;
+    color: var(--text-primary);
+    font-size: 14px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    min-height: 42px;
+    transition: all 0.15s ease;
+}
+
+.multi-select-trigger:hover {
+    border-color: var(--primary);
+}
+
+.multi-select-trigger.open {
+    border-color: var(--primary);
+    box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.2);
+    border-bottom-left-radius: 0;
+    border-bottom-right-radius: 0;
+}
+
+.multi-select-tags {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    flex: 1;
+}
+
+.multi-select-tag {
+    background: linear-gradient(135deg, var(--primary) 0%, var(--primary-dark) 100%);
+    color: white;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: 12px;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.multi-select-tag button {
+    background: none;
+    border: none;
+    color: white;
+    cursor: pointer;
+    padding: 0;
+    font-size: 14px;
+    line-height: 1;
+    opacity: 0.7;
+}
+
+.multi-select-tag button:hover {
+    opacity: 1;
+}
+
+.multi-select-placeholder {
+    color: var(--text-muted);
+}
+
+.multi-select-arrow {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+}
+
+.multi-select-arrow svg {
+    width: 16px;
+    height: 16px;
+    stroke: var(--text-muted);
+    transition: transform 0.2s ease;
+}
+
+.multi-select-trigger.open .multi-select-arrow svg {
+    transform: rotate(180deg);
+}
+
+.multi-select-dropdown {
+    position: absolute;
+    top: 100%;
+    left: 0;
+    right: 0;
+    background: var(--bg-dark);
+    border: 1px solid var(--primary);
+    border-top: none;
+    border-radius: 0 0 8px 8px;
+    max-height: 200px;
+    overflow-y: auto;
+    z-index: 100;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+}
+
+.multi-select-option {
+    padding: 10px 14px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    transition: background 0.1s ease;
+}
+
+.multi-select-option:hover {
+    background: var(--bg-hover);
+}
+
+.multi-select-option.selected {
+    background: rgba(99, 102, 241, 0.15);
+}
+
+.multi-select-checkbox {
+    width: 16px;
+    height: 16px;
+    border: 2px solid var(--border);
+    border-radius: 4px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.15s ease;
+}
+
+.multi-select-option.selected .multi-select-checkbox {
+    background: var(--primary);
+    border-color: var(--primary);
+}
+
+.multi-select-checkbox svg {
+    width: 12px;
+    height: 12px;
+    stroke: white;
+    stroke-width: 3;
+}
+
+/* Buttons */
+.btn {
+    padding: 10px 20px;
+    border-radius: 8px;
+    font-size: 14px;
+    font-weight: 500;
+    border: none;
+    cursor: pointer;
+    transition: all 0.15s ease;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.btn-primary {
+    background: linear-gradient(135deg, var(--primary) 0%, var(--primary-dark) 100%);
+    color: white;
+}
+
+.btn-primary:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 4px 12px rgba(99, 102, 241, 0.4);
+}
+
+.btn-secondary {
+    background: var(--bg-hover);
+    color: var(--text-primary);
+}
+
+.btn-secondary:hover {
+    background: var(--border);
+}
+
+/* Responsive */
+@media (max-width: 768px) {
+    .filters-row {
+        flex-direction: column;
+    }
+    .filter-group {
+        width: 100%;
+    }
+    .filter-group-multiselect {
+        min-width: 100%;
+    }
+}

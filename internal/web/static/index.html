@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Net Watcher - Network Traffic Monitor</title>
+    <link rel="icon" type="image/svg+xml" href="favicon.svg">
+    <!-- React and Babel for JSX -->
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    
+    <!-- Modular CSS Architecture - Component-centric -->
+    <!-- Core styles -->
+    <link rel="stylesheet" href="core/base.css">
+    
+    <!-- Component styles -->
+    <link rel="stylesheet" href="components/layout/layout.css">
+    <link rel="stylesheet" href="components/ui/ui.css">
+    <link rel="stylesheet" href="components/filters/filters.css">
+    <link rel="stylesheet" href="components/events/events.css">
+    <link rel="stylesheet" href="components/chart/chart.css">
+    
+    <!-- Page styles -->
+    <link rel="stylesheet" href="pages/dashboard/dashboard.css">
+    <link rel="stylesheet" href="pages/events/events.css">
+</head>
+<body>
+    <div id="root"></div>
+    
+    <!-- Modular JavaScript Architecture - Component-centric -->
+    
+    <!-- Core: Config, Utils, Hooks -->
+    <script src="core/config.js"></script>
+    <script src="core/utils.js"></script>
+    <script type="text/babel" src="core/hooks.js"></script>
+    
+    <!-- Core: Icons, Context -->
+    <script type="text/babel" src="core/icons.jsx"></script>
+    <script type="text/babel" src="core/context.jsx"></script>
+    
+    <!-- Components: UI, Layout, Features -->
+    <script type="text/babel" src="components/ui/ui.jsx"></script>
+    <script type="text/babel" src="components/layout/layout.jsx"></script>
+    <script type="text/babel" src="components/filters/filters.jsx"></script>
+    <script type="text/babel" src="components/events/events.jsx"></script>
+    <script type="text/babel" src="components/chart/chart.jsx"></script>
+    
+    <!-- Pages -->
+    <script type="text/babel" src="pages/events/events.jsx"></script>
+    <script type="text/babel" src="pages/dashboard/dashboard.jsx"></script>
+    
+    <!-- App Entry Point -->
+    <script type="text/babel" src="app.jsx"></script>
+</body>
+</html>

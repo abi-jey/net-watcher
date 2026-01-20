@@ -1,0 +1,38 @@
+/* Net Watcher - UI Component Styles */
+/* Note: Most UI component styles are shared with filters.css and events.css */
+/* This file contains any additional UI-specific styles */
+
+/* Additional button variants can go here */
+.btn-sm {
+    padding: 6px 12px;
+    font-size: 12px;
+}
+
+.btn-lg {
+    padding: 14px 28px;
+    font-size: 16px;
+}
+
+.btn-icon {
+    padding: 8px;
+    min-width: 36px;
+    height: 36px;
+}
+
+.btn-icon svg {
+    width: 18px;
+    height: 18px;
+}
+
+/* Spinner sizes */
+.spinner-sm {
+    width: 24px;
+    height: 24px;
+    border-width: 2px;
+}
+
+.spinner-lg {
+    width: 56px;
+    height: 56px;
+    border-width: 4px;
+}

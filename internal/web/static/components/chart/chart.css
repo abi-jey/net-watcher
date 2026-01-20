@@ -1,0 +1,315 @@
+/* Net Watcher - Chart Styles */
+
+/* Traffic Chart Container */
+.traffic-chart-container {
+    margin-bottom: 24px;
+}
+
+/* Date Range Controls */
+.date-range-controls {
+    display: flex;
+    gap: 16px;
+    align-items: flex-end;
+    flex-wrap: wrap;
+    margin-bottom: 20px;
+    padding: 16px;
+    background: var(--bg-dark);
+    border-radius: 8px;
+}
+
+.date-input-group {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.date-input-group label {
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--text-secondary);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.date-input {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 8px 12px;
+    color: var(--text-primary);
+    font-size: 14px;
+    min-width: 160px;
+}
+
+.date-input:focus {
+    outline: none;
+    border-color: var(--primary);
+}
+
+/* Quick Range Buttons */
+.quick-ranges {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+}
+
+.quick-range-btn {
+    padding: 8px 12px;
+    border: 1px solid var(--border);
+    background: var(--bg-card);
+    color: var(--text-secondary);
+    font-size: 12px;
+    font-weight: 500;
+    border-radius: 6px;
+    cursor: pointer;
+    transition: all 0.15s ease;
+}
+
+.quick-range-btn:hover {
+    border-color: var(--primary);
+    color: var(--text-primary);
+}
+
+.quick-range-btn.active {
+    background: var(--primary);
+    border-color: var(--primary);
+    color: white;
+}
+
+/* Chart Area */
+.chart-area {
+    position: relative;
+    height: 280px;
+    background: var(--bg-dark);
+    border-radius: 8px;
+    padding: 20px;
+    overflow: hidden;
+}
+
+/* SVG Chart */
+.traffic-chart-svg {
+    width: 100%;
+    height: 100%;
+}
+
+/* Chart Grid */
+.chart-grid-line {
+    stroke: var(--border);
+    stroke-width: 1;
+    stroke-dasharray: 4, 4;
+}
+
+/* Chart Axis */
+.chart-axis-label {
+    fill: var(--text-muted);
+    font-size: 11px;
+    font-family: inherit;
+}
+
+.chart-axis-label.y-axis {
+    text-anchor: end;
+}
+
+.chart-axis-label.x-axis {
+    text-anchor: middle;
+}
+
+/* Area fills */
+.chart-area-in {
+    fill: url(#gradientIn);
+    opacity: 0.6;
+}
+
+.chart-area-out {
+    fill: url(#gradientOut);
+    opacity: 0.6;
+}
+
+/* Lines */
+.chart-line-in {
+    fill: none;
+    stroke: var(--secondary);
+    stroke-width: 2;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+}
+
+.chart-line-out {
+    fill: none;
+    stroke: var(--primary);
+    stroke-width: 2;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+}
+
+/* Data points */
+.chart-point {
+    r: 4;
+    cursor: pointer;
+    transition: r 0.15s ease;
+}
+
+.chart-point:hover {
+    r: 6;
+}
+
+.chart-point-in {
+    fill: var(--secondary);
+}
+
+.chart-point-out {
+    fill: var(--primary);
+}
+
+/* Legend */
+.chart-legend {
+    display: flex;
+    justify-content: center;
+    gap: 24px;
+    margin-top: 16px;
+}
+
+.legend-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 13px;
+    color: var(--text-secondary);
+}
+
+.legend-color {
+    width: 12px;
+    height: 12px;
+    border-radius: 3px;
+}
+
+.legend-color.in {
+    background: var(--secondary);
+}
+
+.legend-color.out {
+    background: var(--primary);
+}
+
+/* Chart Stats */
+.chart-stats {
+    display: flex;
+    gap: 24px;
+    margin-top: 16px;
+    padding: 16px;
+    background: var(--bg-dark);
+    border-radius: 8px;
+}
+
+.chart-stat {
+    flex: 1;
+    text-align: center;
+}
+
+.chart-stat-value {
+    font-size: 20px;
+    font-weight: 700;
+    margin-bottom: 4px;
+}
+
+.chart-stat-value.in {
+    color: var(--secondary);
+}
+
+.chart-stat-value.out {
+    color: var(--primary);
+}
+
+.chart-stat-label {
+    font-size: 12px;
+    color: var(--text-muted);
+}
+
+/* Tooltip */
+.chart-tooltip {
+    position: absolute;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px;
+    pointer-events: none;
+    z-index: 100;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+    min-width: 150px;
+}
+
+.tooltip-time {
+    font-size: 12px;
+    color: var(--text-muted);
+    margin-bottom: 8px;
+}
+
+.tooltip-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 16px;
+    font-size: 13px;
+    margin-bottom: 4px;
+}
+
+.tooltip-label {
+    color: var(--text-secondary);
+}
+
+.tooltip-value {
+    font-weight: 600;
+}
+
+.tooltip-value.in {
+    color: var(--secondary);
+}
+
+.tooltip-value.out {
+    color: var(--primary);
+}
+
+/* Empty Chart State */
+.chart-empty {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    height: 100%;
+    color: var(--text-muted);
+}
+
+.chart-empty svg {
+    width: 48px;
+    height: 48px;
+    margin-bottom: 12px;
+    opacity: 0.5;
+}
+
+/* Responsive */
+@media (max-width: 768px) {
+    .date-range-controls {
+        flex-direction: column;
+        align-items: stretch;
+    }
+    
+    .date-input {
+        width: 100%;
+    }
+    
+    .quick-ranges {
+        justify-content: center;
+    }
+    
+    .chart-area {
+        height: 220px;
+    }
+    
+    .chart-stats {
+        flex-wrap: wrap;
+    }
+    
+    .chart-stat {
+        min-width: calc(50% - 12px);
+    }
+}
