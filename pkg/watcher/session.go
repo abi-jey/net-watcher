@@ -297,6 +297,10 @@ func (sm *SessionManager) flushEvents() {
 		sm.logger.Error("Failed to insert event batch", "count", len(events), "error", err)
 	} else {
 		sm.logger.Debug("Flushed event batch", "count", len(events))
+		// Publish events to WebSocket subscribers
+		for i := range events {
+			database.PublishEvent(&events[i])
+		}
 	}
 }
 
@@ -796,6 +800,9 @@ func (sm *SessionManager) cleanupLoop() {
 				}
 			}
 			sm.dnsCacheMutex.Unlock()
+
+			// Periodic flush to ensure events are visible to web readers
+			sm.flushEvents()
 		}
 	}
 }

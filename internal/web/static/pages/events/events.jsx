@@ -3,8 +3,46 @@
 window.NetWatcher = window.NetWatcher || {};
 window.NetWatcher.Pages = window.NetWatcher.Pages || {};
 
-const { useState, useEffect, useCallback } = React;
-const { CONFIG, Utils, useDebounce, useApp, Layout, Components } = NetWatcher;
+const { useState, useEffect, useCallback, useRef } = React;
+const { CONFIG, Utils, useDebounce, useWebSocket, useApp, Layout, Components } = NetWatcher;
+
+/**
+ * Check if an event matches the current filters
+ */
+function eventMatchesFilters(event, filters) {
+    // Check event type filter
+    if (filters.eventTypes.length > 0 && !filters.eventTypes.includes(event.EventType)) {
+        return false;
+    }
+    
+    // Check source IP filter
+    if (filters.srcIP && event.SrcIP && !event.SrcIP.includes(filters.srcIP)) {
+        return false;
+    }
+    
+    // Check destination IP filter
+    if (filters.dstIP && event.DstIP && !event.DstIP.includes(filters.dstIP)) {
+        return false;
+    }
+    
+    // Check query filter (matches hostname, DNS query, TLS SNI, or IPs)
+    if (filters.q) {
+        const q = filters.q.toLowerCase();
+        const searchFields = [
+            event.Hostname,
+            event.DNSQuery,
+            event.TLSSNI,
+            event.SrcIP,
+            event.DstIP
+        ].filter(Boolean).map(s => s.toLowerCase());
+        
+        if (!searchFields.some(field => field.includes(q))) {
+            return false;
+        }
+    }
+    
+    return true;
+}
 
 /**
  * Events Page - Main events view
@@ -24,10 +62,55 @@ NetWatcher.Pages.EventsPage = function() {
         srcIP: '',
         dstIP: ''
     });
+    
+    // Live updates state
+    const [liveEnabled, setLiveEnabled] = useState(false);
+    const [newEventsBuffer, setNewEventsBuffer] = useState([]);
+    const filtersRef = useRef(filters);
+    
+    // Keep filters ref updated
+    useEffect(() => {
+        filtersRef.current = filters;
+    }, [filters]);
 
     const { setVersion } = useApp();
     const debouncedFilters = useDebounce(filters);
     const isSearching = JSON.stringify(filters) !== JSON.stringify(debouncedFilters);
+
+    // Handle incoming WebSocket events
+    const handleNewEvent = useCallback((event) => {
+        // Only add events that match current filters
+        if (eventMatchesFilters(event, filtersRef.current)) {
+            setNewEventsBuffer(prev => {
+                // Keep only most recent 50 buffered events
+                const updated = [event, ...prev].slice(0, 50);
+                return updated;
+            });
+        }
+    }, []);
+
+    // WebSocket connection
+    const { connected, eventCount } = useWebSocket(liveEnabled, handleNewEvent);
+
+    // Merge new events into display when on page 1
+    useEffect(() => {
+        if (newEventsBuffer.length > 0 && page === 1) {
+            setEvents(prev => {
+                // Prepend new events and trim to page size
+                const merged = [...newEventsBuffer, ...prev];
+                // Remove duplicates by ID
+                const seen = new Set();
+                const unique = merged.filter(e => {
+                    if (seen.has(e.ID)) return false;
+                    seen.add(e.ID);
+                    return true;
+                });
+                return unique.slice(0, pageSize);
+            });
+            setTotal(prev => prev + newEventsBuffer.length);
+            setNewEventsBuffer([]);
+        }
+    }, [newEventsBuffer, page, pageSize]);
 
     // Fetch events
     const fetchEvents = useCallback(async () => {
@@ -118,6 +201,10 @@ NetWatcher.Pages.EventsPage = function() {
                     onFiltersChange={setFilters}
                     eventTypes={eventTypes}
                     isSearching={isSearching}
+                    liveEnabled={liveEnabled}
+                    onLiveToggle={() => setLiveEnabled(prev => !prev)}
+                    liveConnected={connected}
+                    liveEventCount={eventCount}
                 />
                 <Components.EventsCard
                     events={events}

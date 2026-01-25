@@ -20,5 +20,14 @@
     "debug.allowBreakpointsEverywhere": true,
     "debug.terminal.clearBeforeReusing": true,
     "debug.hideLauncherWhileDebugging": true,
-    "debug.internalConsoleOptions": "openOnSessionStart"
+    "debug.internalConsoleOptions": "openOnSessionStart",
+    "sqltools.connections": [
+        {
+            "previewLimit": 50,
+            "driver": "SQLite",
+            "name": "sqllite",
+            "database": "${workspaceFolder:net-watcher}/netwatcher.db"
+        }
+    ],
+    "sqltools.useNodeRuntime": true
 }

@@ -1,2 +1,0 @@
-// This package is deprecated - use the watcher package instead
-package cli

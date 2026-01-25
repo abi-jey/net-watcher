@@ -10,7 +10,6 @@ import (
 	"runtime"
 	"strings"
 	"syscall"
-	"time"
 
 	"github.com/abja/net-watcher/internal/database"
 	"github.com/abja/net-watcher/internal/web"
@@ -34,9 +33,16 @@ USAGE:
     net-watcher <command> [options]
 
 COMMANDS:
-    start        Start the daemon service for monitor traffic
-    serve        Start the web UI server to view events
-    compact      Compact the database by merging event pairs
+    start        Start the daemon service (includes web UI by default)
+
+FLAGS:
+    --interface          Network interface(s) to monitor (comma-separated)
+    --interface-exclude  Network interface(s) to exclude (comma-separated, e.g., vpn,tun0)
+    --debug              Enable debug logging
+    --web                Enable web UI (default: true)
+    --web-port           Web UI port (default: 8920)
+    --only               Only log specific events (tcp,udp,icmp,dns,tls)
+    --traffic-exclude    Exclude traffic types (multicast,broadcast,etc)
 
 `, version)
 }
@@ -56,10 +62,13 @@ func main() {
 	case "start":
 		startCmd := flag.NewFlagSet("start", flag.ExitOnError)
 		interfaceName := startCmd.String("interface", "", "Network interface to monitor")
+		interfaceExclude := startCmd.String("interface-exclude", "", "Comma-separated list of interfaces to exclude (e.g., vpn,tun0)")
 		debug := startCmd.Bool("debug", false, "Enable debug logs")
 		onlyFilter := startCmd.String("only", "", "Comma-separated list of events to log (tcp,udp,icmp,dns,tls)")
-		excludeFilter := startCmd.String("exclude", "", "Comma-separated list of traffic to exclude (multicast,broadcast,linklocal,bittorrent,mdns,ssdp,metadata,ndp,unreachable)")
+		trafficExclude := startCmd.String("traffic-exclude", "", "Comma-separated list of traffic to exclude (multicast,broadcast,linklocal,bittorrent,mdns,ssdp,metadata,ndp,unreachable)")
 		excludePorts := startCmd.String("exclude-ports", "", "Comma-separated list of ports to exclude")
+		enableWeb := startCmd.Bool("web", true, "Enable web UI server")
+		webPort := startCmd.Int("web-port", 8920, "Port for web UI server")
 		startCmd.Parse(os.Args[2:])
 
 		if *debug {
@@ -78,7 +87,7 @@ func main() {
 		// Attempt best-effort detection
 		if *interfaceName == "" {
 			log.Info("Interface name not provided, using best-effort detection")
-			interfacesToMonitor, err = getUsableInterfaces()
+			interfacesToMonitor, err = getUsableInterfaces(*interfaceExclude)
 			if err != nil {
 				log.Error("Failed to get usable interfaces", "error", err)
 				os.Exit(1)
@@ -93,36 +102,21 @@ func main() {
 			}
 			*interfaceName = strings.Join(names, ",")
 		}
-		log.Info("Starting net-watcher", "version", version, "interface", *interfaceName, "debug", *debug, "only", *onlyFilter, "exclude", *excludeFilter, "exclude-ports", *excludePorts)
-		w, err := watcher.New("netwatcher.db", interfacesToMonitor, logger, *onlyFilter, *excludeFilter, *excludePorts)
-		if err != nil {
-			log.Error("Failed to create watcher", "error", err)
-			os.Exit(1)
-		}
+		log.Info("Starting net-watcher", "version", version, "interface", *interfaceName, "interface_exclude", *interfaceExclude, "debug", *debug, "web", *enableWeb, "web_port", *webPort, "only", *onlyFilter, "traffic_exclude", *trafficExclude, "exclude_ports", *excludePorts)
 
-		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
-
-		if err := w.Run(ctx); err != nil {
-			log.Error("Watcher stopped with error", "error", err)
-			os.Exit(1)
-		}
-	case "serve":
-		serveCmd := flag.NewFlagSet("serve", flag.ExitOnError)
-		dbPath := serveCmd.String("db", "netwatcher.db", "Path to the database file")
-		port := serveCmd.Int("port", 8080, "Port to serve the web UI on")
-		serveCmd.Parse(os.Args[2:])
-
-		log.Info("Starting web server", "db", *dbPath, "port", *port)
-
-		db, err := database.New(*dbPath)
+		// Open database
+		db, err := database.New("netwatcher.db")
 		if err != nil {
 			log.Error("Failed to open database", "error", err)
 			os.Exit(1)
 		}
 		defer db.Close()
 
-		server := web.NewServer(db, *port, logger, version)
+		w, err := watcher.NewWithDB(db, interfacesToMonitor, logger, *onlyFilter, *trafficExclude, *excludePorts)
+		if err != nil {
+			log.Error("Failed to create watcher", "error", err)
+			os.Exit(1)
+		}
 
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
@@ -132,25 +126,22 @@ func main() {
 		signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 		go func() {
 			<-sigChan
-			log.Info("Shutting down web server...")
+			log.Info("Shutting down...")
 			cancel()
 		}()
 
-		if err := server.Start(ctx); err != nil {
-			log.Error("Web server error", "error", err)
-			os.Exit(1)
+		// Start web server if enabled
+		if *enableWeb {
+			server := web.NewServer(db, *webPort, logger, version)
+			go func() {
+				if err := server.Start(ctx); err != nil {
+					log.Error("Web server error", "error", err)
+				}
+			}()
 		}
-	case "compact":
-		compactCmd := flag.NewFlagSet("compact", flag.ExitOnError)
-		dbPath := compactCmd.String("db", "netwatcher.db", "Path to the database file")
-		olderThan := compactCmd.String("older-than", "24h", "Compact events older than this (e.g., 1h, 24h, 7d)")
-		dedupeWindow := compactCmd.String("dedupe-window", "5s", "Window for DNS deduplication (0 to disable)")
-		hourlySummary := compactCmd.Bool("hourly-summary", false, "Also create hourly summaries (destructive)")
-		dryRun := compactCmd.Bool("dry-run", false, "Show what would be compacted without making changes")
-		compactCmd.Parse(os.Args[2:])
 
-		if err := runCompact(*dbPath, *olderThan, *dedupeWindow, *hourlySummary, *dryRun); err != nil {
-			log.Error("Compaction failed", "error", err)
+		if err := w.Run(ctx); err != nil {
+			log.Error("Watcher stopped with error", "error", err)
 			os.Exit(1)
 		}
 	case "-h", "--help":
@@ -183,7 +174,8 @@ func getInterfacesByName(names string) ([]net.Interface, error) {
 	return interfaces, nil
 }
 
-func getUsableInterfaces() ([]net.Interface, error) {
+// getUsableInterfaces returns all usable network interfaces, excluding those specified
+func getUsableInterfaces(excludePattern string) ([]net.Interface, error) {
 	var usableInterfaces []net.Interface
 	interfaces, err := net.Interfaces()
 	log.Info("Getting usable interfaces")
@@ -191,11 +183,28 @@ func getUsableInterfaces() ([]net.Interface, error) {
 		log.Error("Failed to list network interfaces", "error", err)
 		return nil, fmt.Errorf("failed to list network interfaces: %w", err)
 	}
+
+	// Build exclusion set from pattern
+	excludeSet := make(map[string]bool)
+	for _, name := range strings.Split(excludePattern, ",") {
+		name = strings.TrimSpace(name)
+		if name != "" {
+			excludeSet[name] = true
+		}
+	}
+
 	for _, i := range interfaces {
 		if (i.Flags&net.FlagUp == 0) || (i.Flags&net.FlagLoopback != 0) {
 			continue
 		}
 		candidateInterfaceName := i.Name
+
+		// Check explicit exclusion list
+		if excludeSet[candidateInterfaceName] {
+			log.Info("Excluding interface (user specified)", "interface", candidateInterfaceName)
+			continue
+		}
+
 		addrs, err := i.Addrs()
 		if err != nil || len(addrs) == 0 {
 			log.Info("Skipping interface", "interface", candidateInterfaceName, "addrs", addrs, "error", err)
@@ -214,149 +223,4 @@ func getUsableInterfaces() ([]net.Interface, error) {
 	return usableInterfaces, nil
 }
 
-func runCompact(dbPath, olderThanStr, dedupeWindowStr string, hourlySummary, dryRun bool) error {
-	// Parse durations
-	olderThan, err := parseDuration(olderThanStr)
-	if err != nil {
-		return fmt.Errorf("invalid older-than duration: %w", err)
-	}
 
-	var dedupeWindow time.Duration
-	if dedupeWindowStr != "0" && dedupeWindowStr != "" {
-		dedupeWindow, err = time.ParseDuration(dedupeWindowStr)
-		if err != nil {
-			return fmt.Errorf("invalid dedupe-window duration: %w", err)
-		}
-	}
-
-	olderThanTime := time.Now().Add(-olderThan)
-
-	log.Info("Starting database compaction",
-		"db", dbPath,
-		"older_than", olderThanTime.Format("2006-01-02 15:04:05"),
-		"dedupe_window", dedupeWindow,
-		"hourly_summary", hourlySummary,
-		"dry_run", dryRun,
-	)
-
-	// Open database
-	db, err := database.New(dbPath)
-	if err != nil {
-		return fmt.Errorf("failed to open database: %w", err)
-	}
-	defer db.Close()
-
-	if dryRun {
-		// Show what would be compacted
-		return showCompactionPreview(db, olderThanTime, dedupeWindow, hourlySummary)
-	}
-
-	// Run compaction
-	stats, err := db.Compact(olderThanTime, dedupeWindow)
-	if err != nil {
-		return err
-	}
-
-	log.Info("Compaction complete",
-		"tcp_pairs", stats.TCPPairsCompacted,
-		"udp_pairs", stats.UDPPairsCompacted,
-		"dns_pairs", stats.DNSPairsCompacted,
-		"duplicates_removed", stats.DuplicatesRemoved,
-		"orphans_removed", stats.OrphanedEndsRemoved,
-		"total_removed", stats.TotalEventsRemoved,
-		"total_created", stats.TotalEventsCreated,
-	)
-
-	// Optionally create hourly summaries
-	if hourlySummary {
-		summaryCount, err := db.CreateHourlySummary(olderThanTime)
-		if err != nil {
-			log.Warn("Hourly summary creation had errors", "error", err)
-		}
-		log.Info("Created hourly summaries", "count", summaryCount)
-	}
-
-	return nil
-}
-
-func showCompactionPreview(db *database.DB, olderThan time.Time, dedupeWindow time.Duration, hourlySummary bool) error {
-	// Count potential TCP pairs
-	var tcpStarts, tcpEnds int64
-	db.Model(&database.NetworkEvent{}).Where("event_type = ? AND timestamp < ?", database.EventTCPStart, olderThan).Count(&tcpStarts)
-	db.Model(&database.NetworkEvent{}).Where("event_type IN (?, ?) AND timestamp < ?", database.EventTCPEnd, database.EventTimeout, olderThan).Count(&tcpEnds)
-
-	// Count potential UDP pairs
-	var udpStarts, udpEnds int64
-	db.Model(&database.NetworkEvent{}).Where("event_type = ? AND timestamp < ?", database.EventUDPStart, olderThan).Count(&udpStarts)
-	db.Model(&database.NetworkEvent{}).Where("event_type = ? AND timestamp < ?", database.EventUDPEnd, olderThan).Count(&udpEnds)
-
-	// Count DNS events
-	var dnsQueries, dnsResponses int64
-	db.Model(&database.NetworkEvent{}).Where("event_type = ? AND dns_type = ? AND timestamp < ?", database.EventDNS, "QUERY", olderThan).Count(&dnsQueries)
-	db.Model(&database.NetworkEvent{}).Where("event_type = ? AND dns_type = ? AND timestamp < ?", database.EventDNS, "RESPONSE", olderThan).Count(&dnsResponses)
-
-	// Estimate deduplication
-	var duplicateEstimate int64
-	if dedupeWindow > 0 {
-		// Rough estimate: count DNS with same query in window
-		db.Raw(`
-			SELECT COUNT(*) FROM network_events e1
-			WHERE event_type = 'DNS' AND timestamp < ?
-			AND EXISTS (
-				SELECT 1 FROM network_events e2
-				WHERE e2.dns_query = e1.dns_query
-				AND e2.id < e1.id
-				AND e2.timestamp > datetime(e1.timestamp, '-' || ? || ' seconds')
-			)
-		`, olderThan, int(dedupeWindow.Seconds())).Scan(&duplicateEstimate)
-	}
-
-	fmt.Println("\n📊 Compaction Preview (Dry Run)")
-	fmt.Println("================================")
-	fmt.Printf("Events older than: %s\n\n", olderThan.Format("2006-01-02 15:04:05"))
-
-	fmt.Println("TCP Compaction:")
-	fmt.Printf("  - TCP_START events: %d\n", tcpStarts)
-	fmt.Printf("  - TCP_END/TIMEOUT events: %d\n", tcpEnds)
-	fmt.Printf("  - Potential pairs: ~%d\n", min(tcpStarts, tcpEnds))
-
-	fmt.Println("\nUDP Compaction:")
-	fmt.Printf("  - UDP_START events: %d\n", udpStarts)
-	fmt.Printf("  - UDP_END events: %d\n", udpEnds)
-	fmt.Printf("  - Potential pairs: ~%d\n", min(udpStarts, udpEnds))
-
-	fmt.Println("\nDNS Compaction:")
-	fmt.Printf("  - DNS QUERY events: %d\n", dnsQueries)
-	fmt.Printf("  - DNS RESPONSE events: %d\n", dnsResponses)
-	fmt.Printf("  - Potential pairs: ~%d\n", min(dnsQueries, dnsResponses))
-
-	if dedupeWindow > 0 {
-		fmt.Printf("\nDNS Deduplication (window: %s):\n", dedupeWindow)
-		fmt.Printf("  - Estimated duplicates: ~%d\n", duplicateEstimate)
-	}
-
-	if hourlySummary {
-		var distinctHours int64
-		db.Model(&database.NetworkEvent{}).
-			Select("COUNT(DISTINCT strftime('%Y-%m-%d %H', timestamp))").
-			Where("timestamp < ?", olderThan).
-			Scan(&distinctHours)
-		fmt.Printf("\nHourly Summaries:\n")
-		fmt.Printf("  - Distinct hours: %d\n", distinctHours)
-		fmt.Printf("  - ⚠️  This will aggregate all events into hourly summaries\n")
-	}
-
-	fmt.Println("\n✋ No changes made (dry run)")
-	fmt.Println("   Remove --dry-run to apply compaction")
-
-	return nil
-}
-
-func parseDuration(s string) (time.Duration, error) {
-	if strings.HasSuffix(s, "d") {
-		days := 0
-		fmt.Sscanf(s, "%dd", &days)
-		return time.Duration(days) * 24 * time.Hour, nil
-	}
-	return time.ParseDuration(s)
-}

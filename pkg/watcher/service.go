@@ -43,6 +43,17 @@ func New(dbPath string, ifaces []net.Interface, logger *log.Logger, onlyFilter, 
 	}, nil
 }
 
+// NewWithDB creates a Watcher with an existing database connection
+func NewWithDB(db *database.DB, ifaces []net.Interface, logger *log.Logger, onlyFilter, excludeFilter, excludePorts string) (*Watcher, error) {
+	return &Watcher{
+		dbPath:         "",
+		interfaces:     ifaces,
+		logger:         logger,
+		sessionManager: NewSessionManager(logger, db, onlyFilter, excludeFilter, excludePorts),
+		db:             nil, // DB managed externally, don't close it
+	}, nil
+}
+
 // Run starts the monitoring process. It blocks until the context is cancelled.
 func (w *Watcher) Run(ctx context.Context) error {
 	var wg sync.WaitGroup

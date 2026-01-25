@@ -240,6 +240,16 @@
     background: var(--border);
 }
 
+.btn-success {
+    background: var(--success);
+    color: white;
+}
+
+.btn-success:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 4px 12px rgba(16, 185, 129, 0.4);
+}
+
 /* Responsive */
 @media (max-width: 768px) {
     .filters-row {
@@ -251,4 +261,54 @@
     .filter-group-multiselect {
         min-width: 100%;
     }
+}
+
+/* Live Toggle Button */
+.filter-actions-row {
+    display: flex;
+    gap: 8px;
+}
+
+.live-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    position: relative;
+}
+
+.live-toggle.active {
+    background: var(--success) !important;
+    border-color: var(--success) !important;
+}
+
+.live-indicator {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--text-muted);
+    transition: all 0.2s ease;
+}
+
+.live-indicator.connected {
+    background: #fff;
+    box-shadow: 0 0 8px rgba(255, 255, 255, 0.5);
+    animation: pulse 2s infinite;
+}
+
+@keyframes pulse {
+    0%, 100% {
+        opacity: 1;
+    }
+    50% {
+        opacity: 0.5;
+    }
+}
+
+.live-count {
+    background: rgba(255, 255, 255, 0.2);
+    padding: 2px 6px;
+    border-radius: 10px;
+    font-size: 11px;
+    font-weight: 600;
+    margin-left: 4px;
 }

@@ -3,12 +3,21 @@
 window.NetWatcher = window.NetWatcher || {};
 window.NetWatcher.Components = window.NetWatcher.Components || {};
 
-const { UI } = NetWatcher;
+const { UI, Icons } = NetWatcher;
 
 /**
  * Filter Controls
  */
-NetWatcher.Components.Filters = function({ filters, onFiltersChange, eventTypes, isSearching }) {
+NetWatcher.Components.Filters = function({ 
+    filters, 
+    onFiltersChange, 
+    eventTypes, 
+    isSearching,
+    liveEnabled,
+    onLiveToggle,
+    liveConnected,
+    liveEventCount
+}) {
     const updateFilter = (key, value) => {
         onFiltersChange({ ...filters, [key]: value });
     };
@@ -61,9 +70,23 @@ NetWatcher.Components.Filters = function({ filters, onFiltersChange, eventTypes,
 
                 <div className="filter-group filter-group-actions">
                     <label className="filter-label">&nbsp;</label>
-                    <UI.Button variant="secondary" onClick={clearFilters}>
-                        Clear
-                    </UI.Button>
+                    <div className="filter-actions-row">
+                        <UI.Button variant="secondary" onClick={clearFilters}>
+                            Clear
+                        </UI.Button>
+                        <UI.Button 
+                            variant={liveEnabled ? "success" : "secondary"} 
+                            onClick={onLiveToggle}
+                            className={`live-toggle ${liveEnabled ? 'active' : ''}`}
+                            title={liveEnabled ? 'Live updates enabled' : 'Click to enable live updates'}
+                        >
+                            <span className={`live-indicator ${liveConnected ? 'connected' : ''}`}></span>
+                            {liveEnabled ? 'Live' : 'Live'}
+                            {liveEnabled && liveEventCount > 0 && (
+                                <span className="live-count">{liveEventCount}</span>
+                            )}
+                        </UI.Button>
+                    </div>
                 </div>
             </div>
         </div>

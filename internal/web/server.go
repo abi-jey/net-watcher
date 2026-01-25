@@ -1,11 +1,13 @@
 package web
 
 import (
+	"bufio"
 	"context"
 	"embed"
 	"encoding/json"
 	"fmt"
 	"io/fs"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -25,15 +27,21 @@ type Server struct {
 	server  *http.Server
 	logger  *log.Logger
 	version string
+	hub     *Hub
 }
 
 // NewServer creates a new web server instance
 func NewServer(db *database.DB, port int, logger *log.Logger, version string) *Server {
+	hub := NewHub(logger, db)
+	go hub.Run()
+	hub.StartPolling() // Start polling for cross-process event detection
+
 	return &Server{
 		db:      db,
 		port:    port,
 		logger:  logger,
 		version: version,
+		hub:     hub,
 	}
 }
 
@@ -48,6 +56,7 @@ func (s *Server) Start(ctx context.Context) error {
 	mux.HandleFunc("/api/version", s.handleVersion)
 	mux.HandleFunc("/api/top-hosts", s.handleTopHosts)
 	mux.HandleFunc("/api/traffic-timeline", s.handleTrafficTimeline)
+	mux.HandleFunc("/api/ws", s.hub.ServeWs)
 
 	// Serve static files (React app)
 	staticFS, err := fs.Sub(staticFiles, "static")
@@ -128,6 +137,14 @@ type loggingResponseWriter struct {
 func (lrw *loggingResponseWriter) WriteHeader(code int) {
 	lrw.statusCode = code
 	lrw.ResponseWriter.WriteHeader(code)
+}
+
+// Hijack implements http.Hijacker for WebSocket support
+func (lrw *loggingResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	if hijacker, ok := lrw.ResponseWriter.(http.Hijacker); ok {
+		return hijacker.Hijack()
+	}
+	return nil, nil, fmt.Errorf("ResponseWriter does not implement http.Hijacker")
 }
 
 // EventsResponse represents the paginated events response
@@ -351,7 +368,7 @@ func (s *Server) handleTopHosts(w http.ResponseWriter, r *http.Request) {
 	if metric == "traffic" {
 		// Order by total bytes
 		s.db.Model(&database.NetworkEvent{}).
-			Select(groupColumn+" as host, count(*) as event_count, COALESCE(sum(byte_count), 0) as byte_count").
+			Select(groupColumn + " as host, count(*) as event_count, COALESCE(sum(byte_count), 0) as byte_count").
 			Where(groupColumn + " != '' AND " + groupColumn + " IS NOT NULL").
 			Group(groupColumn).
 			Order("byte_count DESC").
@@ -360,7 +377,7 @@ func (s *Server) handleTopHosts(w http.ResponseWriter, r *http.Request) {
 	} else {
 		// Order by event count
 		s.db.Model(&database.NetworkEvent{}).
-			Select(groupColumn+" as host, count(*) as event_count, COALESCE(sum(byte_count), 0) as byte_count").
+			Select(groupColumn + " as host, count(*) as event_count, COALESCE(sum(byte_count), 0) as byte_count").
 			Where(groupColumn + " != '' AND " + groupColumn + " IS NOT NULL").
 			Group(groupColumn).
 			Order("event_count DESC").
