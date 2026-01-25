@@ -78,7 +78,7 @@ func (s *Server) Start(ctx context.Context) error {
 		<-ctx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		s.server.Shutdown(shutdownCtx)
+		_ = s.server.Shutdown(shutdownCtx)
 	}()
 
 	if err := s.server.ListenAndServe(); err != http.ErrServerClosed {
@@ -245,7 +245,7 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(response)
+	_ = json.NewEncoder(w).Encode(response)
 }
 
 // handleStats returns database statistics
@@ -287,7 +287,7 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(response)
+	_ = json.NewEncoder(w).Encode(response)
 }
 
 // handleEventTypes returns available event types
@@ -298,7 +298,7 @@ func (s *Server) handleEventTypes(w http.ResponseWriter, r *http.Request) {
 		Pluck("event_type", &types)
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(types)
+	_ = json.NewEncoder(w).Encode(types)
 }
 
 // VersionResponse represents version information

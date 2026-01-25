@@ -20,10 +20,10 @@ import (
 // Build information (will be overridden by build flags)
 var (
 	version   = "1.0.0-dev"
-	buildTime = "unknown"
-	commitSHA = "unknown"
-	goVersion = runtime.Version()
-	builder   = "unknown"
+	buildTime = "unknown" //nolint:unused // Set by ldflags
+	commitSHA = "unknown" //nolint:unused // Set by ldflags
+	goVersion = runtime.Version() //nolint:unused // Set by ldflags
+	builder   = "unknown" //nolint:unused // Set by ldflags
 )
 
 func printUsage() {
@@ -69,7 +69,7 @@ func main() {
 		excludePorts := startCmd.String("exclude-ports", "", "Comma-separated list of ports to exclude")
 		enableWeb := startCmd.Bool("web", true, "Enable web UI server")
 		webPort := startCmd.Int("web-port", 8920, "Port for web UI server")
-		startCmd.Parse(os.Args[2:])
+		_ = startCmd.Parse(os.Args[2:])
 
 		if *debug {
 			logger.SetLevel(log.DebugLevel)

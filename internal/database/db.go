@@ -29,9 +29,9 @@ func New(dbPath string) (*DB, error) {
 	if err != nil {
 		return nil, err
 	}
-	sqlDB.Exec("PRAGMA journal_mode=WAL")
-	sqlDB.Exec("PRAGMA synchronous=NORMAL")
-	sqlDB.Exec("PRAGMA cache_size=2000")
+	_, _ = sqlDB.Exec("PRAGMA journal_mode=WAL")
+	_, _ = sqlDB.Exec("PRAGMA synchronous=NORMAL")
+	_, _ = sqlDB.Exec("PRAGMA cache_size=2000")
 
 	if err := db.AutoMigrate(&NetworkEvent{}); err != nil {
 		return nil, err

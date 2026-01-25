@@ -60,8 +60,7 @@ type SessionManager struct {
 	exclusions   map[string]bool
 	excludePorts map[uint16]bool
 	// Track recent rejected UDP to combine with ICMP unreachable
-	recentUDPRejects     map[string]time.Time
-	recentUDPRejectMutex sync.RWMutex
+	recentUDPRejects map[string]time.Time
 	// DNS cache: IP -> hostname + timestamp
 	dnsCache      map[string]*DNSCacheEntry
 	dnsCacheMutex sync.RWMutex
@@ -841,7 +840,7 @@ func parseAddr(addr string) (string, uint16) {
 		return addr, 0
 	}
 	var port uint16
-	fmt.Sscanf(portStr, "%d", &port)
+	_, _ = fmt.Sscanf(portStr, "%d", &port)
 	return host, port
 }
 
