@@ -53,7 +53,6 @@ func NewHub(logger *log.Logger, db *database.DB) *Hub {
 		pollInterval: 2 * time.Second,
 		stopChan:     make(chan struct{}),
 	}
-	globalHub = hub
 	// Register as the global event publisher
 	database.SetEventPublisher(hub)
 
