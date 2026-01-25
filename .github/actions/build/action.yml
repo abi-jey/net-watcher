@@ -1,0 +1,45 @@
+name: Build Binaries
+description: Build net-watcher binaries for linux/amd64 and linux/arm64
+
+inputs:
+  version:
+    description: Version string
+    required: true
+  commit_sha:
+    description: Commit SHA
+    required: true
+  build_time:
+    description: Build timestamp
+    required: false
+    default: ''
+
+outputs:
+  artifacts_path:
+    description: Path to built artifacts
+    value: dist
+
+runs:
+  using: composite
+  steps:
+    - name: Install cross-compiler
+      shell: bash
+      run: sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
+
+    - name: Build binaries
+      shell: bash
+      env:
+        VERSION: ${{ inputs.version }}
+        COMMIT_SHA: ${{ inputs.commit_sha }}
+        BUILD_TIME: ${{ inputs.build_time }}
+      run: |
+        mkdir -p dist
+        LDFLAGS="-s -w -X main.version=$VERSION -X main.buildTime=$BUILD_TIME -X main.commitSHA=$COMMIT_SHA -X main.builder=GitHub-Actions"
+        
+        echo "Building linux/amd64..."
+        CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -ldflags="$LDFLAGS" -o dist/net-watcher-linux-amd64 .
+        
+        echo "Building linux/arm64..."
+        CGO_ENABLED=1 GOOS=linux GOARCH=arm64 CC=aarch64-linux-gnu-gcc go build -ldflags="$LDFLAGS" -o dist/net-watcher-linux-arm64 .
+        
+        cd dist && sha256sum net-watcher-* > checksums.sha256
+        echo "Built:" && ls -la

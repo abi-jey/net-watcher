@@ -1,0 +1,41 @@
+name: Determine Version
+description: Determine version string from git ref
+
+inputs:
+  ref_name:
+    description: Branch or tag name
+    required: true
+  sha:
+    description: Commit SHA
+    required: true
+
+outputs:
+  version:
+    description: Version string
+    value: ${{ steps.calc.outputs.version }}
+  prerelease:
+    description: Is prerelease
+    value: ${{ steps.calc.outputs.prerelease }}
+
+runs:
+  using: composite
+  steps:
+    - name: Calculate version
+      id: calc
+      shell: bash
+      run: |
+        BRANCH="${{ inputs.ref_name }}"
+        COMMIT_SHORT="${{ inputs.sha }}"
+        COMMIT_SHORT="${COMMIT_SHORT:0:7}"
+        
+        case "$BRANCH" in
+          main)      VERSION="latest"; PRERELEASE=true ;;
+          alpha)     VERSION="alpha-${COMMIT_SHORT}"; PRERELEASE=true ;;
+          beta)      VERSION="beta-${COMMIT_SHORT}"; PRERELEASE=true ;;
+          v*.*.*)    VERSION="$BRANCH"; PRERELEASE=false ;;
+          *)         VERSION="${BRANCH}-${COMMIT_SHORT}"; PRERELEASE=true ;;
+        esac
+        
+        echo "version=$VERSION" >> $GITHUB_OUTPUT
+        echo "prerelease=$PRERELEASE" >> $GITHUB_OUTPUT
+        echo "Version: $VERSION (prerelease: $PRERELEASE)"
