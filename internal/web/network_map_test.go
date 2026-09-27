@@ -86,3 +86,33 @@ func TestMapSeparatesDNSProofFromSNIAndUnknownConnections(t *testing.T) {
 		t.Fatal(r.Body.String())
 	}
 }
+
+func TestMapDistinguishesKubernetesOwnershipFromAddressScope(t *testing.T) {
+	owned, err := ParseOwnedCIDRs("192.168.1.80/32,203.0.113.5/32")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		ip, context, scope, ownership, source, label string
+	}{
+		{"10.0.1.155", `{"Kind":"node","Name":"abja","UID":"node-1"}`, "internal", "ours", "kubernetes", "abja"},
+		{"10.2.0.8", `{"Kind":"pod","Namespace":"demo","Name":"worker","UID":"pod-1"}`, "internal", "ours", "kubernetes", "demo/worker"},
+		{"203.0.113.8", `{"Kind":"service","Namespace":"demo","Name":"public","UID":"svc-1"}`, "external", "ours", "kubernetes", "demo/public"},
+		{"192.168.1.80", "", "internal", "ours", "configured", "192.168.1.80"},
+		{"203.0.113.5", "", "external", "ours", "configured", "203.0.113.5"},
+		{"192.168.1.81", "", "internal", "unattributed", "", "192.168.1.81"},
+		{"100.88.1.4", "", "internal", "unattributed", "", "100.88.1.4"},
+		{"fd00::1", "", "internal", "unattributed", "", "fd00::1"},
+		{"8.8.8.8", "", "external", "unattributed", "", "8.8.8.8"},
+	} {
+		node := networkNode(tc.ip, tc.context, owned)
+		if node.Scope != tc.scope || node.Ownership != tc.ownership || node.OwnershipSource != tc.source || node.Label != tc.label {
+			t.Errorf("%s classified as %+v, want scope=%s ownership=%s source=%s label=%s", tc.ip, node, tc.scope, tc.ownership, tc.source, tc.label)
+		}
+	}
+	for _, value := range []string{"not-a-network", "10.0.0.0/16,"} {
+		if _, err := ParseOwnedCIDRs(value); err == nil {
+			t.Fatalf("invalid owned CIDR accepted: %q", value)
+		}
+	}
+}

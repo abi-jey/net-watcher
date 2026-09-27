@@ -13,6 +13,9 @@
 .map-node { cursor: grab; outline: none; }
 .map-node rect { fill: #1e293b; stroke: #64748b; stroke-width: 1.5; }
 .map-node.pod rect, .map-node.service rect, .map-node.node rect { stroke: #818cf8; }
+.map-node.owned rect { fill: #15372f; stroke: #34d399; stroke-width: 2.5; }
+.map-node.internal rect { stroke: #60a5fa; }
+.map-node.external rect { stroke: #fb923c; }
 .map-node.dns rect { stroke: #34d399; fill: #12332f; }
 .map-node.selected rect, .map-node:focus rect { stroke: #f8fafc; stroke-width: 3; }
 .map-node-kind { fill: #a6b5cb; font-size: 10px; letter-spacing: .8px; }
@@ -42,6 +45,10 @@
 .events-table-wrapper .map-evidence pre { overflow: auto; }
 .map-evidence .map-proof { display: block; margin-bottom: 12px; }
 .map-legend { display: flex; flex-wrap: wrap; gap: 15px; padding: 12px; font-size: 11px; color: #a6b5cb; background: var(--bg-dark); }
+.map-legend-owned { color: #34d399; }
+.map-legend-internal { color: #60a5fa; }
+.map-legend-external { color: #fb923c; }
+.map-host-mark { display: inline-block; margin-left: 5px; color: #a6b5cb; font-size: 11px; }
 .map-empty { position: absolute; top: 45%; left: 10%; right: 10%; text-align: center; color: var(--text-secondary); pointer-events: none; }
 .map-warning { color: #fcd34d; border: 1px solid #854d0e; padding: 10px; margin-bottom: 12px; border-radius: 7px; font-size: 13px; }
 .map-note { font-size: 12px; line-height: 1.6; color: var(--text-secondary); margin: 14px 0; }

@@ -3,6 +3,7 @@
     const { Topology, CONFIG, Utils } = NetWatcher;
     const empty = { Nodes: [], Links: [], Evidence: [], Namespaces: [], Kubernetes: {} };
     const date = value => value && !value.startsWith('0001-') ? new Date(value).toLocaleString() : '—';
+    const hostMark = node => !node ? 'Unknown' : node.Kind === 'dns' ? 'DNS evidence' : node.Ownership === 'ours' ? `Ours · ${node.Scope}` : `${node.Scope} · unattributed`;
 
     function Evidence({ ids }) {
         const [records, setRecords] = useState([]);
@@ -62,7 +63,8 @@
             <button className="map-close" onClick={onClose}>Close details</button>
             <h2>{node ? node.Label : link.Kind === 'connection' ? `${link.Protocol} connection` : 'DNS relationship'}</h2>
             {node && <><dl>
-                <dt>Kind</dt><dd>{node.Kind}</dd><dt>Address</dt><dd>{node.IP || 'DNS name'}</dd><dt>Scope</dt><dd>{node.Scope}</dd>
+                <dt>Kind</dt><dd>{node.Kind}</dd><dt>Address</dt><dd>{node.IP || 'DNS name'}</dd>
+                {node.Kind !== 'dns' && <><dt>Network</dt><dd>{node.Scope}</dd><dt>Ownership</dt><dd>{node.Ownership === 'ours' ? node.OwnershipSource === 'configured' ? 'Ours · configured address' : 'Ours · Kubernetes inventory' : 'Unattributed · ownership unknown'}</dd></>}
                 {node.Context?.Namespace && <><dt>Namespace</dt><dd>{node.Context.Namespace}</dd></>}
                 {node.Context?.Node && <><dt>Node</dt><dd>{node.Context.Node}</dd></>}
                 {node.Context?.UID && <><dt>Resource UID</dt><dd>{node.Context.UID}</dd></>}
@@ -74,7 +76,8 @@
                 <p>Inventory membership, not proof that this connection traversed a Service VIP.</p>
             </section>}</>}
             {link && <><dl>
-                <dt>Source</dt><dd>{source?.Label}</dd><dt>Destination</dt><dd>{target?.Label}</dd>
+                <dt>Source</dt><dd>{source?.Label} <span className="map-host-mark">{hostMark(source)}</span></dd>
+                <dt>Destination</dt><dd>{target?.Label} <span className="map-host-mark">{hostMark(target)}</span></dd>
                 <dt>{link.Kind === 'connection' ? 'Protocol / port' : 'DNS transport / resolver port'}</dt><dd>{link.Protocol} / {link.Port || '—'}</dd>
                 <dt>Interface</dt><dd>{link.Interface || 'See evidence'}</dd>
                 <dt>Observations</dt><dd>{link.Events}</dd><dt>Recorded bytes</dt><dd>{Utils.formatBytes(link.Bytes)}</dd>
@@ -153,6 +156,7 @@
         };
         const names = [...new Set([namespace, ...(data.Namespaces || [])].filter(Boolean))].sort();
         const nodeIndex = useMemo(() => new Map(data.Nodes.map(node => [node.ID, node])), [data]);
+        const hostCounts = data.Nodes.reduce((counts, node) => { if (node.Kind !== 'dns') counts[node.Ownership === 'ours' ? 'ours' : node.Scope] = (counts[node.Ownership === 'ours' ? 'ours' : node.Scope] || 0) + 1; return counts; }, { ours: 0, internal: 0, external: 0 });
         const activate = (event, id) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); setSelection(id); } };
         return <>
             <header className="header"><div className="header-content"><div><h1>Network map</h1><p>Observed connections, Kubernetes context and DNS evidence</p></div></div></header>
@@ -168,7 +172,8 @@
                 </div>
                 <div className="map-status" role="status">
                     {loading ? 'Refreshing…' : `${data.Nodes.length} nodes · ${data.Links.length} relationships · ${data.Observations || 0} connection observations`}
-                    <span>{data.Kubernetes?.Enabled ? `Kubernetes inventory: ${data.Kubernetes.Error ? 'unavailable/stale' : data.Kubernetes.LastSync ? 'synced' : 'waiting'}` : 'Kubernetes enrichment disabled'}</span>
+                    <span>{hostCounts.ours} ours · {hostCounts.internal} internal/unattributed · {hostCounts.external} external/unattributed</span>
+                    <span>{data.Kubernetes?.Enabled ? `Kubernetes inventory: ${data.Kubernetes.Error ? 'unavailable/stale' : data.Kubernetes.LastSync ? 'synced' : 'waiting'}` : hostCounts.ours ? 'Ownership: captured inventory / configured addresses' : 'Kubernetes enrichment unavailable'}</span>
                 </div>
                 {error && <div className="map-warning" role="alert">Refresh failed: {error}. The canvas may show an earlier snapshot.</div>}
                 {data.Truncated && <div className="map-warning">This is a bounded sample (up to 250 nodes). Narrow the time window or filter by IP to inspect additional activity.</div>}
@@ -190,9 +195,9 @@
                                 })}
                                 {data.Nodes.map(node => {
                                     const p = positions[node.ID]; if (!p) return null;
-                                    return <g key={node.ID} transform={`translate(${p.x},${p.y})`} className={`map-node ${node.Kind} ${selection === node.ID ? 'selected' : ''}`} role="button" tabIndex="0" aria-label={`${node.Kind}: ${node.Label}`} onKeyDown={event => activate(event, node.ID)} onPointerDown={event => startDrag(event, node.ID)}>
-                                        <title>{node.Label}{node.IP ? ` (${node.IP})` : ''}</title><rect width="250" height="78" rx="12" />
-                                        <text x="14" y="20" className="map-node-kind">{node.Kind.toUpperCase()} · {node.Scope}</text>
+                                    return <g key={node.ID} transform={`translate(${p.x},${p.y})`} className={`map-node ${node.Kind} ${node.Ownership === 'ours' ? 'owned' : node.Scope} ${selection === node.ID ? 'selected' : ''}`} role="button" tabIndex="0" aria-label={`${node.Kind}: ${node.Label}, ${hostMark(node)}`} onKeyDown={event => activate(event, node.ID)} onPointerDown={event => startDrag(event, node.ID)}>
+                                        <title>{node.Label}{node.IP ? ` (${node.IP})` : ''} · {hostMark(node)}</title><rect width="250" height="78" rx="12" />
+                                        <text x="14" y="20" className="map-node-kind">{node.Kind.toUpperCase()} · {hostMark(node).toUpperCase()}</text>
                                         <text x="14" y="43" className="map-node-title">{Topology.short(node.Label)}</text>
                                         <text x="14" y="63" className="map-node-address">{node.IP || 'Client-scoped DNS observation'}</text>
                                     </g>;
@@ -200,11 +205,11 @@
                             </g>
                         </svg>
                         {!data.Nodes.length && <div className="map-empty">{loading ? 'Loading network observations…' : 'No observations in this window. Start capture or widen the filters.'}</div>}
-                        <div className="map-legend"><span>━━ Connection observations</span><span className="map-proof">┄┄ Matched DNS evidence</span><span>Drag · pan · scroll to zoom</span></div>
+                        <div className="map-legend"><span className="map-legend-owned">● Our identified hosts</span><span className="map-legend-internal">● Internal · unattributed</span><span className="map-legend-external">● External · unattributed</span><span>━━ Connection observations</span><span className="map-proof">┄┄ Matched DNS evidence</span><span>Drag · pan · scroll to zoom</span></div>
                     </div>
                     <Inspector selection={selection} data={data} onClose={() => setSelection('')} />
                 </div>
-                <p className="map-note">The map shows capture observations, not firewall verdicts. Multiple interfaces may observe the same traffic. Kubernetes labels are inventory snapshots; NAT paths and hidden/encrypted DNS are not inferred.</p>
+                <p className="map-note">“Ours” means a pod, Service, or node identified by Kubernetes inventory, or an address explicitly configured as owned. “Internal” includes private, link-local, and Tailscale-range addresses; unattributed does not mean someone else owns them. The map shows capture observations, not firewall verdicts. Multiple interfaces may observe the same traffic. Kubernetes labels are inventory snapshots; NAT paths and hidden/encrypted DNS are not inferred.</p>
                 <details className="map-relationships"><summary>Connection list ({data.Links.filter(link => link.Kind === 'connection').length})</summary>
                     {data.Links.filter(link => link.Kind === 'connection').map(link => <button key={link.ID} onClick={() => setSelection(link.ID)}>{nodeIndex.get(link.Source)?.Label} → {nodeIndex.get(link.Target)?.Label} · {link.Protocol}/{link.Port} · {Topology.evidenceLabel(link)}</button>)}
                 </details>

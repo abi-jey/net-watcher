@@ -37,6 +37,7 @@ type Object struct {
 		ClusterIP   string
 		ClusterIPs  []string
 		ExternalIPs []string
+		Addresses   []struct{ Type, IP string }
 		Ports       []Port
 	}
 	Status struct {
@@ -79,6 +80,19 @@ func (s KubectlSource) List(ctx context.Context) ([]Object, error) {
 	if err := json.Unmarshal(body, &list); err != nil {
 		return nil, err
 	}
+	// Cilium host addresses are not always present in Node.status.addresses.
+	// The CRD is optional so ordinary Kubernetes discovery still works without it.
+	command = exec.CommandContext(ctx, "kubectl", "--context", s.Context, "--request-timeout=10s", "get", "ciliumnodes.cilium.io", "-o", "json")
+	if body, err := command.Output(); err == nil {
+		var cilium List
+		if err := json.Unmarshal(body, &cilium); err != nil {
+			return nil, err
+		}
+		for _, item := range cilium.Items {
+			item.Kind = "CiliumNode"
+			list.Items = append(list.Items, item)
+		}
+	}
 	return list.Items, nil
 }
 
@@ -108,7 +122,17 @@ func InClusterSource() (Source, error) {
 }
 
 func (s *clusterSource) List(ctx context.Context) ([]Object, error) {
-	resources := []struct{ path, kind string }{{"/api/v1/pods", "Pod"}, {"/api/v1/services", "Service"}, {"/api/v1/nodes", "Node"}, {"/apis/apps/v1/replicasets", "ReplicaSet"}, {"/apis/discovery.k8s.io/v1/endpointslices", "EndpointSlice"}}
+	resources := []struct {
+		path, kind string
+		optional   bool
+	}{
+		{path: "/api/v1/pods", kind: "Pod"},
+		{path: "/api/v1/services", kind: "Service"},
+		{path: "/api/v1/nodes", kind: "Node"},
+		{path: "/apis/apps/v1/replicasets", kind: "ReplicaSet"},
+		{path: "/apis/discovery.k8s.io/v1/endpointslices", kind: "EndpointSlice"},
+		{path: "/apis/cilium.io/v2/ciliumnodes", kind: "CiliumNode", optional: true},
+	}
 	var result []Object
 	for _, resource := range resources {
 		next := ""
@@ -132,6 +156,9 @@ func (s *clusterSource) List(ctx context.Context) ([]Object, error) {
 			}
 			if response.StatusCode != http.StatusOK {
 				response.Body.Close()
+				if resource.optional && (response.StatusCode == http.StatusForbidden || response.StatusCode == http.StatusNotFound) {
+					break
+				}
 				return nil, fmt.Errorf("Kubernetes %s: HTTP %d", resource.kind, response.StatusCode)
 			}
 			var list List
@@ -280,12 +307,29 @@ func (i *Index) Replace(objects []Object, at time.Time) {
 		}
 	}
 	// Node addresses take precedence over host-network/service aliases sharing them.
+	nodesByName := make(map[string]Endpoint)
 	for _, object := range objects {
 		if object.Kind == "Node" {
+			endpoint := Endpoint{Kind: "node", Name: object.Metadata.Name, UID: object.Metadata.UID, Node: object.Metadata.Name, ObservedAt: at}
+			nodesByName[object.Metadata.Name] = endpoint
 			for _, address := range object.Status.Addresses {
 				if net.ParseIP(address.Address) != nil {
-					endpoints[address.Address] = Endpoint{Kind: "node", Name: object.Metadata.Name, UID: object.Metadata.UID, Node: object.Metadata.Name, ObservedAt: at}
+					endpoints[address.Address] = endpoint
 				}
+			}
+		}
+	}
+	for _, object := range objects {
+		if object.Kind != "CiliumNode" {
+			continue
+		}
+		endpoint, known := nodesByName[object.Metadata.Name]
+		if !known {
+			continue
+		}
+		for _, address := range object.Spec.Addresses {
+			if address.Type == "CiliumInternalIP" && net.ParseIP(address.IP) != nil {
+				endpoints[address.IP] = endpoint
 			}
 		}
 	}

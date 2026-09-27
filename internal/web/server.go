@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"net"
 	"net/http"
+	"net/netip"
 	"strconv"
 	"strings"
 	"time"
@@ -31,6 +32,7 @@ type Server struct {
 	hub        *Hub
 	Host       string
 	Kubernetes *kube.Index
+	OwnedCIDRs []netip.Prefix
 }
 
 // NewServer creates a new web server instance

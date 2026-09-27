@@ -6,8 +6,9 @@ separate SQLite database at `/var/lib/net-watcher/netwatcher.db` on that node.
 This is not a cluster-wide aggregate view.
 
 The supplied ServiceAccount has only `list` access to the resources used for
-Kubernetes enrichment. The collector runs as a non-root user with only
-`CAP_NET_RAW`; the short init container owns its local data directory. It uses
+Kubernetes enrichment (including optional CiliumNode host addresses). This
+standalone collector runs as a non-root user with only `CAP_NET_RAW`; the short
+init container owns its local data directory. It uses
 host networking so AF_PACKET can observe node interfaces. No Service or Ingress
 is supplied because the UI does not include authentication.
 
@@ -96,6 +97,13 @@ kubectl -n net-watcher port-forward deployment/net-watcher-ingest 8920:8920
 Open `https://net-watcher.tailfb4030.ts.net/#map` for the combined map. Keep
 the generated Secret, image digest override, and any environment-specific patch
 below `.local/`; that directory is ignored by Git.
+
+The map marks observed Kubernetes pods, Services, and nodes (including Cilium
+host addresses when the optional CiliumNode inventory is available) as **Ours**.
+The ingester can also mark operator-owned LAN or public IP ranges that are not
+in Kubernetes with `--owned-cidrs=192.0.2.10/32,2001:db8::/48`. Set these in
+your local ingester overlay; other private addresses remain **Internal ·
+unattributed** rather than being assumed to belong to you.
 
 The collector runs as UID 0 with every capability dropped except `CAP_NET_RAW`,
 because this CRI-O configuration does not retain an added effective capability

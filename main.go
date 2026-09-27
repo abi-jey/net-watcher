@@ -49,6 +49,7 @@ FLAGS:
     --traffic-exclude    Exclude traffic types (multicast,broadcast,etc)
     --kubernetes         Enrich with read-only Kubernetes inventory; include pod interfaces
     --kube-context       Explicit kubectl context (otherwise use in-cluster identity)
+    --owned-cidrs        Comma-separated operator-owned IP ranges for map labels
     --include-virtual    Include bridge/veth interfaces during automatic discovery
     --db                 SQLite database path (default: netwatcher.db)
     --max-db-size-gb     Maximum central/standalone SQLite size in GiB (default: 10)
@@ -92,6 +93,7 @@ func main() {
 		capture := startCmd.Bool("capture", true, "Capture packets; disable to view stored data")
 		kubernetes := startCmd.Bool("kubernetes", false, "Enable read-only Kubernetes inventory")
 		kubeContext := startCmd.String("kube-context", "", "Explicit kubectl context for inventory")
+		ownedCIDRs := startCmd.String("owned-cidrs", "", "Comma-separated operator-owned CIDRs for network map classification")
 		includeVirtual := startCmd.Bool("include-virtual", false, "Include bridge/veth interfaces")
 		ingestURL := startCmd.String("ingest-url", "", "Authenticated central ingestion base URL for this collector")
 		ingestToken := startCmd.String("ingest-token", "", "Bearer token for central ingestion")
@@ -106,13 +108,17 @@ func main() {
 			log.Error("--storage-check-interval must be at least 10m")
 			os.Exit(1)
 		}
+		ownedPrefixes, err := web.ParseOwnedCIDRs(*ownedCIDRs)
+		if err != nil {
+			log.Error("Invalid --owned-cidrs", "error", err)
+			os.Exit(1)
+		}
 		*kubernetes = *kubernetes || *kubeContext != ""
 
 		if *debug {
 			logger.SetLevel(log.DebugLevel)
 		}
 		var interfacesToMonitor []net.Interface
-		var err error
 
 		// Load specified interfaces if provided
 		if *capture {
@@ -218,6 +224,7 @@ func main() {
 			server := web.NewServer(db, *webPort, logger, version)
 			server.Host = *webHost
 			server.Kubernetes = inventory
+			server.OwnedCIDRs = ownedPrefixes
 			go func() {
 				if err := server.Start(ctx); err != nil {
 					log.Error("Web server error", "error", err)

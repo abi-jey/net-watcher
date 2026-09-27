@@ -10,6 +10,17 @@ query/answer relationship. Neither edge style represents a firewall allow/deny
 decision. Multiple capture interfaces can observe the same traffic; observation
 counts are not exact unique-connection counts.
 
+Node colors and labels distinguish **Ours**, **Internal · unattributed**, and
+**External · unattributed**. “Ours” requires a captured Kubernetes pod, Service,
+or node identity, or an explicitly configured address; it does not follow merely
+from a private IP. “Internal” includes private, link-local and shared
+Tailscale-range addresses. An unattributed address
+may still be yours; the map does not claim ownership from its address range.
+Ownership and network scope are separate, so a Kubernetes-owned external address
+can be both **Ours** and **External** in the inspector. Add LAN or public addresses
+that you own to the web instance with `--owned-cidrs=192.0.2.10/32,2001:db8::/48`.
+These optional ranges only change map labels; they do not rewrite stored events.
+
 ## Running
 
 Build using the repository Makefile. The current CLI command is `start`.
@@ -58,14 +69,15 @@ Inventory discovery requires **list** access to:
 | Core | pods, services, nodes |
 | apps | replicasets |
 | discovery.k8s.io | endpointslices |
+| cilium.io (optional) | ciliumnodes |
 
 See `examples/kubernetes-reader-rbac.yaml` for an optional least-privilege reader
 role and service account. Apply it only as part of your chosen deployment. A pod
 running the capture process must see the node interfaces (for example, a node-local
 collector with `hostNetwork: true` and `CAP_NET_RAW`). Kubernetes discovery alone
 does not provide packets from other nodes: deploy capture on each relevant node or
-inspect that node's collector separately. This version does not aggregate databases
-from multiple collectors.
+inspect that node's collector separately. The distributed deployment aggregates
+collector observations in the central ingester.
 
 Discovery refreshes every 30 seconds and is published as a complete snapshot.
 Metadata older than 90 seconds is no longer attached to new events. Failed discovery
@@ -77,7 +89,9 @@ Enrichment includes:
   ReplicaSet → Deployment ownership).
 - IPv4/IPv6 pod addresses and Service VIPs.
 - EndpointSlice membership associated with the actual backend port/protocol.
-- Node addresses and possible NodePort service membership.
+- Node addresses, optional Cilium internal/host addresses, and possible NodePort
+  service membership. CiliumNode metadata is matched to a Kubernetes Node by name;
+  missing or unreadable Cilium CRDs do not disable ordinary discovery.
 - Host-network traffic identified as the node, rather than arbitrarily assigning
   the shared address to a particular host-network pod.
 

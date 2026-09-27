@@ -15,8 +15,8 @@ import (
 )
 
 type MapNode struct {
-	ID, Label, IP, Kind, Scope string
-	Context                    kube.Endpoint
+	ID, Label, IP, Kind, Scope, Ownership, OwnershipSource string
+	Context                                                kube.Endpoint
 }
 type MapLink struct {
 	ID, Source, Target, Kind, Protocol, Interface, CollectorID string
@@ -44,16 +44,46 @@ func endpointContext(raw string) kube.Endpoint {
 	return result
 }
 
-func networkNode(ip, context string) MapNode {
+// ParseOwnedCIDRs validates operator-declared addresses without inferring
+// ownership from private or shared IP space.
+func ParseOwnedCIDRs(value string) ([]netip.Prefix, error) {
+	if strings.TrimSpace(value) == "" {
+		return nil, nil
+	}
+	var prefixes []netip.Prefix
+	for _, item := range strings.Split(value, ",") {
+		prefix, err := netip.ParsePrefix(strings.TrimSpace(item))
+		if err != nil {
+			return nil, fmt.Errorf("invalid owned CIDR %q: %w", item, err)
+		}
+		prefixes = append(prefixes, prefix.Masked())
+	}
+	return prefixes, nil
+}
+
+func networkNode(ip, context string, owned []netip.Prefix) MapNode {
 	info := endpointContext(context)
-	result := MapNode{ID: "ip:" + ip, IP: ip, Label: ip, Kind: "ip", Scope: "external", Context: info}
+	result := MapNode{ID: "ip:" + ip, IP: ip, Label: ip, Kind: "ip", Scope: "external", Ownership: "unattributed", Context: info}
 	if address, err := netip.ParseAddr(ip); err == nil {
+		address = address.Unmap()
 		if address.IsPrivate() || address.IsLoopback() || address.IsLinkLocalUnicast() || netip.MustParsePrefix("100.64.0.0/10").Contains(address) {
 			result.Scope = "internal"
 		}
+		for _, prefix := range owned {
+			if prefix.Contains(address) {
+				result.Ownership, result.OwnershipSource = "ours", "configured"
+				break
+			}
+		}
+	} else {
+		result.Scope = "unknown"
 	}
 	if info.Kind != "" {
-		result.Kind, result.Scope = info.Kind, "cluster"
+		result.Kind = info.Kind
+		switch info.Kind {
+		case "pod", "service", "node":
+			result.Ownership, result.OwnershipSource = "ours", "kubernetes"
+		}
 		if info.Name != "" {
 			result.Label = info.Name
 			if info.Namespace != "" {
@@ -166,7 +196,7 @@ func (s *Server) handleNetworkMap(w http.ResponseWriter, r *http.Request) {
 		if event.SrcIP == "" || event.DstIP == "" {
 			continue
 		}
-		src, dst := networkNode(event.SrcIP, event.SourceContext), networkNode(event.DstIP, event.DestinationContext)
+		src, dst := networkNode(event.SrcIP, event.SourceContext, s.OwnedCIDRs), networkNode(event.DstIP, event.DestinationContext, s.OwnedCIDRs)
 		if src.Context.Namespace != "" {
 			namespaces[src.Context.Namespace] = true
 		}
@@ -220,7 +250,7 @@ func (s *Server) handleNetworkMap(w http.ResponseWriter, r *http.Request) {
 		response.Observations++
 	}
 	for _, record := range evidence {
-		client := networkNode(record.ClientIP, record.ClientContext)
+		client := networkNode(record.ClientIP, record.ClientContext, s.OwnedCIDRs)
 		if client.Context.Namespace != "" {
 			namespaces[client.Context.Namespace] = true
 		}
@@ -228,7 +258,7 @@ func (s *Server) handleNetworkMap(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		domain := MapNode{ID: "dns:" + client.ID + ":" + record.ResolverIP + ":" + record.Name, Label: record.Name, Kind: "dns", Scope: "dns"}
-		address := networkNode(record.IP, record.AddressContext)
+		address := networkNode(record.IP, record.AddressContext, s.OwnedCIDRs)
 		// Reuse an observed destination only if its incarnation is unambiguous.
 		var candidates []MapNode
 		for _, node := range nodes {
