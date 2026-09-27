@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/abja/net-watcher/internal/database"
+	"github.com/abja/net-watcher/internal/kube"
 	"github.com/charmbracelet/log"
 )
 
@@ -22,12 +23,14 @@ var staticFiles embed.FS
 
 // Server represents the web server
 type Server struct {
-	db      *database.DB
-	port    int
-	server  *http.Server
-	logger  *log.Logger
-	version string
-	hub     *Hub
+	db         *database.DB
+	port       int
+	server     *http.Server
+	logger     *log.Logger
+	version    string
+	hub        *Hub
+	Host       string
+	Kubernetes *kube.Index
 }
 
 // NewServer creates a new web server instance
@@ -37,11 +40,12 @@ func NewServer(db *database.DB, port int, logger *log.Logger, version string) *S
 	hub.StartPolling() // Start polling for cross-process event detection
 
 	return &Server{
-		db:      db,
-		port:    port,
-		logger:  logger,
-		version: version,
-		hub:     hub,
+		db:         db,
+		port:       port,
+		logger:     logger,
+		version:    version,
+		hub:        hub,
+		Kubernetes: kube.New(nil),
 	}
 }
 
@@ -57,6 +61,8 @@ func (s *Server) Start(ctx context.Context) error {
 	mux.HandleFunc("/api/top-hosts", s.handleTopHosts)
 	mux.HandleFunc("/api/traffic-timeline", s.handleTrafficTimeline)
 	mux.HandleFunc("/api/ws", s.hub.ServeWs)
+	mux.HandleFunc("/api/network-map", s.handleNetworkMap)
+	mux.HandleFunc("/api/dns-evidence", s.handleDNSEvidence)
 
 	// Serve static files (React app)
 	staticFS, err := fs.Sub(staticFiles, "static")
@@ -68,7 +74,7 @@ func (s *Server) Start(ctx context.Context) error {
 	mux.Handle("/", http.FileServer(http.FS(staticFS)))
 
 	s.server = &http.Server{
-		Addr:    fmt.Sprintf(":%d", s.port),
+		Addr:    net.JoinHostPort(s.Host, strconv.Itoa(s.port)),
 		Handler: s.loggingMiddleware(corsMiddleware(mux)),
 	}
 

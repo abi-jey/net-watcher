@@ -2,6 +2,19 @@
 
 A secure Go-based network traffic recorder that captures DNS queries and stores them in an SQLite database. Designed with security hardening and minimal dependencies in mind.
 
+## Network Map, Kubernetes, and DNS Evidence
+
+The current source includes an interactive **Network map** with draggable nodes,
+pan/zoom, namespace/IP filters, and query/response evidence inspection. Optional
+Kubernetes discovery identifies pods, services, node addresses, owning workloads,
+and service endpoint membership. DNS mappings are backed by matched observed
+transactions with client identity, answer records, CNAME chains, and TTLs.
+
+See the [network map guide](docs/network-map.md) for capture setup, read-only
+Kubernetes permissions, evidence semantics, APIs, and limitations. The current CLI
+uses `net-watcher start`; use `--capture=false` to view stored data without capturing.
+For node-local Kubernetes capture, see the [deployment guide](docs/kubernetes-deployment.md).
+
 ## 🚀 Quick Start
 
 ### One-Liner Installation
@@ -39,10 +52,10 @@ sudo systemctl stop net-watcher
 #### Start Daemon Mode
 ```bash
 # Monitor specific interface
-sudo net-watcher serve --interface eth0
+sudo net-watcher start --interface eth0
 
 # With custom settings
-sudo net-watcher serve --interface tailscale0 --retention 30 --batch-size 50 --debug
+sudo net-watcher start --interface tailscale0 --max-db-size-gb=3 --debug
 ```
 
 #### Inspect Captured Data

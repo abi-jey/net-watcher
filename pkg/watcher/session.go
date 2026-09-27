@@ -2,6 +2,7 @@ package watcher
 
 import (
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"net"
 	"strings"
@@ -39,12 +40,6 @@ type Session struct {
 	SNI string
 }
 
-// DNSCacheEntry stores a resolved hostname with timestamp
-type DNSCacheEntry struct {
-	Hostname  string
-	Timestamp time.Time
-}
-
 // SessionManager handles the state of active connections
 type SessionManager struct {
 	sessions map[string]*Session
@@ -61,9 +56,8 @@ type SessionManager struct {
 	excludePorts map[uint16]bool
 	// Track recent rejected UDP to combine with ICMP unreachable
 	recentUDPRejects map[string]time.Time
-	// DNS cache: IP -> hostname + timestamp
-	dnsCache      map[string]*DNSCacheEntry
-	dnsCacheMutex sync.RWMutex
+	dns              *dnsTracker
+	contextLookup    func(string, uint16, string) string
 	// Event batching
 	eventBuffer    []database.NetworkEvent
 	eventBufferMux sync.Mutex
@@ -100,11 +94,16 @@ func NewSessionManager(logger *log.Logger, db *database.DB, onlyFilter, excludeF
 		exclusions:       exclusions,
 		excludePorts:     excludePorts,
 		recentUDPRejects: make(map[string]time.Time),
-		dnsCache:         make(map[string]*DNSCacheEntry),
+		dns:              newDNSTracker(),
 		eventBuffer:      make([]database.NetworkEvent, 0, 100),
 		batchSize:        100,
 	}
 	// Start Garbage Collector in background
+	if db != nil {
+		if err := sm.dns.restore(db); err != nil {
+			logger.Warn("Could not restore DNS evidence cache", "error", err)
+		}
+	}
 	go sm.cleanupLoop()
 	return sm
 }
@@ -268,6 +267,32 @@ func (sm *SessionManager) queueEvent(event database.NetworkEvent) {
 	if sm.db == nil {
 		return
 	}
+	protocol := event.Protocol
+	if strings.HasPrefix(string(event.EventType), "TCP") || event.EventType == database.EventTLSSNI {
+		protocol = "TCP"
+	}
+	if strings.HasPrefix(string(event.EventType), "UDP") {
+		protocol = "UDP"
+	}
+	if sm.contextLookup != nil {
+		event.SourceContext = sm.contextLookup(event.SrcIP, event.SrcPort, protocol)
+		event.DestinationContext = sm.contextLookup(event.DstIP, event.DstPort, protocol)
+	}
+	if event.EventType == database.EventTCPStart || event.EventType == database.EventUDPStart || event.EventType == database.EventTLSSNI {
+		matches := sm.dns.lookup(event.SrcIP, event.DstIP, event.Timestamp)
+		ids := make([]uint, 0, len(matches))
+		identity := contextIdentity(event.SourceContext)
+		event.Hostname, event.DNSAge = "", 0
+		for _, entry := range matches {
+			if contextIdentity(entry.ClientContext) != identity {
+				continue
+			}
+			ids = append(ids, entry.ID)
+			event.Hostname, event.DNSAge = entry.Name, event.Timestamp.Sub(entry.ResponseTime).Milliseconds()
+		}
+		encoded, _ := json.Marshal(ids)
+		event.DNSResolutionIDs = string(encoded)
+	}
 
 	sm.eventBufferMux.Lock()
 	sm.eventBuffer = append(sm.eventBuffer, event)
@@ -328,12 +353,18 @@ func (sm *SessionManager) TrackTCP(iface, src, dst string, isSyn, isFin, isRst b
 	defer sm.mutex.Unlock()
 
 	session, exists := sm.sessions[key]
+	if !exists && !isSyn {
+		reverseKey := fmt.Sprintf("TCP:%s->%s", dst, src)
+		if reverse, found := sm.sessions[reverseKey]; found {
+			session, exists, key = reverse, true, reverseKey
+		}
+	}
 
 	// CASE A: New Connection (SYN without ACK)
 	if isSyn && !exists {
 		// Look up hostname from DNS cache
 		dstIP := extractIPFromAddr(dst)
-		hostname, dnsAge := sm.lookupDNSCache(dstIP)
+		hostname, dnsAge := sm.lookupDNSCache(extractIPFromAddr(src), dstIP)
 
 		sm.sessions[key] = &Session{
 			ID:        key,
@@ -413,8 +444,8 @@ func (sm *SessionManager) TrackTCP(iface, src, dst string, isSyn, isFin, isRst b
 				"reason", endReason,
 			)
 
-			srcIP, srcPortNum := parseAddr(src)
-			dstIP, dstPortNum := parseAddr(dst)
+			srcIP, srcPortNum := parseAddr(session.Src)
+			dstIP, dstPortNum := parseAddr(session.Dst)
 			sm.queueEvent(database.NetworkEvent{
 				Timestamp: time.Now(),
 				EventType: database.EventTCPEnd,
@@ -518,6 +549,7 @@ func (sm *SessionManager) TrackUDP(iface, src, dst string, srcPort, dstPort uint
 		session.ByteCount += int64(length)
 	}
 }
+
 // TrackICMP handles ICMP packets
 // icmpPayload contains the original packet header for destination unreachable messages
 func (sm *SessionManager) TrackICMP(iface, src, dst string, icmpType, icmpCode uint8, length int, isIPv6 bool, icmpPayload []byte) {
@@ -602,7 +634,8 @@ func (sm *SessionManager) TrackICMP(iface, src, dst string, icmpType, icmpCode u
 	}
 }
 
-// TrackDNS logs DNS queries and caches resolved IPs
+// TrackDNS records legacy caller-supplied observations without treating them as
+// verified resolutions. Wire capture uses TrackDNSPacket with transaction metadata.
 func (sm *SessionManager) TrackDNS(iface, src, dst string, queries []string, isResponse bool, resolvedIPs []string, cnames []string, isIPv6 bool) {
 	if !sm.shouldLog("dns") {
 		return
@@ -617,18 +650,6 @@ func (sm *SessionManager) TrackDNS(iface, src, dst string, queries []string, isR
 	if isResponse {
 		queryType = "RESPONSE"
 
-		// Cache the resolved IPs for hostname lookup
-		if len(queries) > 0 && len(resolvedIPs) > 0 {
-			hostname := queries[0] // Use first query name as hostname
-			sm.dnsCacheMutex.Lock()
-			for _, ip := range resolvedIPs {
-				sm.dnsCache[ip] = &DNSCacheEntry{
-					Hostname:  hostname,
-					Timestamp: time.Now(),
-				}
-			}
-			sm.dnsCacheMutex.Unlock()
-		}
 	}
 
 	srcIP, srcPort := parseAddr(src)
@@ -790,15 +811,9 @@ func (sm *SessionManager) cleanupLoop() {
 			}
 			sm.mutex.Unlock()
 
-			// Also clean up old DNS cache entries (older than 10 minutes)
-			sm.dnsCacheMutex.Lock()
-			dnsThreshold := time.Now().Add(-10 * time.Minute)
-			for ip, entry := range sm.dnsCache {
-				if entry.Timestamp.Before(dnsThreshold) {
-					delete(sm.dnsCache, ip)
-				}
-			}
-			sm.dnsCacheMutex.Unlock()
+			sm.dns.mu.Lock()
+			sm.dns.prune(time.Now())
+			sm.dns.mu.Unlock()
 
 			// Periodic flush to ensure events are visible to web readers
 			sm.flushEvents()
@@ -807,12 +822,17 @@ func (sm *SessionManager) cleanupLoop() {
 }
 
 // lookupDNSCache returns the hostname and age for a given IP
-func (sm *SessionManager) lookupDNSCache(ip string) (string, time.Duration) {
-	sm.dnsCacheMutex.RLock()
-	defer sm.dnsCacheMutex.RUnlock()
-
-	if entry, ok := sm.dnsCache[ip]; ok {
-		return entry.Hostname, time.Since(entry.Timestamp)
+func (sm *SessionManager) lookupDNSCache(client, ip string) (string, time.Duration) {
+	entries := sm.dns.lookup(client, ip, time.Now())
+	identity := ""
+	if sm.contextLookup != nil {
+		identity = contextIdentity(sm.contextLookup(client, 0, ""))
+	}
+	for index := len(entries) - 1; index >= 0; index-- {
+		entry := entries[index]
+		if contextIdentity(entry.ClientContext) == identity {
+			return entry.Name, time.Since(entry.ResponseTime)
+		}
 	}
 	return "", 0
 }

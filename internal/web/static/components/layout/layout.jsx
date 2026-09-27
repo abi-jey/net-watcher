@@ -16,6 +16,7 @@ NetWatcher.Layout.Sidebar = function({ activeNav, onNavChange, totalEvents }) {
             section: 'Monitor',
             items: [
                 { id: 'events', label: 'Events', icon: Icon.Activity, badge: Utils.formatNumber(totalEvents) },
+                { id: 'map', label: 'Network map', icon: Icon.Network },
                 { id: 'stats', label: 'Dashboard', icon: Icon.BarChart }
             ]
         },
@@ -64,8 +65,11 @@ NetWatcher.Layout.Sidebar = function({ activeNav, onNavChange, totalEvents }) {
                         {items.map(({ id, label, icon: ItemIcon, badge }) => (
                             <a
                                 key={id}
+                                role="button"
+                                tabIndex="0"
                                 className={`nav-item ${activeNav === id ? 'active' : ''}`}
                                 onClick={() => onNavChange(id)}
+                                onKeyDown={event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); onNavChange(id); } }}
                                 title={label}
                             >
                                 <ItemIcon />

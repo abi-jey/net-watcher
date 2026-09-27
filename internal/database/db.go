@@ -14,6 +14,7 @@ import (
 // DB wraps the gorm database
 type DB struct {
 	*gorm.DB
+	path string
 }
 
 // New creates a new database connection
@@ -29,15 +30,20 @@ func New(dbPath string) (*DB, error) {
 	if err != nil {
 		return nil, err
 	}
+	// SQLite permits only one writer; a single pooled connection prevents
+	// concurrent HTTP ingestion transactions from failing with SQLITE_BUSY.
+	sqlDB.SetMaxOpenConns(1)
 	_, _ = sqlDB.Exec("PRAGMA journal_mode=WAL")
+	_, _ = sqlDB.Exec("PRAGMA busy_timeout=5000")
 	_, _ = sqlDB.Exec("PRAGMA synchronous=NORMAL")
 	_, _ = sqlDB.Exec("PRAGMA cache_size=2000")
 
-	if err := db.AutoMigrate(&NetworkEvent{}); err != nil {
+	if err := db.AutoMigrate(&NetworkEvent{}, &DNSResolution{}, &IngestedEvent{}, &IngestedResolution{}, &IngestCursor{}); err != nil {
+		_ = sqlDB.Close()
 		return nil, err
 	}
 
-	return &DB{db}, nil
+	return &DB{DB: db, path: dbPath}, nil
 }
 
 // Close closes the database connection
@@ -143,22 +149,25 @@ func (db *DB) compactTCP(olderThan time.Time, stats *CompactStats) error {
 		if result.Error == nil {
 			// Create compacted record
 			compacted := NetworkEvent{
-				Timestamp:   start.Timestamp,
-				EndTime:     endEvent.Timestamp,
-				EventType:   EventTCP,
-				Interface:   start.Interface,
-				IPVersion:   start.IPVersion,
-				SrcIP:       start.SrcIP,
-				SrcPort:     start.SrcPort,
-				DstIP:       start.DstIP,
-				DstPort:     start.DstPort,
-				Hostname:    start.Hostname,
-				DNSAge:      start.DNSAge,
-				Duration:    endEvent.Duration,
-				ByteCount:   endEvent.ByteCount,
-				Reason:      endEvent.Reason,
-				Compacted:   true,
-				OriginalIDs: fmt.Sprintf("%d,%d", start.ID, endEvent.ID),
+				Timestamp:          start.Timestamp,
+				EndTime:            endEvent.Timestamp,
+				EventType:          EventTCP,
+				Interface:          start.Interface,
+				IPVersion:          start.IPVersion,
+				SrcIP:              start.SrcIP,
+				SrcPort:            start.SrcPort,
+				DstIP:              start.DstIP,
+				DstPort:            start.DstPort,
+				Hostname:           start.Hostname,
+				DNSAge:             start.DNSAge,
+				DNSResolutionIDs:   start.DNSResolutionIDs,
+				SourceContext:      start.SourceContext,
+				DestinationContext: start.DestinationContext,
+				Duration:           endEvent.Duration,
+				ByteCount:          endEvent.ByteCount,
+				Reason:             endEvent.Reason,
+				Compacted:          true,
+				OriginalIDs:        fmt.Sprintf("%d,%d", start.ID, endEvent.ID),
 			}
 
 			if err := db.Create(&compacted).Error; err != nil {
@@ -200,20 +209,24 @@ func (db *DB) compactUDP(olderThan time.Time, stats *CompactStats) error {
 
 		if result.Error == nil {
 			compacted := NetworkEvent{
-				Timestamp:   start.Timestamp,
-				EndTime:     endEvent.Timestamp,
-				EventType:   EventUDP,
-				Interface:   start.Interface,
-				IPVersion:   start.IPVersion,
-				SrcIP:       start.SrcIP,
-				SrcPort:     start.SrcPort,
-				DstIP:       start.DstIP,
-				DstPort:     start.DstPort,
-				Protocol:    start.Protocol,
-				Duration:    endEvent.Duration,
-				ByteCount:   endEvent.ByteCount,
-				Compacted:   true,
-				OriginalIDs: fmt.Sprintf("%d,%d", start.ID, endEvent.ID),
+				Timestamp:          start.Timestamp,
+				EndTime:            endEvent.Timestamp,
+				EventType:          EventUDP,
+				Interface:          start.Interface,
+				IPVersion:          start.IPVersion,
+				SrcIP:              start.SrcIP,
+				SrcPort:            start.SrcPort,
+				DstIP:              start.DstIP,
+				DstPort:            start.DstPort,
+				Protocol:           start.Protocol,
+				Hostname:           start.Hostname,
+				DNSResolutionIDs:   start.DNSResolutionIDs,
+				SourceContext:      start.SourceContext,
+				DestinationContext: start.DestinationContext,
+				Duration:           endEvent.Duration,
+				ByteCount:          endEvent.ByteCount,
+				Compacted:          true,
+				OriginalIDs:        fmt.Sprintf("%d,%d", start.ID, endEvent.ID),
 			}
 
 			if err := db.Create(&compacted).Error; err != nil {
@@ -234,7 +247,7 @@ func (db *DB) compactUDP(olderThan time.Time, stats *CompactStats) error {
 // compactDNS merges DNS QUERY and RESPONSE pairs
 func (db *DB) compactDNS(olderThan time.Time, stats *CompactStats) error {
 	var queryEvents []NetworkEvent
-	db.Where("event_type = ? AND dns_type = ? AND timestamp < ? AND (compacted = ? OR compacted IS NULL)",
+	db.Where("event_type = ? AND dns_type = ? AND timestamp < ? AND (compacted = ? OR compacted IS NULL) AND (dns_version = 0 OR dns_version IS NULL)",
 		EventDNS, "QUERY", olderThan, false).
 		Find(&queryEvents)
 
@@ -290,7 +303,7 @@ func (db *DB) compactDNS(olderThan time.Time, stats *CompactStats) error {
 // deduplicateDNS removes duplicate DNS queries within a time window
 func (db *DB) deduplicateDNS(olderThan time.Time, window time.Duration, stats *CompactStats) error {
 	var events []NetworkEvent
-	db.Where("event_type = ? AND timestamp < ?", EventDNS, olderThan).
+	db.Where("event_type = ? AND timestamp < ? AND (dns_version = 0 OR dns_version IS NULL)", EventDNS, olderThan).
 		Order("dns_query, timestamp").
 		Find(&events)
 

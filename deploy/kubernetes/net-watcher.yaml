@@ -1,0 +1,130 @@
+# Node-local capture is deliberate: each collector has a separate SQLite database
+# and map. Do not expose the UI without an authenticating proxy.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: net-watcher
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: net-watcher
+  namespace: net-watcher
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: net-watcher-reader
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "services", "nodes"]
+    verbs: ["list"]
+  - apiGroups: ["apps"]
+    resources: ["replicasets"]
+    verbs: ["list"]
+  - apiGroups: ["discovery.k8s.io"]
+    resources: ["endpointslices"]
+    verbs: ["list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: net-watcher-reader
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: net-watcher-reader
+subjects:
+  - kind: ServiceAccount
+    name: net-watcher
+    namespace: net-watcher
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: net-watcher
+  namespace: net-watcher
+  labels:
+    app.kubernetes.io/name: net-watcher
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: net-watcher
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: net-watcher
+    spec:
+      serviceAccountName: net-watcher
+      automountServiceAccountToken: true
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      terminationGracePeriodSeconds: 10
+      nodeSelector:
+        kubernetes.io/os: linux
+      tolerations:
+        - operator: Exists
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        - name: prepare-data-directory
+          image: busybox:1.37.0
+          command: ["sh", "-ec", "mkdir -p /var/lib/net-watcher && chown 65532:65532 /var/lib/net-watcher"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+              add: ["CHOWN"]
+            readOnlyRootFilesystem: true
+            runAsNonRoot: false
+            runAsUser: 0
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/net-watcher
+      containers:
+        - name: net-watcher
+          image: ghcr.io/abi-jey/net-watcher:map-k8s
+          imagePullPolicy: Always
+          args:
+            - start
+            - --kubernetes
+            - --db=/var/lib/net-watcher/netwatcher.db
+            - --web-host=127.0.0.1
+            - --web-port=8920
+            - --traffic-exclude=multicast,broadcast,linklocal,bittorrent,mdns,ssdp,metadata,ndp,unreachable
+          env:
+            - name: SQLITE_TMPDIR
+              value: /var/lib/net-watcher
+            - name: TMPDIR
+              value: /var/lib/net-watcher
+          ports:
+            - name: http
+              containerPort: 8920
+              protocol: TCP
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+              add: ["NET_RAW"]
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65532
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/net-watcher
+      volumes:
+        - name: data
+          hostPath:
+            path: /var/lib/net-watcher
+            type: DirectoryOrCreate

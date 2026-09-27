@@ -9,6 +9,11 @@ const { Icon, Utils, UI, CONFIG } = NetWatcher;
  * Single Event Row
  */
 NetWatcher.Components.EventRow = function({ event }) {
+    const [expanded, setExpanded] = React.useState(false);
+    const parse = (value, fallback) => { try { return JSON.parse(value || 'null') || fallback; } catch { return fallback; } };
+    const source = parse(event.SourceContext, {});
+    const destination = parse(event.DestinationContext, {});
+    const evidence = parse(event.DNSResolutionIDs, []);
     const details = event.DNSQuery || event.TLSSNI || event.Reason || '-';
     const detailStyle = event.DNSQuery 
         ? { color: 'var(--secondary)' }
@@ -17,7 +22,7 @@ NetWatcher.Components.EventRow = function({ event }) {
             : { color: 'var(--text-muted)' };
 
     return (
-        <tr>
+        <><tr>
             <td className="timestamp">{Utils.formatTimestamp(event.Timestamp)}</td>
             <td>
                 <UI.Badge variant={Utils.getEventTypeClass(event.EventType)}>
@@ -28,19 +33,27 @@ NetWatcher.Components.EventRow = function({ event }) {
                 <div className="ip-address">
                     {event.SrcIP || '-'}{event.SrcPort ? `:${event.SrcPort}` : ''}
                 </div>
+                {source.Name && <div className="hostname">{source.Namespace ? `${source.Namespace}/` : ''}{source.Name} ({source.Kind})</div>}
             </td>
             <td>
                 <div className="ip-address">
                     {event.DstIP || '-'}{event.DstPort ? `:${event.DstPort}` : ''}
                 </div>
                 {event.Hostname && <div className="hostname">{event.Hostname}</div>}
+                {destination.Name && <div className="hostname">{destination.Namespace ? `${destination.Namespace}/` : ''}{destination.Name} ({destination.Kind})</div>}
             </td>
             <td className="details-cell">
                 <span style={detailStyle}>{details}</span>
+                {event.EventType === 'DNS' && event.DNSVersion > 0 && <div className="hostname">
+                    ID {event.DNSID} · {event.DNSQuestionType} · {event.DNSType}
+                    {event.DNSType === 'RESPONSE' && ` · ${event.DNSResponseCode} · ${event.DNSMatched ? 'query matched' : 'query not observed'}`}
+                    {event.DNSTruncated && ' · truncated'}
+                </div>}
+                {evidence.length > 0 && <button className="event-evidence-toggle" aria-expanded={expanded} onClick={() => setExpanded(!expanded)}>{expanded ? 'Hide' : 'Inspect'} DNS evidence ({evidence.length})</button>}
             </td>
             <td>{Utils.formatDuration(event.Duration)}</td>
             <td>{Utils.formatBytes(event.ByteCount)}</td>
-        </tr>
+        </tr>{expanded && <tr><td colSpan="7"><NetWatcher.Components.DNSEvidence ids={evidence} /></td></tr>}</>
     );
 };
 

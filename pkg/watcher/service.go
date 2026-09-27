@@ -21,6 +21,12 @@ type Watcher struct {
 	logger         *log.Logger
 	sessionManager *SessionManager
 	db             *database.DB
+	Discover       func() ([]net.Interface, error)
+}
+
+// SetContextLookup installs optional inventory enrichment before capture starts.
+func (w *Watcher) SetContextLookup(lookup func(string, uint16, string) string) {
+	w.sessionManager.contextLookup = lookup
 }
 
 // New creates a new Watcher instance
@@ -57,27 +63,67 @@ func NewWithDB(db *database.DB, ifaces []net.Interface, logger *log.Logger, only
 // Run starts the monitoring process. It blocks until the context is cancelled.
 func (w *Watcher) Run(ctx context.Context) error {
 	var wg sync.WaitGroup
-
-	for _, iface := range w.interfaces {
-		wg.Add(1)
-		go func(name string) {
-			defer wg.Done()
-			log.Info("Capture started", "interface", name)
-			if err := w.sniffInterface(ctx, iface); err != nil {
-				log.Error("Sniffer error", "interface", name, "error", err)
+	active := make(map[int]context.CancelFunc)
+	finished := make(chan int, 1024)
+	update := func(interfaces []net.Interface) {
+		present := make(map[int]bool)
+		for _, iface := range interfaces {
+			present[iface.Index] = true
+			if _, exists := active[iface.Index]; exists {
+				continue
 			}
-			log.Info("Capture stopped", "interface", name)
-		}(iface.Name)
+			captureCtx, cancel := context.WithCancel(ctx)
+			active[iface.Index] = cancel
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				if err := w.sniffInterface(captureCtx, iface); err != nil && captureCtx.Err() == nil {
+					w.logger.Error("Sniffer error", "interface", iface.Name, "error", err)
+				}
+				select {
+				case finished <- iface.Index:
+				case <-ctx.Done():
+				}
+			}()
+		}
+		for index, cancel := range active {
+			if !present[index] {
+				cancel()
+			}
+		}
 	}
-
-	log.Info("Sniffers running for interfaces", "count", len(w.interfaces))
-	<-ctx.Done() // Block here until Ctrl+C
-	log.Info("Shutting down watcher...")
+	update(w.interfaces)
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+capture:
+	for {
+		select {
+		case <-ctx.Done():
+			break capture
+		case index := <-finished:
+			if cancel, exists := active[index]; exists {
+				cancel()
+				delete(active, index)
+			}
+		case <-ticker.C:
+			if w.Discover != nil {
+				interfaces, err := w.Discover()
+				if err != nil {
+					w.logger.Error("Interface discovery failed", "error", err)
+				} else {
+					update(interfaces)
+				}
+			}
+		}
+	}
+	for _, cancel := range active {
+		cancel()
+	}
+	wg.Wait()
 	w.sessionManager.Stop()
 	if w.db != nil {
 		w.db.Close()
 	}
-	wg.Wait()
 
 	return nil
 }
@@ -87,12 +133,13 @@ func (w *Watcher) sniffInterface(ctx context.Context, iface net.Interface) error
 	log.Info("Opening raw socket", "interface", iface.Name)
 
 	// 1. Open AF_PACKET handle (Linux specific high-performance capture)
-	// A Ring Buffer Clone of interface is created by kernel 
+	// A Ring Buffer Clone of interface is created by kernel
 	handle, err := afpacket.NewTPacket(
 		afpacket.OptInterface(iface.Name),
 		afpacket.OptFrameSize(4096),
-		afpacket.OptBlockSize(4096*128),
-		afpacket.OptNumBlocks(128),
+		afpacket.OptBlockSize(4096*16),
+		afpacket.OptNumBlocks(8),
+		afpacket.OptPollTimeout(500*time.Millisecond),
 	)
 	if err != nil {
 		return fmt.Errorf("failed to create afpacket: %w", err)
@@ -101,7 +148,12 @@ func (w *Watcher) sniffInterface(ctx context.Context, iface net.Interface) error
 
 	// 2. Create the packet source from the handle
 	// This turns raw bytes into readable packets
-	source := gopacket.NewPacketSource(handle, layers.LinkTypeEthernet)
+	var decoder gopacket.Decoder = layers.LinkTypeEthernet
+	if len(iface.HardwareAddr) == 0 {
+		decoder = layers.LinkTypeRaw
+	}
+	source := gopacket.NewPacketSource(handle, decoder)
+	packets := source.Packets()
 
 	// 3. Start packet drop monitoring goroutine
 	go w.monitorDrops(ctx, handle, iface.Name)
@@ -113,7 +165,10 @@ func (w *Watcher) sniffInterface(ctx context.Context, iface net.Interface) error
 		select {
 		case <-ctx.Done():
 			return nil
-		case packet := <-source.Packets():
+		case packet, ok := <-packets:
+			if !ok {
+				return fmt.Errorf("capture stream closed")
+			}
 			w.processPacket(packet, iface.Name)
 		}
 	}
@@ -221,6 +276,9 @@ func (w *Watcher) processPacket(packet gopacket.Packet, ifaceName string) {
 
 		// Track TCP connection lifecycle
 		w.sessionManager.TrackTCP(ifaceName, src, dst, tcp.SYN && !tcp.ACK, tcp.FIN, tcp.RST, length, isIPv6)
+		if tcp.SrcPort == 53 || tcp.DstPort == 53 {
+			w.sessionManager.TrackDNSTCP(ifaceName, src, dst, tcp, packet.Metadata().Timestamp, isIPv6)
+		}
 
 		// Check for TLS handshake (port 443 or has payload starting with 0x16)
 		if len(tcp.Payload) > 0 && tcp.Payload[0] == 0x16 {
@@ -243,9 +301,7 @@ func (w *Watcher) processPacket(packet gopacket.Packet, ifaceName string) {
 
 		// Check for DNS (port 53)
 		if udp.SrcPort == 53 || udp.DstPort == 53 {
-			if queries, resolvedIPs, cnames, isResponse := ParseDNSResponse(udp.Payload); len(queries) > 0 {
-				w.sessionManager.TrackDNS(ifaceName, src, dst, queries, isResponse, resolvedIPs, cnames, isIPv6)
-			}
+			w.sessionManager.TrackDNSPacket(ifaceName, src, dst, "UDP", udp.Payload, packet.Metadata().Timestamp, isIPv6)
 		}
 		return
 	}

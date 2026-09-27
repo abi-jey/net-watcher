@@ -8,10 +8,14 @@ import (
 	"os"
 	"os/signal"
 	"runtime"
+	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/abja/net-watcher/internal/database"
+	"github.com/abja/net-watcher/internal/ingest"
+	"github.com/abja/net-watcher/internal/kube"
 	"github.com/abja/net-watcher/internal/web"
 	"github.com/abja/net-watcher/pkg/watcher"
 	"github.com/charmbracelet/log"
@@ -20,10 +24,10 @@ import (
 // Build information (will be overridden by build flags)
 var (
 	version   = "1.0.0-dev"
-	buildTime = "unknown" //nolint:unused // Set by ldflags
-	commitSHA = "unknown" //nolint:unused // Set by ldflags
+	buildTime = "unknown"         //nolint:unused // Set by ldflags
+	commitSHA = "unknown"         //nolint:unused // Set by ldflags
 	goVersion = runtime.Version() //nolint:unused // Set by ldflags
-	builder   = "unknown" //nolint:unused // Set by ldflags
+	builder   = "unknown"         //nolint:unused // Set by ldflags
 )
 
 func printUsage() {
@@ -43,6 +47,18 @@ FLAGS:
     --web-port           Web UI port (default: 8920)
     --only               Only log specific events (tcp,udp,icmp,dns,tls)
     --traffic-exclude    Exclude traffic types (multicast,broadcast,etc)
+    --kubernetes         Enrich with read-only Kubernetes inventory; include pod interfaces
+    --kube-context       Explicit kubectl context (otherwise use in-cluster identity)
+    --include-virtual    Include bridge/veth interfaces during automatic discovery
+    --db                 SQLite database path (default: netwatcher.db)
+    --max-db-size-gb     Maximum central/standalone SQLite size in GiB (default: 10)
+    --storage-check-interval  Storage maintenance interval (minimum/default: 10m)
+    --capture=false      View stored data without starting packet capture
+    --web-host           Web bind address (default: all interfaces)
+    --ingest-url         Central ingest base URL for a collector
+    --ingest-token       Required bearer token for ingest send/receive
+    --ingest-port        Run the central ingest listener on this port
+    --collector-id       Stable collector identity (defaults to hostname)
 
 `, version)
 }
@@ -69,7 +85,28 @@ func main() {
 		excludePorts := startCmd.String("exclude-ports", "", "Comma-separated list of ports to exclude")
 		enableWeb := startCmd.Bool("web", true, "Enable web UI server")
 		webPort := startCmd.Int("web-port", 8920, "Port for web UI server")
+		webHost := startCmd.String("web-host", "", "Web bind address")
+		dbPath := startCmd.String("db", "netwatcher.db", "SQLite database path")
+		maxDBSizeGB := startCmd.Int64("max-db-size-gb", 10, "Maximum central/standalone SQLite size in GiB")
+		storageCheckInterval := startCmd.Duration("storage-check-interval", 10*time.Minute, "Storage maintenance interval")
+		capture := startCmd.Bool("capture", true, "Capture packets; disable to view stored data")
+		kubernetes := startCmd.Bool("kubernetes", false, "Enable read-only Kubernetes inventory")
+		kubeContext := startCmd.String("kube-context", "", "Explicit kubectl context for inventory")
+		includeVirtual := startCmd.Bool("include-virtual", false, "Include bridge/veth interfaces")
+		ingestURL := startCmd.String("ingest-url", "", "Authenticated central ingestion base URL for this collector")
+		ingestToken := startCmd.String("ingest-token", "", "Bearer token for central ingestion")
+		ingestPort := startCmd.Int("ingest-port", 0, "Run authenticated central ingestion listener on this port")
+		collectorID := startCmd.String("collector-id", "", "Stable collector identity for central ingestion")
 		_ = startCmd.Parse(os.Args[2:])
+		if *maxDBSizeGB <= 0 || *maxDBSizeGB > (1<<63-1)/(1<<30) {
+			log.Error("--max-db-size-gb must be a positive number of GiB")
+			os.Exit(1)
+		}
+		if *storageCheckInterval < 10*time.Minute {
+			log.Error("--storage-check-interval must be at least 10m")
+			os.Exit(1)
+		}
+		*kubernetes = *kubernetes || *kubeContext != ""
 
 		if *debug {
 			logger.SetLevel(log.DebugLevel)
@@ -78,16 +115,19 @@ func main() {
 		var err error
 
 		// Load specified interfaces if provided
-		interfacesToMonitor, err = getInterfacesByName(*interfaceName)
+		if *capture {
+			interfacesToMonitor, err = getInterfacesByName(*interfaceName)
+		}
 		if err != nil {
 			log.Error("Failed to get interfaces by name", "error", err)
 			os.Exit(1)
 		}
 
 		// Attempt best-effort detection
-		if *interfaceName == "" {
+		autoInterfaces := *interfaceName == ""
+		if *capture && autoInterfaces {
 			log.Info("Interface name not provided, using best-effort detection")
-			interfacesToMonitor, err = getUsableInterfaces(*interfaceExclude)
+			interfacesToMonitor, err = getUsableInterfaces(*interfaceExclude, *includeVirtual || *kubernetes)
 			if err != nil {
 				log.Error("Failed to get usable interfaces", "error", err)
 				os.Exit(1)
@@ -105,21 +145,31 @@ func main() {
 		log.Info("Starting net-watcher", "version", version, "interface", *interfaceName, "interface_exclude", *interfaceExclude, "debug", *debug, "web", *enableWeb, "web_port", *webPort, "only", *onlyFilter, "traffic_exclude", *trafficExclude, "exclude_ports", *excludePorts)
 
 		// Open database
-		db, err := database.New("netwatcher.db")
+		db, err := database.New(*dbPath)
 		if err != nil {
 			log.Error("Failed to open database", "error", err)
 			os.Exit(1)
 		}
 		defer db.Close()
-
-		w, err := watcher.NewWithDB(db, interfacesToMonitor, logger, *onlyFilter, *trafficExclude, *excludePorts)
-		if err != nil {
-			log.Error("Failed to create watcher", "error", err)
+		if *collectorID == "" {
+			*collectorID, _ = os.Hostname()
+		}
+		if *ingestURL != "" && *ingestToken == "" {
+			log.Error("--ingest-token is required with --ingest-url")
+			os.Exit(1)
+		}
+		if *ingestPort < 0 || *ingestPort > 65535 {
+			log.Error("--ingest-port must be 0..65535")
+			os.Exit(1)
+		}
+		if *ingestPort > 0 && *ingestToken == "" {
+			log.Error("--ingest-token is required with --ingest-port")
 			os.Exit(1)
 		}
 
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
+		go maintainStorage(ctx, db, *ingestURL, *maxDBSizeGB*(1<<30), *storageCheckInterval)
 
 		// Handle shutdown signals
 		sigChan := make(chan os.Signal, 1)
@@ -129,17 +179,68 @@ func main() {
 			log.Info("Shutting down...")
 			cancel()
 		}()
+		if *ingestURL != "" {
+			forwarder := &ingest.Forwarder{DB: db, URL: *ingestURL, Token: *ingestToken, CollectorID: *collectorID, Logger: logger}
+			go forwarder.Run(ctx)
+		}
+		if *ingestPort > 0 {
+			receiver := &ingest.Receiver{DB: db, Token: *ingestToken}
+			go func() {
+				if err := receiver.Serve(ctx, net.JoinHostPort("", strconv.Itoa(*ingestPort))); err != nil {
+					log.Error("Ingest server error", "error", err)
+					cancel()
+				}
+			}()
+		}
+		inventory := kube.New(nil)
+		if *kubernetes {
+			var source kube.Source
+			if *kubeContext != "" {
+				source = kube.KubectlSource{Context: *kubeContext}
+			} else {
+				source, err = kube.InClusterSource()
+			}
+			if err != nil {
+				log.Error("Kubernetes configuration failed", "error", err)
+				return
+			}
+			inventory = kube.New(source)
+			refreshCtx, stop := context.WithTimeout(ctx, 20*time.Second)
+			if err := inventory.Refresh(refreshCtx); err != nil {
+				log.Warn("Kubernetes inventory unavailable; capture continues without attribution", "error", err)
+			}
+			stop()
+			go inventory.Run(ctx)
+		}
 
 		// Start web server if enabled
 		if *enableWeb {
 			server := web.NewServer(db, *webPort, logger, version)
+			server.Host = *webHost
+			server.Kubernetes = inventory
 			go func() {
 				if err := server.Start(ctx); err != nil {
 					log.Error("Web server error", "error", err)
+					cancel()
 				}
 			}()
 		}
 
+		if !*capture {
+			<-ctx.Done()
+			return
+		}
+		w, err := watcher.NewWithDB(db, interfacesToMonitor, logger, *onlyFilter, *trafficExclude, *excludePorts)
+		if err != nil {
+			log.Error("Failed to create watcher", "error", err)
+			return
+		}
+		w.SetContextLookup(inventory.Lookup)
+		if autoInterfaces {
+			w.Discover = func() ([]net.Interface, error) {
+				return getUsableInterfaces(*interfaceExclude, *includeVirtual || *kubernetes)
+			}
+		}
 		if err := w.Run(ctx); err != nil {
 			log.Error("Watcher stopped with error", "error", err)
 			os.Exit(1)
@@ -151,6 +252,35 @@ func main() {
 		fmt.Printf("Unknown command: %s\n\n", os.Args[1])
 		printUsage()
 		os.Exit(1)
+	}
+}
+
+func maintainStorage(ctx context.Context, db *database.DB, ingestURL string, maxBytes int64, interval time.Duration) {
+	timer := time.NewTimer(interval)
+	defer timer.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-timer.C:
+		}
+		if ingestURL != "" {
+			removed, err := db.ReclaimCollectorSpace(ingestURL)
+			if err != nil {
+				log.Error("Could not reclaim collector storage", "error", err)
+			} else if removed > 0 {
+				log.Info("Discarded acknowledged collector events", "removed", removed)
+			}
+		} else {
+			removed, err := db.PruneToSize(maxBytes)
+			if err != nil {
+				log.Error("Could not enforce database size limit", "error", err)
+			} else if removed > 0 {
+				size, sizeErr := db.StorageBytes()
+				log.Info("Pruned old network events", "removed", removed, "bytes", size, "error", sizeErr)
+			}
+		}
+		timer.Reset(interval)
 	}
 }
 
@@ -175,7 +305,7 @@ func getInterfacesByName(names string) ([]net.Interface, error) {
 }
 
 // getUsableInterfaces returns all usable network interfaces, excluding those specified
-func getUsableInterfaces(excludePattern string) ([]net.Interface, error) {
+func getUsableInterfaces(excludePattern string, includeVirtual bool) ([]net.Interface, error) {
 	var usableInterfaces []net.Interface
 	interfaces, err := net.Interfaces()
 	log.Info("Getting usable interfaces")
@@ -206,15 +336,18 @@ func getUsableInterfaces(excludePattern string) ([]net.Interface, error) {
 		}
 
 		addrs, err := i.Addrs()
-		if err != nil || len(addrs) == 0 {
+		if err != nil || (!includeVirtual && len(addrs) == 0) {
 			log.Info("Skipping interface", "interface", candidateInterfaceName, "addrs", addrs, "error", err)
 			continue
 		}
-		addr := addrs[0].String()
+		addr := ""
+		if len(addrs) > 0 {
+			addr = addrs[0].String()
+		}
 		log.Info("Checking interface", "candidateInterfaceName", candidateInterfaceName, "addr", addr)
-		if strings.HasPrefix(candidateInterfaceName, "docker") ||
+		if !includeVirtual && (strings.HasPrefix(candidateInterfaceName, "docker") ||
 			strings.HasPrefix(candidateInterfaceName, "br-") ||
-			strings.HasPrefix(candidateInterfaceName, "veth") {
+			strings.HasPrefix(candidateInterfaceName, "veth")) {
 			continue
 		}
 		log.Info("Usable interface found", "candidateInterfaceName", candidateInterfaceName)
@@ -222,5 +355,3 @@ func getUsableInterfaces(excludePattern string) ([]net.Interface, error) {
 	}
 	return usableInterfaces, nil
 }
-
-

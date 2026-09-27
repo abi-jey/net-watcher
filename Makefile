@@ -54,6 +54,10 @@ test:
 	@echo "Running tests..."
 	go test -v -race -coverprofile=coverage.out ./...
 
+.PHONY: test-ui
+test-ui:
+	node --test scripts/topology.test.cjs
+
 # Run benchmarks
 .PHONY: bench
 bench:

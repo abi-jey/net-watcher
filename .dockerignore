@@ -1,0 +1,8 @@
+.git
+.local
+coverage.out
+net-watcher
+net-watcher-*
+dist
+report.html
+netwatcher.db*

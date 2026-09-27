@@ -12,6 +12,8 @@ function AppContent({ activeNav, onNavChange, totalEvents }) {
     // Render current page based on navigation
     const renderPage = () => {
         switch (activeNav) {
+            case 'map':
+                return <Pages.NetworkMapPage />;
             case 'stats':
                 return <Pages.DashboardPage />;
             case 'events':
@@ -38,7 +40,7 @@ function AppContent({ activeNav, onNavChange, totalEvents }) {
  * App - Root Component
  */
 function App() {
-    const [activeNav, setActiveNav] = useState('events');
+    const [activeNav, setActiveNav] = useState(() => window.location.hash === '#map' ? 'map' : 'events');
     const [totalEvents, setTotalEvents] = useState(0);
 
     // Update total events from stats
@@ -61,7 +63,7 @@ function App() {
         <AppProvider>
             <AppContent 
                 activeNav={activeNav} 
-                onNavChange={setActiveNav}
+                onNavChange={id => { setActiveNav(id); window.history.replaceState(null, '', `#${id}`); }}
                 totalEvents={totalEvents}
             />
         </AppProvider>
