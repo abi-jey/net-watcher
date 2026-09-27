@@ -190,40 +190,45 @@ func (f *Forwarder) Run(ctx context.Context) {
 	if f.client == nil {
 		f.client = &http.Client{Timeout: 15 * time.Second}
 	}
-	ticker := time.NewTicker(2 * time.Second)
-	defer ticker.Stop()
 	for {
-		if err := f.send(ctx); err != nil {
+		sent, err := f.send(ctx)
+		if err != nil {
 			f.Logger.Warn("Ingest delivery failed; will retry", "error", err)
 		}
+		if sent && err == nil {
+			// Acknowledged batches can be drained without an artificial backlog delay.
+			continue
+		}
+		timer := time.NewTimer(2 * time.Second)
 		select {
 		case <-ctx.Done():
+			timer.Stop()
 			return
-		case <-ticker.C:
+		case <-timer.C:
 		}
 	}
 }
 
-func (f *Forwarder) send(ctx context.Context) error {
+func (f *Forwarder) send(ctx context.Context) (bool, error) {
 	if f.URL == "" || f.Token == "" || f.CollectorID == "" {
-		return nil
+		return false, nil
 	}
 	if f.client == nil {
 		f.client = &http.Client{Timeout: 15 * time.Second}
 	}
 	var cursor database.IngestCursor
 	if err := f.DB.Where("endpoint = ?", f.URL).First(&cursor).Error; err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
-		return err
+		return false, err
 	}
 	var events []database.NetworkEvent
 	if err := f.DB.Where("id > ?", cursor.EventID).Order("id ASC").Limit(maxEvents).Find(&events).Error; err != nil || len(events) == 0 {
-		return err
+		return false, err
 	}
 	resolutionIDs := make(map[uint]bool)
 	for _, event := range events {
 		var ids []uint
 		if event.DNSResolutionIDs != "" && json.Unmarshal([]byte(event.DNSResolutionIDs), &ids) != nil {
-			return fmt.Errorf("decode local DNS evidence for event %d", event.ID)
+			return false, fmt.Errorf("decode local DNS evidence for event %d", event.ID)
 		}
 		for _, id := range ids {
 			resolutionIDs[id] = true
@@ -236,26 +241,29 @@ func (f *Forwarder) send(ctx context.Context) error {
 			ids = append(ids, id)
 		}
 		if err := f.DB.Where("id IN ?", ids).Find(&resolutions).Error; err != nil {
-			return err
+			return false, err
 		}
 	}
 	body, err := json.Marshal(Batch{CollectorID: f.CollectorID, Events: events, Resolutions: resolutions})
 	if err != nil {
-		return err
+		return false, err
 	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(f.URL, "/")+batchPath, bytes.NewReader(body))
 	if err != nil {
-		return err
+		return false, err
 	}
 	request.Header.Set("Authorization", "Bearer "+f.Token)
 	request.Header.Set("Content-Type", "application/json")
 	response, err := f.client.Do(request)
 	if err != nil {
-		return err
+		return false, err
 	}
 	response.Body.Close()
 	if response.StatusCode != http.StatusNoContent {
-		return fmt.Errorf("ingest endpoint returned HTTP %d", response.StatusCode)
+		return false, fmt.Errorf("ingest endpoint returned HTTP %d", response.StatusCode)
 	}
-	return f.DB.RecordAcknowledgment(f.URL, events[len(events)-1].ID)
+	if err := f.DB.RecordAcknowledgment(f.URL, events[len(events)-1].ID); err != nil {
+		return false, err
+	}
+	return true, nil
 }

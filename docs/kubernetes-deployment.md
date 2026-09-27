@@ -74,7 +74,9 @@ Each collector keeps its own database until batches are acknowledged. Every
 10 minutes it removes acknowledged events and expired, unreferenced DNS
 evidence, then reclaims unused disk pages. Pending events are never discarded
 to meet the central size limit; a collector can grow while ingestion is
-unavailable. The central map may represent duplicate observations captured on
+unavailable. The forwarder drains acknowledged batches immediately when behind,
+and checks again after two seconds when idle or retrying a failure. The central
+map may represent duplicate observations captured on
 multiple node interfaces.
 
 The ingester exposes its authenticated batch endpoint only through the ClusterIP

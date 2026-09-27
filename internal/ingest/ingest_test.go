@@ -1,6 +1,7 @@
 package ingest
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -82,8 +83,8 @@ func TestForwarderAdvancesOnlyAfterAcknowledgedBatch(t *testing.T) {
 		t.Fatal(err)
 	}
 	forwarder := Forwarder{DB: local, URL: server.URL, Token: "token", CollectorID: "node-a", Logger: log.Default()}
-	if err := forwarder.send(t.Context()); err != nil {
-		t.Fatal(err)
+	if sent, err := forwarder.send(t.Context()); err != nil || !sent {
+		t.Fatalf("sent = %t, error = %v", sent, err)
 	}
 	var cursor database.IngestCursor
 	if err := local.Where("endpoint = ?", server.URL).First(&cursor).Error; err != nil || cursor.EventID != event.ID {
@@ -106,8 +107,8 @@ func TestForwarderAdvancesOnlyAfterAcknowledgedBatch(t *testing.T) {
 	if err := local.Create(&newEvent).Error; err != nil || newEvent.ID <= event.ID {
 		t.Fatalf("collector reused an acknowledged source ID: %d <= %d, %v", newEvent.ID, event.ID, err)
 	}
-	if err := forwarder.send(t.Context()); err != nil {
-		t.Fatal(err)
+	if sent, err := forwarder.send(t.Context()); err != nil || !sent {
+		t.Fatalf("sent = %t, error = %v", sent, err)
 	}
 	if err := central.Model(&database.NetworkEvent{}).Count(&received).Error; err != nil || received != 2 {
 		t.Fatalf("received after cleanup = %d, %v", received, err)
@@ -125,7 +126,7 @@ func TestForwarderRetainsEventsWhenIngestionFails(t *testing.T) {
 	}))
 	defer server.Close()
 	forwarder := Forwarder{DB: local, URL: server.URL, Token: "token", CollectorID: "node-a", Logger: log.Default()}
-	if err := forwarder.send(t.Context()); err == nil {
+	if sent, err := forwarder.send(t.Context()); err == nil || sent {
 		t.Fatal("expected failed batch")
 	}
 	removed, err := local.ReclaimCollectorSpace(server.URL)
@@ -135,5 +136,43 @@ func TestForwarderRetainsEventsWhenIngestionFails(t *testing.T) {
 	var count int64
 	if err := local.Model(&database.NetworkEvent{}).Count(&count).Error; err != nil || count != 1 {
 		t.Fatalf("unacknowledged event count = %d, error = %v", count, err)
+	}
+}
+
+func TestForwarderDrainsBacklogWithoutWaitingBetweenBatches(t *testing.T) {
+	central := testDB(t, "central.db")
+	server := httptest.NewServer((&Receiver{DB: central, Token: "token"}).Handler())
+	defer server.Close()
+	local := testDB(t, "local.db")
+	events := make([]database.NetworkEvent, 205)
+	for i := range events {
+		events[i] = database.NetworkEvent{Timestamp: time.Now().UTC(), EventType: database.EventDNS}
+	}
+	if err := local.InsertBatch(events); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+	forwarder := Forwarder{DB: local, URL: server.URL, Token: "token", CollectorID: "node-a", Logger: log.Default()}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		forwarder.Run(ctx)
+	}()
+	defer func() { cancel(); <-done }()
+	ticker := time.NewTicker(20 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		var received int64
+		if err := central.Model(&database.NetworkEvent{}).Count(&received).Error; err != nil {
+			t.Fatal(err)
+		}
+		if received == int64(len(events)) {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatalf("only %d of %d events arrived before the next 2s polling cycle", received, len(events))
+		case <-ticker.C:
+		}
 	}
 }
