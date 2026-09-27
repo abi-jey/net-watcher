@@ -212,7 +212,16 @@ spec:
       initContainers:
         - name: prepare-data-directory
           image: busybox:1.37.0
-          command: ["sh", "-ec", "mkdir -p /var/lib/net-watcher && chown -R 0:0 /var/lib/net-watcher"]
+          # The desktop ingester is mounted below this hostPath. Never chown it.
+          command:
+            - sh
+            - -ec
+            - |
+              mkdir -p /var/lib/net-watcher
+              chown 0:0 /var/lib/net-watcher
+              for file in /var/lib/net-watcher/netwatcher.db*; do
+                if [ -e "$file" ]; then chown 0:0 "$file"; fi
+              done
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:
