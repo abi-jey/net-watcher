@@ -6,7 +6,7 @@ const { CONFIG, AppProvider, useApp, Layout, Pages } = NetWatcher;
 /**
  * App Content - Main layout with routing
  */
-function AppContent({ activeNav, onNavChange, totalEvents }) {
+function AppContent({ activeNav, onNavChange, totalEvents, stats }) {
     const { sidebarCollapsed } = useApp();
 
     // Render current page based on navigation
@@ -18,7 +18,7 @@ function AppContent({ activeNav, onNavChange, totalEvents }) {
                 return <Pages.DashboardPage />;
             case 'events':
             default:
-                return <Pages.EventsPage />;
+                return <Pages.EventsPage stats={stats} />;
         }
     };
 
@@ -41,22 +41,25 @@ function AppContent({ activeNav, onNavChange, totalEvents }) {
  */
 function App() {
     const [activeNav, setActiveNav] = useState(() => window.location.hash === '#map' ? 'map' : 'events');
-    const [totalEvents, setTotalEvents] = useState(0);
+    const [stats, setStats] = useState(null);
 
     // Update total events from stats
     useEffect(() => {
         const fetchTotal = async () => {
+            if (document.hidden) return;
             try {
                 const res = await fetch(`${CONFIG.API_BASE}/api/stats`);
                 const data = await res.json();
-                setTotalEvents(data.totalEvents || 0);
+                setStats(data);
             } catch (err) {
                 console.error('Failed to fetch total:', err);
             }
         };
         fetchTotal();
         const interval = setInterval(fetchTotal, CONFIG.AUTO_REFRESH_INTERVAL);
-        return () => clearInterval(interval);
+        const onVisible = () => { if (!document.hidden) fetchTotal(); };
+        document.addEventListener('visibilitychange', onVisible);
+        return () => { clearInterval(interval); document.removeEventListener('visibilitychange', onVisible); };
     }, []);
 
     return (
@@ -64,7 +67,8 @@ function App() {
             <AppContent 
                 activeNav={activeNav} 
                 onNavChange={id => { setActiveNav(id); window.history.replaceState(null, '', `#${id}`); }}
-                totalEvents={totalEvents}
+                totalEvents={stats?.totalEvents || 0}
+                stats={stats}
             />
         </AppProvider>
     );

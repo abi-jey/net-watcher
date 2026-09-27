@@ -59,11 +59,11 @@ func (s *Server) Start(ctx context.Context) error {
 
 	// API routes
 	mux.HandleFunc("/api/events", s.handleEvents)
-	mux.HandleFunc("/api/stats", cacheGET(5*time.Second, s.handleStats))
+	mux.HandleFunc("/api/stats", cacheGET(35*time.Second, s.handleStats))
 	mux.HandleFunc("/api/event-types", s.handleEventTypes)
 	mux.HandleFunc("/api/version", s.handleVersion)
-	mux.HandleFunc("/api/top-hosts", cacheGET(30*time.Second, s.handleTopHosts))
-	mux.HandleFunc("/api/traffic-timeline", cacheGET(30*time.Second, s.handleTrafficTimeline))
+	mux.HandleFunc("/api/top-hosts", cacheGET(65*time.Second, s.handleTopHosts))
+	mux.HandleFunc("/api/traffic-timeline", cacheGET(65*time.Second, s.handleTrafficTimeline))
 	mux.HandleFunc("/api/ws", s.hub.ServeWs)
 	mux.HandleFunc("/api/network-map", s.handleNetworkMap)
 	mux.HandleFunc("/api/dns-evidence", s.handleDNSEvidence)

@@ -341,8 +341,10 @@ NetWatcher.Components.TrafficChart = function() {
 
     // Auto-refresh
     useEffect(() => {
-        const interval = setInterval(fetchData, CONFIG.AUTO_REFRESH_INTERVAL);
-        return () => clearInterval(interval);
+        const interval = setInterval(() => { if (!document.hidden) fetchData(); }, CONFIG.AUTO_REFRESH_INTERVAL);
+        const onVisible = () => { if (!document.hidden) fetchData(); };
+        document.addEventListener('visibilitychange', onVisible);
+        return () => { clearInterval(interval); document.removeEventListener('visibilitychange', onVisible); };
     }, [fetchData]);
 
     const handleQuickRange = (range) => {

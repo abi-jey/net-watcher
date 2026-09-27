@@ -47,14 +47,13 @@ function eventMatchesFilters(event, filters) {
 /**
  * Events Page - Main events view
  */
-NetWatcher.Pages.EventsPage = function() {
+NetWatcher.Pages.EventsPage = function({ stats }) {
     const [events, setEvents] = useState([]);
     const [total, setTotal] = useState(0);
     const [page, setPage] = useState(1);
     const [pageSize, setPageSize] = useState(CONFIG.DEFAULT_PAGE_SIZE);
     const [totalPages, setTotalPages] = useState(0);
     const [loading, setLoading] = useState(true);
-    const [stats, setStats] = useState(null);
     const [eventTypes, setEventTypes] = useState([]);
     const [filters, setFilters] = useState({
         q: '',
@@ -137,16 +136,6 @@ NetWatcher.Pages.EventsPage = function() {
         setLoading(false);
     }, [page, pageSize, debouncedFilters]);
 
-    // Fetch stats
-    const fetchStats = useCallback(async () => {
-        try {
-            const res = await fetch(`${CONFIG.API_BASE}/api/stats`);
-            setStats(await res.json());
-        } catch (err) {
-            console.error('Failed to fetch stats:', err);
-        }
-    }, []);
-
     // Fetch event types
     const fetchEventTypes = useCallback(async () => {
         try {
@@ -181,16 +170,9 @@ NetWatcher.Pages.EventsPage = function() {
 
     // Initial data load
     useEffect(() => {
-        fetchStats();
         fetchEventTypes();
         fetchVersion();
-    }, [fetchStats, fetchEventTypes, fetchVersion]);
-
-    // Auto-refresh stats
-    useEffect(() => {
-        const interval = setInterval(fetchStats, CONFIG.AUTO_REFRESH_INTERVAL);
-        return () => clearInterval(interval);
-    }, [fetchStats]);
+    }, [fetchEventTypes, fetchVersion]);
 
     return (
         <>

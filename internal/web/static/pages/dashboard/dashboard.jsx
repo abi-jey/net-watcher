@@ -183,8 +183,10 @@ NetWatcher.Pages.DashboardPage = function() {
 
     // Auto-refresh
     useEffect(() => {
-        const interval = setInterval(fetchTopHosts, CONFIG.AUTO_REFRESH_INTERVAL);
-        return () => clearInterval(interval);
+        const interval = setInterval(() => { if (!document.hidden) fetchTopHosts(); }, CONFIG.AUTO_REFRESH_INTERVAL);
+        const onVisible = () => { if (!document.hidden) fetchTopHosts(); };
+        document.addEventListener('visibilitychange', onVisible);
+        return () => { clearInterval(interval); document.removeEventListener('visibilitychange', onVisible); };
     }, [fetchTopHosts]);
 
     const metricOptions = [

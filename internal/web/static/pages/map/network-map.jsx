@@ -113,6 +113,7 @@
             let timer;
             fitted.current = false;
             const refresh = async () => {
+                if (document.hidden) { if (live) timer = setTimeout(refresh, 5000); return; }
                 controller = new AbortController(); setLoading(true);
                 try {
                     const query = new URLSearchParams({ since, namespace, ip });

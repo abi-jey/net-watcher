@@ -87,8 +87,10 @@ observations.
 
 SQLite WAL keeps the single ingestion writer and the web query pool separate.
 The web pool is read-only and limited to two connections, so slow filtering and
-analytics cannot occupy the writer connection. Frequently requested statistics
-are cached for 5 seconds, and Top Hosts and timeline responses for 30 seconds.
+analytics cannot occupy the writer connection. The UI shares one statistics
+request between its sidebar and Events page and pauses automatic polling in
+hidden tabs. Frequently requested statistics are cached for 35 seconds, and
+Top Hosts and timeline responses for 65 seconds.
 Other read use cases can use the same read-only query path; long-range queries
 should eventually use pre-aggregated views instead of repeatedly scanning raw
 events. The example ingester is capped at 1 CPU core and 512 MiB memory.
