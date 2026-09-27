@@ -22,6 +22,11 @@ const (
 	batchPath     = "/api/ingest/v1/batch"
 	maxEvents     = 250
 	maxBatchBytes = 5 << 20
+	// Keep INSERTs within SQLite's 999-bind-variable compatibility limit:
+	// events have 41 columns, resolutions 20, and ingest keys 4.
+	eventInsertSize      = 20
+	resolutionInsertSize = 40
+	keyInsertSize        = 200
 )
 
 // Batch is an authenticated, idempotent request from one collector.
@@ -113,6 +118,9 @@ func validBatch(batch Batch) bool {
 
 func (r *Receiver) store(ctx context.Context, batch Batch) error {
 	return r.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		// The outer transaction already rolls back the whole batch, including
+		// evidence and ingest keys; avoid per-table savepoints for GORM batches.
+		tx = tx.Session(&gorm.Session{SkipDefaultTransaction: true})
 		resolutionIDs := make(map[uint]uint, len(batch.Resolutions))
 		for start := 0; start < len(batch.Resolutions); start += 500 {
 			end := min(start+500, len(batch.Resolutions))
@@ -139,7 +147,7 @@ func (r *Receiver) store(ctx context.Context, batch Batch) error {
 			newResolutions = append(newResolutions, resolution)
 		}
 		if len(newResolutions) > 0 {
-			if err := tx.CreateInBatches(&newResolutions, 25).Error; err != nil {
+			if err := tx.CreateInBatches(&newResolutions, resolutionInsertSize).Error; err != nil {
 				return err
 			}
 			mappings := make([]database.IngestedResolution, len(newResolutions))
@@ -147,7 +155,7 @@ func (r *Receiver) store(ctx context.Context, batch Batch) error {
 				resolutionIDs[newResolutionIDs[index]] = resolution.ID
 				mappings[index] = database.IngestedResolution{CollectorID: batch.CollectorID, SourceID: newResolutionIDs[index], ResolutionID: resolution.ID}
 			}
-			if err := tx.CreateInBatches(&mappings, 100).Error; err != nil {
+			if err := tx.CreateInBatches(&mappings, keyInsertSize).Error; err != nil {
 				return err
 			}
 		}
@@ -193,16 +201,14 @@ func (r *Receiver) store(ctx context.Context, batch Batch) error {
 			newEvents = append(newEvents, event)
 		}
 		if len(newEvents) > 0 {
-			// NetworkEvent has many columns: ten rows stay below SQLite's
-			// lowest common parameter limit while avoiding per-event inserts.
-			if err := tx.CreateInBatches(&newEvents, 10).Error; err != nil {
+			if err := tx.CreateInBatches(&newEvents, eventInsertSize).Error; err != nil {
 				return err
 			}
 			mappings := make([]database.IngestedEvent, len(newEvents))
 			for index, event := range newEvents {
 				mappings[index] = database.IngestedEvent{CollectorID: batch.CollectorID, SourceID: newEventIDs[index], EventID: event.ID}
 			}
-			if err := tx.CreateInBatches(&mappings, 100).Error; err != nil {
+			if err := tx.CreateInBatches(&mappings, keyInsertSize).Error; err != nil {
 				return err
 			}
 		}

@@ -90,6 +90,30 @@ func TestReceiverBatchesAndDeduplicatesManyEventsAndResolutions(t *testing.T) {
 	}
 }
 
+func TestReceiverRollsBackEvidenceWhenEventCannotBeStored(t *testing.T) {
+	db := testDB(t, "central.db")
+	receiver := Receiver{DB: db}
+	batch := sampleBatch()
+	batch.Events = append(batch.Events, database.NetworkEvent{ID: 8, Timestamp: batch.Events[0].Timestamp, EventType: database.EventTCPStart, DNSResolutionIDs: "[99]"})
+	if err := receiver.store(t.Context(), batch); err == nil {
+		t.Fatal("expected unbundled DNS evidence to reject the batch")
+	}
+	for _, model := range []interface{}{&database.NetworkEvent{}, &database.IngestedEvent{}, &database.DNSResolution{}, &database.IngestedResolution{}} {
+		var count int64
+		if err := db.Model(model).Count(&count).Error; err != nil || count != 0 {
+			t.Fatalf("%T has %d rows after rejected batch: %v", model, count, err)
+		}
+	}
+	batch.Events[1].DNSResolutionIDs = "[11]"
+	if err := receiver.store(t.Context(), batch); err != nil {
+		t.Fatalf("fixed batch failed after rollback: %v", err)
+	}
+	var count int64
+	if err := db.Model(&database.NetworkEvent{}).Count(&count).Error; err != nil || count != 2 {
+		t.Fatalf("stored %d events after retry: %v", count, err)
+	}
+}
+
 func TestReceiverRequiresBearerToken(t *testing.T) {
 	receiver := Receiver{DB: testDB(t, "central.db"), Token: "token"}
 	server := httptest.NewServer(receiver.Handler())
@@ -232,5 +256,42 @@ func TestForwarderSplitsOversizedBatchWithoutSkippingEvents(t *testing.T) {
 		if err := central.Model(&database.NetworkEvent{}).Count(&count).Error; err != nil || count != n {
 			t.Fatalf("after batch %d, stored %d events: %v", n, count, err)
 		}
+	}
+}
+
+func BenchmarkReceiverStore(b *testing.B) {
+	for _, withEvidence := range []bool{false, true} {
+		name := "events"
+		if withEvidence {
+			name = "events-and-evidence"
+		}
+		b.Run(name, func(b *testing.B) {
+			db, err := database.New(filepath.Join(b.TempDir(), "central.db"))
+			if err != nil {
+				b.Fatal(err)
+			}
+			defer db.Close()
+			receiver := Receiver{DB: db}
+			at := time.Now().UTC()
+			batch := Batch{CollectorID: "node-a", Events: make([]database.NetworkEvent, maxEvents)}
+			if withEvidence {
+				batch.Resolutions = make([]database.DNSResolution, maxEvents)
+			}
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := range b.N {
+				for j := range batch.Events {
+					id := uint(i*maxEvents + j + 1)
+					batch.Events[j] = database.NetworkEvent{ID: id, Timestamp: at, EventType: database.EventTCPStart, SrcIP: "10.0.0.2", DstIP: "203.0.113.10", DstPort: 443}
+					if withEvidence {
+						batch.Events[j].DNSResolutionIDs = fmt.Sprintf("[%d]", id)
+						batch.Resolutions[j] = database.DNSResolution{ID: id, ResponseTime: at, ExpiresAt: at.Add(time.Minute), Name: "api.test", IP: "203.0.113.10"}
+					}
+				}
+				if err := receiver.store(context.Background(), batch); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
 	}
 }
