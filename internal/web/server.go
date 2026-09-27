@@ -5,6 +5,7 @@ import (
 	"context"
 	"embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"net"
@@ -17,6 +18,7 @@ import (
 	"github.com/abja/net-watcher/internal/database"
 	"github.com/abja/net-watcher/internal/kube"
 	"github.com/charmbracelet/log"
+	"gorm.io/gorm"
 )
 
 //go:embed all:static
@@ -57,11 +59,11 @@ func (s *Server) Start(ctx context.Context) error {
 
 	// API routes
 	mux.HandleFunc("/api/events", s.handleEvents)
-	mux.HandleFunc("/api/stats", s.handleStats)
+	mux.HandleFunc("/api/stats", cacheGET(5*time.Second, s.handleStats))
 	mux.HandleFunc("/api/event-types", s.handleEventTypes)
 	mux.HandleFunc("/api/version", s.handleVersion)
-	mux.HandleFunc("/api/top-hosts", s.handleTopHosts)
-	mux.HandleFunc("/api/traffic-timeline", s.handleTrafficTimeline)
+	mux.HandleFunc("/api/top-hosts", cacheGET(30*time.Second, s.handleTopHosts))
+	mux.HandleFunc("/api/traffic-timeline", cacheGET(30*time.Second, s.handleTrafficTimeline))
 	mux.HandleFunc("/api/ws", s.hub.ServeWs)
 	mux.HandleFunc("/api/network-map", s.handleNetworkMap)
 	mux.HandleFunc("/api/dns-evidence", s.handleDNSEvidence)
@@ -195,7 +197,7 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	endDate := query.Get("endDate")
 
 	// Build query
-	dbQuery := s.db.Model(&database.NetworkEvent{})
+	dbQuery := s.db.WithContext(r.Context()).Model(&database.NetworkEvent{})
 
 	// Handle multi-select event types (comma-separated)
 	if eventType != "" {
@@ -232,12 +234,18 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 
 	// Get total count
 	var total int64
-	dbQuery.Count(&total)
+	if err := dbQuery.Count(&total).Error; err != nil {
+		http.Error(w, "could not count events", http.StatusServiceUnavailable)
+		return
+	}
 
 	// Get paginated results
 	var events []database.NetworkEvent
 	offset := (page - 1) * pageSize
-	dbQuery.Order("timestamp DESC").Limit(pageSize).Offset(offset).Find(&events)
+	if err := dbQuery.Order("timestamp DESC").Limit(pageSize).Offset(offset).Find(&events).Error; err != nil {
+		http.Error(w, "could not read events", http.StatusServiceUnavailable)
+		return
+	}
 
 	totalPages := int(total) / pageSize
 	if int(total)%pageSize > 0 {
@@ -258,8 +266,12 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 
 // handleStats returns database statistics
 func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
+	reader := s.db.WithContext(r.Context())
 	var total int64
-	s.db.Model(&database.NetworkEvent{}).Count(&total)
+	if err := reader.Model(&database.NetworkEvent{}).Count(&total).Error; err != nil {
+		http.Error(w, "could not count events", http.StatusServiceUnavailable)
+		return
+	}
 
 	// Count by event type
 	type eventCount struct {
@@ -267,10 +279,13 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 		Count     int64
 	}
 	var counts []eventCount
-	s.db.Model(&database.NetworkEvent{}).
+	if err := reader.Model(&database.NetworkEvent{}).
 		Select("event_type, count(*) as count").
 		Group("event_type").
-		Scan(&counts)
+		Scan(&counts).Error; err != nil {
+		http.Error(w, "could not count event types", http.StatusServiceUnavailable)
+		return
+	}
 
 	eventCounts := make(map[string]int64)
 	for _, c := range counts {
@@ -279,8 +294,14 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 
 	// Get first and last event timestamps
 	var firstEvent, lastEvent database.NetworkEvent
-	s.db.Model(&database.NetworkEvent{}).Order("timestamp ASC").First(&firstEvent)
-	s.db.Model(&database.NetworkEvent{}).Order("timestamp DESC").First(&lastEvent)
+	if err := reader.Model(&database.NetworkEvent{}).Order("timestamp ASC").First(&firstEvent).Error; err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+		http.Error(w, "could not read first event", http.StatusServiceUnavailable)
+		return
+	}
+	if err := reader.Model(&database.NetworkEvent{}).Order("timestamp DESC").First(&lastEvent).Error; err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+		http.Error(w, "could not read latest event", http.StatusServiceUnavailable)
+		return
+	}
 
 	response := StatsResponse{
 		TotalEvents: total,
@@ -301,9 +322,12 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 // handleEventTypes returns available event types
 func (s *Server) handleEventTypes(w http.ResponseWriter, r *http.Request) {
 	var types []string
-	s.db.Model(&database.NetworkEvent{}).
+	if err := s.db.WithContext(r.Context()).Model(&database.NetworkEvent{}).
 		Distinct("event_type").
-		Pluck("event_type", &types)
+		Pluck("event_type", &types).Error; err != nil {
+		http.Error(w, "could not read event types", http.StatusServiceUnavailable)
+		return
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(types)
@@ -375,30 +399,39 @@ func (s *Server) handleTopHosts(w http.ResponseWriter, r *http.Request) {
 
 	if metric == "traffic" {
 		// Order by total bytes
-		s.db.Model(&database.NetworkEvent{}).
+		if err := s.db.WithContext(r.Context()).Model(&database.NetworkEvent{}).
 			Select(groupColumn + " as host, count(*) as event_count, COALESCE(sum(byte_count), 0) as byte_count").
 			Where(groupColumn + " != '' AND " + groupColumn + " IS NOT NULL").
 			Group(groupColumn).
 			Order("byte_count DESC").
 			Limit(limit).
-			Scan(&results)
+			Scan(&results).Error; err != nil {
+			http.Error(w, "could not read top hosts", http.StatusServiceUnavailable)
+			return
+		}
 	} else {
 		// Order by event count
-		s.db.Model(&database.NetworkEvent{}).
+		if err := s.db.WithContext(r.Context()).Model(&database.NetworkEvent{}).
 			Select(groupColumn + " as host, count(*) as event_count, COALESCE(sum(byte_count), 0) as byte_count").
 			Where(groupColumn + " != '' AND " + groupColumn + " IS NOT NULL").
 			Group(groupColumn).
 			Order("event_count DESC").
 			Limit(limit).
-			Scan(&results)
+			Scan(&results).Error; err != nil {
+			http.Error(w, "could not read top hosts", http.StatusServiceUnavailable)
+			return
+		}
 	}
 
 	// Get total unique hosts
 	var total int64
-	s.db.Model(&database.NetworkEvent{}).
+	if err := s.db.WithContext(r.Context()).Model(&database.NetworkEvent{}).
 		Where(groupColumn + " != '' AND " + groupColumn + " IS NOT NULL").
 		Distinct(groupColumn).
-		Count(&total)
+		Count(&total).Error; err != nil {
+		http.Error(w, "could not count top hosts", http.StatusServiceUnavailable)
+		return
+	}
 
 	response := TopHostsResponse{
 		Hosts:    results,
@@ -509,7 +542,7 @@ func (s *Server) handleTrafficTimeline(w http.ResponseWriter, r *http.Request) {
 	var buckets []bucketData
 
 	// SQLite date formatting for grouping
-	s.db.Model(&database.NetworkEvent{}).
+	if err := s.db.WithContext(r.Context()).Model(&database.NetworkEvent{}).
 		Select(`strftime('`+sqlFormat+`', timestamp) as bucket,
 			COALESCE(SUM(CASE WHEN src_ip LIKE '192.168.%' OR src_ip LIKE '10.%' OR src_ip LIKE '172.16.%' THEN byte_count ELSE 0 END), 0) as bytes_out,
 			COALESCE(SUM(CASE WHEN dst_ip LIKE '192.168.%' OR dst_ip LIKE '10.%' OR dst_ip LIKE '172.16.%' THEN byte_count ELSE 0 END), 0) as bytes_in,
@@ -517,7 +550,10 @@ func (s *Server) handleTrafficTimeline(w http.ResponseWriter, r *http.Request) {
 		Where("timestamp >= ? AND timestamp <= ?", startTime, endTime).
 		Group("bucket").
 		Order("bucket ASC").
-		Scan(&buckets)
+		Scan(&buckets).Error; err != nil {
+		http.Error(w, "could not read traffic timeline", http.StatusServiceUnavailable)
+		return
+	}
 
 	// Convert to response format with proper timestamps
 	data := make([]TrafficDataPoint, 0, len(buckets))

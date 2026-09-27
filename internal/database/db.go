@@ -46,6 +46,28 @@ func New(dbPath string) (*DB, error) {
 	return &DB{DB: db, path: dbPath}, nil
 }
 
+// OpenReadOnly uses a separate SQLite WAL reader pool so long-running queries
+// cannot queue behind the single ingest writer connection.
+func OpenReadOnly(dbPath string) (*DB, error) {
+	db, err := gorm.Open(sqlite.Open("file:"+dbPath+"?mode=ro&_busy_timeout=5000"), &gorm.Config{
+		Logger: logger.Default.LogMode(logger.Silent),
+	})
+	if err != nil {
+		return nil, err
+	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		return nil, err
+	}
+	sqlDB.SetMaxOpenConns(2)
+	sqlDB.SetMaxIdleConns(2)
+	if err := sqlDB.Ping(); err != nil {
+		_ = sqlDB.Close()
+		return nil, err
+	}
+	return &DB{DB: db, path: dbPath}, nil
+}
+
 // Close closes the database connection
 func (db *DB) Close() error {
 	sqlDB, err := db.DB.DB()

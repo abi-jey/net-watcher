@@ -2,9 +2,11 @@ package ingest
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -51,6 +53,40 @@ func TestReceiverStoresIdempotentBatchAndRemapsEvidence(t *testing.T) {
 	var resolutions []database.DNSResolution
 	if err := db.Find(&resolutions).Error; err != nil || len(resolutions) != 1 || resolutions[0].CollectorID != "node-a" {
 		t.Fatalf("resolutions: %#v, %v", resolutions, err)
+	}
+}
+
+func TestReceiverBatchesAndDeduplicatesManyEventsAndResolutions(t *testing.T) {
+	db := testDB(t, "large-central.db")
+	batch := Batch{CollectorID: "node-a"}
+	at := time.Now().UTC()
+	for i := range maxEvents {
+		id := uint(i + 1)
+		batch.Resolutions = append(batch.Resolutions, database.DNSResolution{ID: id, ResponseTime: at, ExpiresAt: at.Add(time.Minute), Name: "api.test", IP: "203.0.113.10"})
+		batch.Events = append(batch.Events, database.NetworkEvent{ID: id, Timestamp: at, EventType: database.EventTCPStart, DstPort: uint16(i + 1), DNSResolutionIDs: fmt.Sprintf("[%d]", id)})
+	}
+	// Also exercise the chunked lookup for more than 500 referenced resolutions.
+	for i := maxEvents; i < maxEvents*3; i++ {
+		batch.Resolutions = append(batch.Resolutions, database.DNSResolution{ID: uint(i + 1), ResponseTime: at, ExpiresAt: at.Add(time.Minute), Name: "extra.test", IP: "203.0.113.11"})
+	}
+	receiver := Receiver{DB: db, Token: "token"}
+	for range 2 {
+		if err := receiver.store(t.Context(), batch); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, check := range []struct {
+		model interface{}
+		want  int64
+	}{{&database.NetworkEvent{}, int64(maxEvents)}, {&database.IngestedEvent{}, int64(maxEvents)}, {&database.DNSResolution{}, int64(maxEvents * 3)}, {&database.IngestedResolution{}, int64(maxEvents * 3)}} {
+		var count int64
+		if err := db.Model(check.model).Count(&count).Error; err != nil || count != check.want {
+			t.Fatalf("%T count = %d, want %d, error = %v", check.model, count, check.want, err)
+		}
+	}
+	var first database.NetworkEvent
+	if err := db.Where("dst_port = ?", 1).First(&first).Error; err != nil || first.DNSResolutionIDs != "[1]" {
+		t.Fatalf("first event evidence mapping = %q, error = %v", first.DNSResolutionIDs, err)
 	}
 }
 
@@ -144,7 +180,7 @@ func TestForwarderDrainsBacklogWithoutWaitingBetweenBatches(t *testing.T) {
 	server := httptest.NewServer((&Receiver{DB: central, Token: "token"}).Handler())
 	defer server.Close()
 	local := testDB(t, "local.db")
-	events := make([]database.NetworkEvent, 205)
+	events := make([]database.NetworkEvent, maxEvents*2+5)
 	for i := range events {
 		events[i] = database.NetworkEvent{Timestamp: time.Now().UTC(), EventType: database.EventDNS}
 	}
@@ -173,6 +209,28 @@ func TestForwarderDrainsBacklogWithoutWaitingBetweenBatches(t *testing.T) {
 		case <-ctx.Done():
 			t.Fatalf("only %d of %d events arrived before the next 2s polling cycle", received, len(events))
 		case <-ticker.C:
+		}
+	}
+}
+
+func TestForwarderSplitsOversizedBatchWithoutSkippingEvents(t *testing.T) {
+	central := testDB(t, "central.db")
+	server := httptest.NewServer((&Receiver{DB: central, Token: "token"}).Handler())
+	defer server.Close()
+	local := testDB(t, "local.db")
+	for range 2 {
+		if err := local.InsertEvent(&database.NetworkEvent{Timestamp: time.Now().UTC(), EventType: database.EventTCPStart, SourceContext: strings.Repeat("x", 3<<20)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	forwarder := Forwarder{DB: local, URL: server.URL, Token: "token", CollectorID: "node-a", Logger: log.Default()}
+	for n := int64(1); n <= 2; n++ {
+		if sent, err := forwarder.send(t.Context()); err != nil || !sent {
+			t.Fatalf("batch %d: sent = %t, error = %v", n, sent, err)
+		}
+		var count int64
+		if err := central.Model(&database.NetworkEvent{}).Count(&count).Error; err != nil || count != n {
+			t.Fatalf("after batch %d, stored %d events: %v", n, count, err)
 		}
 	}
 }

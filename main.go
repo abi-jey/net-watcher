@@ -221,7 +221,13 @@ func main() {
 
 		// Start web server if enabled
 		if *enableWeb {
-			server := web.NewServer(db, *webPort, logger, version)
+			reader, err := database.OpenReadOnly(*dbPath)
+			if err != nil {
+				log.Error("Failed to open read-only web database", "error", err)
+				return
+			}
+			defer reader.Close()
+			server := web.NewServer(reader, *webPort, logger, version)
 			server.Host = *webHost
 			server.Kubernetes = inventory
 			server.OwnedCIDRs = ownedPrefixes

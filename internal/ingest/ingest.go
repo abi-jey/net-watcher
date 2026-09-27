@@ -16,12 +16,11 @@ import (
 	"github.com/abja/net-watcher/internal/database"
 	"github.com/charmbracelet/log"
 	"gorm.io/gorm"
-	"gorm.io/gorm/clause"
 )
 
 const (
 	batchPath     = "/api/ingest/v1/batch"
-	maxEvents     = 100
+	maxEvents     = 250
 	maxBatchBytes = 5 << 20
 )
 
@@ -96,15 +95,18 @@ func validBatch(batch Batch) bool {
 	if len(batch.CollectorID) == 0 || len(batch.CollectorID) > 253 || len(batch.Events) > maxEvents || len(batch.Resolutions) > maxEvents*4 {
 		return false
 	}
+	eventIDs, resolutionIDs := make(map[uint]bool), make(map[uint]bool)
 	for _, event := range batch.Events {
-		if event.ID == 0 || event.Timestamp.IsZero() || event.EventType == "" {
+		if event.ID == 0 || event.Timestamp.IsZero() || event.EventType == "" || eventIDs[event.ID] {
 			return false
 		}
+		eventIDs[event.ID] = true
 	}
 	for _, resolution := range batch.Resolutions {
-		if resolution.ID == 0 || resolution.ResponseTime.IsZero() || resolution.Name == "" || resolution.IP == "" {
+		if resolution.ID == 0 || resolution.ResponseTime.IsZero() || resolution.Name == "" || resolution.IP == "" || resolutionIDs[resolution.ID] {
 			return false
 		}
+		resolutionIDs[resolution.ID] = true
 	}
 	return true
 }
@@ -112,39 +114,63 @@ func validBatch(batch Batch) bool {
 func (r *Receiver) store(ctx context.Context, batch Batch) error {
 	return r.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		resolutionIDs := make(map[uint]uint, len(batch.Resolutions))
+		for start := 0; start < len(batch.Resolutions); start += 500 {
+			end := min(start+500, len(batch.Resolutions))
+			ids := make([]uint, 0, end-start)
+			for _, resolution := range batch.Resolutions[start:end] {
+				ids = append(ids, resolution.ID)
+			}
+			var existing []database.IngestedResolution
+			if err := tx.Where("collector_id = ? AND source_id IN ?", batch.CollectorID, ids).Find(&existing).Error; err != nil {
+				return err
+			}
+			for _, mapping := range existing {
+				resolutionIDs[mapping.SourceID] = mapping.ResolutionID
+			}
+		}
+		newResolutions := make([]database.DNSResolution, 0, len(batch.Resolutions))
+		newResolutionIDs := make([]uint, 0, len(batch.Resolutions))
 		for _, resolution := range batch.Resolutions {
-			sourceID := resolution.ID
-			var existing database.IngestedResolution
-			err := tx.Where("collector_id = ? AND source_id = ?", batch.CollectorID, sourceID).First(&existing).Error
-			if err == nil {
-				resolutionIDs[sourceID] = existing.ResolutionID
+			if resolutionIDs[resolution.ID] != 0 {
 				continue
 			}
-			if !errors.Is(err, gorm.ErrRecordNotFound) {
-				return err
-			}
+			newResolutionIDs = append(newResolutionIDs, resolution.ID)
 			resolution.ID, resolution.CollectorID = 0, batch.CollectorID
-			if err := tx.Create(&resolution).Error; err != nil {
-				return err
-			}
-			mapping := database.IngestedResolution{CollectorID: batch.CollectorID, SourceID: sourceID, ResolutionID: resolution.ID}
-			if err := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&mapping).Error; err != nil {
-				return err
-			}
-			if mapping.ID == 0 {
-				if err := tx.Where("collector_id = ? AND source_id = ?", batch.CollectorID, sourceID).First(&mapping).Error; err != nil {
-					return err
-				}
-			}
-			resolutionIDs[sourceID] = mapping.ResolutionID
+			newResolutions = append(newResolutions, resolution)
 		}
+		if len(newResolutions) > 0 {
+			if err := tx.CreateInBatches(&newResolutions, 25).Error; err != nil {
+				return err
+			}
+			mappings := make([]database.IngestedResolution, len(newResolutions))
+			for index, resolution := range newResolutions {
+				resolutionIDs[newResolutionIDs[index]] = resolution.ID
+				mappings[index] = database.IngestedResolution{CollectorID: batch.CollectorID, SourceID: newResolutionIDs[index], ResolutionID: resolution.ID}
+			}
+			if err := tx.CreateInBatches(&mappings, 100).Error; err != nil {
+				return err
+			}
+		}
+		ids := make([]uint, 0, len(batch.Events))
+		for _, event := range batch.Events {
+			ids = append(ids, event.ID)
+		}
+		existingEvents := map[uint]bool{}
+		if len(ids) > 0 {
+			var mappings []database.IngestedEvent
+			if err := tx.Where("collector_id = ? AND source_id IN ?", batch.CollectorID, ids).Find(&mappings).Error; err != nil {
+				return err
+			}
+			for _, mapping := range mappings {
+				existingEvents[mapping.SourceID] = true
+			}
+		}
+		newEvents := make([]database.NetworkEvent, 0, len(batch.Events))
+		newEventIDs := make([]uint, 0, len(batch.Events))
 		for _, event := range batch.Events {
 			sourceID := event.ID
-			var existing database.IngestedEvent
-			if err := tx.Where("collector_id = ? AND source_id = ?", batch.CollectorID, sourceID).First(&existing).Error; err == nil {
+			if existingEvents[sourceID] {
 				continue
-			} else if !errors.Is(err, gorm.ErrRecordNotFound) {
-				return err
 			}
 			var sourceEvidence []uint
 			if event.DNSResolutionIDs != "" && json.Unmarshal([]byte(event.DNSResolutionIDs), &sourceEvidence) != nil {
@@ -163,11 +189,20 @@ func (r *Receiver) store(ctx context.Context, batch Batch) error {
 				event.DNSResolutionIDs = string(encoded)
 			}
 			event.ID, event.CollectorID = 0, batch.CollectorID
-			if err := tx.Create(&event).Error; err != nil {
+			newEventIDs = append(newEventIDs, sourceID)
+			newEvents = append(newEvents, event)
+		}
+		if len(newEvents) > 0 {
+			// NetworkEvent has many columns: ten rows stay below SQLite's
+			// lowest common parameter limit while avoiding per-event inserts.
+			if err := tx.CreateInBatches(&newEvents, 10).Error; err != nil {
 				return err
 			}
-			mapping := database.IngestedEvent{CollectorID: batch.CollectorID, SourceID: sourceID, EventID: event.ID}
-			if err := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&mapping).Error; err != nil {
+			mappings := make([]database.IngestedEvent, len(newEvents))
+			for index, event := range newEvents {
+				mappings[index] = database.IngestedEvent{CollectorID: batch.CollectorID, SourceID: newEventIDs[index], EventID: event.ID}
+			}
+			if err := tx.CreateInBatches(&mappings, 100).Error; err != nil {
 				return err
 			}
 		}
@@ -224,29 +259,21 @@ func (f *Forwarder) send(ctx context.Context) (bool, error) {
 	if err := f.DB.Where("id > ?", cursor.EventID).Order("id ASC").Limit(maxEvents).Find(&events).Error; err != nil || len(events) == 0 {
 		return false, err
 	}
-	resolutionIDs := make(map[uint]bool)
-	for _, event := range events {
-		var ids []uint
-		if event.DNSResolutionIDs != "" && json.Unmarshal([]byte(event.DNSResolutionIDs), &ids) != nil {
-			return false, fmt.Errorf("decode local DNS evidence for event %d", event.ID)
-		}
-		for _, id := range ids {
-			resolutionIDs[id] = true
-		}
-	}
-	resolutions := make([]database.DNSResolution, 0, len(resolutionIDs))
-	if len(resolutionIDs) > 0 {
-		ids := make([]uint, 0, len(resolutionIDs))
-		for id := range resolutionIDs {
-			ids = append(ids, id)
-		}
-		if err := f.DB.Where("id IN ?", ids).Find(&resolutions).Error; err != nil {
+	var body []byte
+	for {
+		var resolutionCount int
+		var err error
+		body, resolutionCount, err = f.marshalBatch(events)
+		if err != nil {
 			return false, err
 		}
-	}
-	body, err := json.Marshal(Batch{CollectorID: f.CollectorID, Events: events, Resolutions: resolutions})
-	if err != nil {
-		return false, err
+		if len(body) <= maxBatchBytes && resolutionCount <= maxEvents*4 {
+			break
+		}
+		if len(events) == 1 {
+			return false, fmt.Errorf("event %d and its DNS evidence exceed ingestion batch limits", events[0].ID)
+		}
+		events = events[:len(events)/2]
 	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(f.URL, "/")+batchPath, bytes.NewReader(body))
 	if err != nil {
@@ -266,4 +293,39 @@ func (f *Forwarder) send(ctx context.Context) (bool, error) {
 		return false, err
 	}
 	return true, nil
+}
+
+func (f *Forwarder) marshalBatch(events []database.NetworkEvent) ([]byte, int, error) {
+	resolutionIDs := make(map[uint]bool)
+	for _, event := range events {
+		var ids []uint
+		if event.DNSResolutionIDs != "" && json.Unmarshal([]byte(event.DNSResolutionIDs), &ids) != nil {
+			return nil, 0, fmt.Errorf("decode local DNS evidence for event %d", event.ID)
+		}
+		for _, id := range ids {
+			resolutionIDs[id] = true
+		}
+	}
+	resolutions := make([]database.DNSResolution, 0, len(resolutionIDs))
+	if len(resolutionIDs) > 0 {
+		ids := make([]uint, 0, len(resolutionIDs))
+		for id := range resolutionIDs {
+			ids = append(ids, id)
+		}
+		for start := 0; start < len(ids); start += 500 {
+			var rows []database.DNSResolution
+			if err := f.DB.Where("id IN ?", ids[start:min(start+500, len(ids))]).Find(&rows).Error; err != nil {
+				return nil, 0, err
+			}
+			resolutions = append(resolutions, rows...)
+		}
+		if len(resolutions) != len(resolutionIDs) {
+			return nil, 0, fmt.Errorf("%d of %d referenced DNS resolutions are unavailable", len(resolutionIDs)-len(resolutions), len(resolutionIDs))
+		}
+	}
+	body, err := json.Marshal(Batch{CollectorID: f.CollectorID, Events: events, Resolutions: resolutions})
+	if err != nil {
+		return nil, 0, err
+	}
+	return body, len(resolutions), nil
 }

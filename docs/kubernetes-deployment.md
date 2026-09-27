@@ -77,8 +77,21 @@ evidence, then reclaims unused disk pages. Pending events are never discarded
 to meet the central size limit; a collector can grow while ingestion is
 unavailable. The forwarder drains acknowledged batches immediately when behind,
 and checks again after two seconds when idle or retrying a failure. The central
-map may represent duplicate observations captured on
-multiple node interfaces.
+map may represent duplicate observations captured on multiple node interfaces.
+The forwarder sends up to 250 events per request, splitting batches that would
+exceed the 5 MiB request limit. The ingester looks up retry keys in indexed
+groups and inserts new events and DNS evidence in bounded SQL batches inside a
+transaction; the collector cursor advances only after the transaction is
+acknowledged. Retry deduplication does not attempt to merge distinct capture
+observations.
+
+SQLite WAL keeps the single ingestion writer and the web query pool separate.
+The web pool is read-only and limited to two connections, so slow filtering and
+analytics cannot occupy the writer connection. Frequently requested statistics
+are cached for 5 seconds, and Top Hosts and timeline responses for 30 seconds.
+Other read use cases can use the same read-only query path; long-range queries
+should eventually use pre-aggregated views instead of repeatedly scanning raw
+events. The example ingester is capped at 1.5 CPU cores and 512 MiB memory.
 
 The ingester exposes its authenticated batch endpoint only through the ClusterIP
 Service on port 8921. The map UI is exposed through the Tailscale `ts-serve`

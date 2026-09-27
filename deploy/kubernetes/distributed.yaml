@@ -165,6 +165,7 @@ spec:
               cpu: 100m
               memory: 128Mi
             limits:
+              cpu: 1500m
               memory: 512Mi
           securityContext:
             allowPrivilegeEscalation: false
