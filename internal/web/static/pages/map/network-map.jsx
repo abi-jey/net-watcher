@@ -64,7 +64,7 @@
             <h2>{node ? node.Label : link.Kind === 'connection' ? `${link.Protocol} connection` : 'DNS relationship'}</h2>
             {node && <><dl>
                 <dt>Kind</dt><dd>{node.Kind}</dd><dt>Address</dt><dd>{node.IP || 'DNS name'}</dd>
-                {node.Kind !== 'dns' && <><dt>Network</dt><dd>{node.Scope}</dd><dt>Ownership</dt><dd>{node.Ownership === 'ours' ? node.OwnershipSource === 'configured' ? 'Ours · configured address' : 'Ours · Kubernetes inventory' : 'Unattributed · ownership unknown'}</dd></>}
+                {node.Kind !== 'dns' && <><dt>Network</dt><dd>{node.Scope}</dd><dt>Ownership</dt><dd>{node.Ownership === 'ours' ? node.OwnershipSource === 'configured' ? 'Ours · configured address' : node.OwnershipSource === 'observed-node' ? 'Ours · node identity observed in this view' : 'Ours · Kubernetes inventory' : 'Unattributed · ownership unknown'}</dd></>}
                 {node.Context?.Namespace && <><dt>Namespace</dt><dd>{node.Context.Namespace}</dd></>}
                 {node.Context?.Node && <><dt>Node</dt><dd>{node.Context.Node}</dd></>}
                 {node.Context?.UID && <><dt>Resource UID</dt><dd>{node.Context.UID}</dd></>}

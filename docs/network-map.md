@@ -95,10 +95,14 @@ Enrichment includes:
 - Host-network traffic identified as the node, rather than arbitrarily assigning
   the shared address to a particular host-network pod.
 
-Endpoint metadata is saved **at capture time**. Old observations are not relabeled
-with today's owner of a reused pod IP. Inventory can lag between refreshes; its
-timestamp is displayed in the inspector. Service membership is a candidate based
-on inventory, not proof of a particular NAT traversal.
+Endpoint metadata is saved **at capture time**. Stored observations are not
+rewritten with today's owner of a reused pod IP. Inventory can lag between
+refreshes; its timestamp is displayed in the inspector. Service membership is a
+candidate based on inventory, not proof of a particular NAT traversal.
+Within a selected map sample, older unattributed observations of a node address
+share its node marker only if the sample contains one unambiguous captured node
+identity for that IP. This read-time association does not alter stored events or
+infer ownership for reused pod IPs.
 
 `--kubernetes` includes virtual interfaces during automatic interface selection.
 `--include-virtual` enables that behavior independently. Automatic discovery checks

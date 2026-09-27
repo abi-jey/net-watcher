@@ -116,3 +116,58 @@ func TestMapDistinguishesKubernetesOwnershipFromAddressScope(t *testing.T) {
 		}
 	}
 }
+
+func TestMapAssociatesUnattributedNodeHistoryOnlyWhenIdentityIsUnambiguous(t *testing.T) {
+	db, err := database.New(filepath.Join(t.TempDir(), "node-history.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	at := time.Now()
+	old := database.NetworkEvent{Timestamp: at.Add(-time.Minute), EventType: database.EventTCPStart, SrcIP: "10.0.1.155", DstIP: "10.2.0.8", DstPort: 8000}
+	current := database.NetworkEvent{Timestamp: at, EventType: database.EventTCPStart, SrcIP: old.SrcIP, DstIP: old.DstIP, DstPort: 8000, SourceContext: `{"Kind":"node","Name":"abja","UID":"node-1"}`}
+	if err := db.InsertBatch([]database.NetworkEvent{old, current}); err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{db: db, Kubernetes: kube.New(nil)}
+	read := func() NetworkMap {
+		t.Helper()
+		recorder := httptest.NewRecorder()
+		server.handleNetworkMap(recorder, httptest.NewRequest("GET", "/api/network-map?ip=10.0.1.155", nil))
+		if recorder.Code != 200 {
+			t.Fatal(recorder.Body.String())
+		}
+		var result NetworkMap
+		if err := json.Unmarshal(recorder.Body.Bytes(), &result); err != nil {
+			t.Fatal(err)
+		}
+		return result
+	}
+	result := read()
+	var matches []MapNode
+	for _, node := range result.Nodes {
+		if node.IP == old.SrcIP {
+			matches = append(matches, node)
+		}
+	}
+	if len(matches) != 1 || matches[0].Label != "abja" || matches[0].Ownership != "ours" || len(result.Links) != 1 || result.Links[0].Events != 2 {
+		t.Fatalf("stable node IP was not unified: nodes=%+v links=%+v", matches, result.Links)
+	}
+	replacement := current
+	replacement.ID = 0
+	replacement.Timestamp = at.Add(time.Second)
+	replacement.SourceContext = `{"Kind":"node","Name":"replacement","UID":"node-2"}`
+	if err := db.InsertEvent(&replacement); err != nil {
+		t.Fatal(err)
+	}
+	result = read()
+	matches = nil
+	for _, node := range result.Nodes {
+		if node.IP == old.SrcIP {
+			matches = append(matches, node)
+		}
+	}
+	if len(matches) != 3 {
+		t.Fatalf("ambiguous node IP was reassigned: %+v", matches)
+	}
+}

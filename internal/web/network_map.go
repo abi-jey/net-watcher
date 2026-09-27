@@ -98,6 +98,34 @@ func networkNode(ip, context string, owned []netip.Prefix) MapNode {
 	return result
 }
 
+// observedNodeAddresses uses only unambiguous node identities from the selected
+// observations. Pod IPs are never relabeled from a later inventory snapshot.
+func observedNodeAddresses(events []database.NetworkEvent, evidence []database.DNSResolution) map[string]kube.Endpoint {
+	known := map[string]kube.Endpoint{}
+	ambiguous := map[string]bool{}
+	add := func(ip, raw string) {
+		info := endpointContext(raw)
+		if ip == "" || info.Kind != "node" || info.UID == "" || ambiguous[ip] {
+			return
+		}
+		if prior, ok := known[ip]; ok && prior.UID != info.UID {
+			delete(known, ip)
+			ambiguous[ip] = true
+			return
+		}
+		known[ip] = info
+	}
+	for _, event := range events {
+		add(event.SrcIP, event.SourceContext)
+		add(event.DstIP, event.DestinationContext)
+	}
+	for _, record := range evidence {
+		add(record.ClientIP, record.ClientContext)
+		add(record.IP, record.AddressContext)
+	}
+	return known
+}
+
 func addID(ids []uint, id uint) []uint {
 	for _, existing := range ids {
 		if existing == id {
@@ -177,6 +205,17 @@ func (s *Server) handleNetworkMap(w http.ResponseWriter, r *http.Request) {
 	}
 	nodes, links := map[string]MapNode{}, map[string]*MapLink{}
 	namespaces := map[string]bool{}
+	knownNodes := observedNodeAddresses(events, evidence)
+	nodeFor := func(ip, raw string) MapNode {
+		node := networkNode(ip, raw, s.OwnedCIDRs)
+		if node.Context.Kind == "" {
+			if info, ok := knownNodes[ip]; ok {
+				node.ID, node.Label, node.Kind, node.Context = "node:"+info.UID+":"+ip, info.Name, "node", info
+				node.Ownership, node.OwnershipSource = "ours", "observed-node"
+			}
+		}
+		return node
+	}
 	addNodes := func(a, b MapNode) bool {
 		needed := 0
 		if _, ok := nodes[a.ID]; !ok {
@@ -189,14 +228,18 @@ func (s *Server) handleNetworkMap(w http.ResponseWriter, r *http.Request) {
 			response.Truncated = true
 			return false
 		}
-		nodes[a.ID], nodes[b.ID] = a, b
+		for _, node := range []MapNode{a, b} {
+			if existing, ok := nodes[node.ID]; !ok || existing.OwnershipSource != "kubernetes" || node.OwnershipSource == "kubernetes" {
+				nodes[node.ID] = node
+			}
+		}
 		return true
 	}
 	for _, event := range events {
 		if event.SrcIP == "" || event.DstIP == "" {
 			continue
 		}
-		src, dst := networkNode(event.SrcIP, event.SourceContext, s.OwnedCIDRs), networkNode(event.DstIP, event.DestinationContext, s.OwnedCIDRs)
+		src, dst := nodeFor(event.SrcIP, event.SourceContext), nodeFor(event.DstIP, event.DestinationContext)
 		if src.Context.Namespace != "" {
 			namespaces[src.Context.Namespace] = true
 		}
@@ -250,7 +293,7 @@ func (s *Server) handleNetworkMap(w http.ResponseWriter, r *http.Request) {
 		response.Observations++
 	}
 	for _, record := range evidence {
-		client := networkNode(record.ClientIP, record.ClientContext, s.OwnedCIDRs)
+		client := nodeFor(record.ClientIP, record.ClientContext)
 		if client.Context.Namespace != "" {
 			namespaces[client.Context.Namespace] = true
 		}
@@ -258,7 +301,7 @@ func (s *Server) handleNetworkMap(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		domain := MapNode{ID: "dns:" + client.ID + ":" + record.ResolverIP + ":" + record.Name, Label: record.Name, Kind: "dns", Scope: "dns"}
-		address := networkNode(record.IP, record.AddressContext, s.OwnedCIDRs)
+		address := nodeFor(record.IP, record.AddressContext)
 		// Reuse an observed destination only if its incarnation is unambiguous.
 		var candidates []MapNode
 		for _, node := range nodes {
