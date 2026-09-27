@@ -91,7 +91,7 @@ analytics cannot occupy the writer connection. Frequently requested statistics
 are cached for 5 seconds, and Top Hosts and timeline responses for 30 seconds.
 Other read use cases can use the same read-only query path; long-range queries
 should eventually use pre-aggregated views instead of repeatedly scanning raw
-events. The example ingester is capped at 1.5 CPU cores and 512 MiB memory.
+events. The example ingester is capped at 1 CPU core and 512 MiB memory.
 
 The ingester exposes its authenticated batch endpoint only through the ClusterIP
 Service on port 8921. The map UI is exposed through the Tailscale `ts-serve`
