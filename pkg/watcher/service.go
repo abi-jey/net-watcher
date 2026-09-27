@@ -2,6 +2,7 @@ package watcher
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"sync"
@@ -153,7 +154,6 @@ func (w *Watcher) sniffInterface(ctx context.Context, iface net.Interface) error
 		decoder = layers.LinkTypeRaw
 	}
 	source := gopacket.NewPacketSource(handle, decoder)
-	packets := source.Packets()
 
 	// 3. Start packet drop monitoring goroutine
 	go w.monitorDrops(ctx, handle, iface.Name)
@@ -161,17 +161,19 @@ func (w *Watcher) sniffInterface(ctx context.Context, iface net.Interface) error
 	// 4. Process packets loop
 	w.logger.Info("Capture running...", "interface", iface.Name)
 
-	for {
-		select {
-		case <-ctx.Done():
-			return nil
-		case packet, ok := <-packets:
-			if !ok {
-				return fmt.Errorf("capture stream closed")
-			}
-			w.processPacket(packet, iface.Name)
+	for ctx.Err() == nil {
+		// Packets() starts a reader goroutine which may access the mmap after
+		// handle.Close when a discovered interface disappears.
+		packet, err := source.NextPacket()
+		if errors.Is(err, afpacket.ErrTimeout) {
+			continue
 		}
+		if err != nil {
+			return fmt.Errorf("read packet from %s: %w", iface.Name, err)
+		}
+		w.processPacket(packet, iface.Name)
 	}
+	return nil
 }
 
 // monitorDrops periodically checks for packet drops and logs warnings
