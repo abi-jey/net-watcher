@@ -72,6 +72,8 @@ type NetworkEvent struct {
 	Protocol           string
 	SourceContext      string // JSON Kubernetes inventory snapshot at capture time.
 	DestinationContext string
+	ProcessPID         int    // Host PID observed through read-only procfs; zero when unavailable.
+	ProcessCommand     string // Kernel comm name; never full command-line arguments.
 
 	// Compaction metadata
 	Compacted   bool   // Whether this is a compacted record

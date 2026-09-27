@@ -30,6 +30,11 @@ func (w *Watcher) SetContextLookup(lookup func(string, uint16, string) string) {
 	w.sessionManager.contextLookup = lookup
 }
 
+// EnableProcessAttribution uses a read-only host proc mount for local TLS flows.
+func (w *Watcher) EnableProcessAttribution(root string) error {
+	return w.sessionManager.EnableProcessAttribution(root)
+}
+
 // New creates a new Watcher instance
 // onlyFilter is a comma-separated list of protocols to log (tcp,udp,icmp,dns,tls)
 // excludeFilter is a comma-separated list of traffic to exclude (multicast,broadcast,linklocal,bittorrent)

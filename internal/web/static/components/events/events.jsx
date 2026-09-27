@@ -35,6 +35,13 @@ NetWatcher.Components.EventRow = function({ event }) {
                 </div>
                 {source.Name && <div className="hostname">{source.Namespace ? `${source.Namespace}/` : ''}{source.Name} ({source.Kind})</div>}
             </td>
+            <td className="process-cell">
+                {event.ProcessPID > 0
+                    ? <span title="Best-effort host socket attribution; command-line arguments are not collected">{event.ProcessCommand || 'Unknown process'} · PID {event.ProcessPID}</span>
+                    : event.EventType === 'TLS_SNI'
+                        ? <span title="No host process match; only local host-side TLS connections are sampled">Unattributed</span>
+                        : <span title="Process attribution is not sampled for this event type">—</span>}
+            </td>
             <td>
                 <div className="ip-address">
                     {event.DstIP || '-'}{event.DstPort ? `:${event.DstPort}` : ''}
@@ -53,7 +60,7 @@ NetWatcher.Components.EventRow = function({ event }) {
             </td>
             <td>{Utils.formatDuration(event.Duration)}</td>
             <td>{Utils.formatBytes(event.ByteCount)}</td>
-        </tr>{expanded && <tr><td colSpan="7"><NetWatcher.Components.DNSEvidence ids={evidence} /></td></tr>}</>
+        </tr>{expanded && <tr><td colSpan="8"><NetWatcher.Components.DNSEvidence ids={evidence} /></td></tr>}</>
     );
 };
 
@@ -79,6 +86,7 @@ NetWatcher.Components.EventsTable = function({ events, loading }) {
         { key: 'timestamp', label: 'Timestamp' },
         { key: 'type', label: 'Type' },
         { key: 'source', label: 'Source' },
+        { key: 'process', label: 'Process' },
         { key: 'destination', label: 'Destination' },
         { key: 'details', label: 'Details' },
         { key: 'duration', label: 'Duration' },

@@ -29,7 +29,7 @@ func sampleBatch() Batch {
 	return Batch{
 		CollectorID: "node-a",
 		Resolutions: []database.DNSResolution{{ID: 11, QueryTime: at, ResponseTime: at, ExpiresAt: at.Add(time.Minute), ClientIP: "10.0.0.2", Name: "api.test", IP: "203.0.113.10"}},
-		Events:      []database.NetworkEvent{{ID: 7, Timestamp: at, EventType: database.EventTCPStart, SrcIP: "10.0.0.2", DstIP: "203.0.113.10", DstPort: 443, DNSResolutionIDs: "[11]"}},
+		Events:      []database.NetworkEvent{{ID: 7, Timestamp: at, EventType: database.EventTCPStart, SrcIP: "10.0.0.2", DstIP: "203.0.113.10", DstPort: 443, DNSResolutionIDs: "[11]", ProcessPID: 1234, ProcessCommand: "image-puller"}},
 	}
 }
 
@@ -47,7 +47,7 @@ func TestReceiverStoresIdempotentBatchAndRemapsEvidence(t *testing.T) {
 	if err := db.Find(&events).Error; err != nil || len(events) != 1 {
 		t.Fatalf("events: %d, %v", len(events), err)
 	}
-	if events[0].CollectorID != "node-a" || events[0].DNSResolutionIDs != "[1]" {
+	if events[0].CollectorID != "node-a" || events[0].DNSResolutionIDs != "[1]" || events[0].ProcessPID != 1234 || events[0].ProcessCommand != "image-puller" {
 		t.Fatalf("unexpected central event: %#v", events[0])
 	}
 	var resolutions []database.DNSResolution

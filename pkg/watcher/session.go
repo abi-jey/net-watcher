@@ -50,6 +50,7 @@ type SessionManager struct {
 	cleanupInterval time.Duration
 	sessionTimeout  time.Duration
 	stopChan        chan struct{}
+	cleanupDone     chan struct{}
 	// Filters - which protocols/events to log
 	filters      map[string]bool
 	exclusions   map[string]bool
@@ -58,6 +59,8 @@ type SessionManager struct {
 	recentUDPRejects map[string]time.Time
 	dns              *dnsTracker
 	contextLookup    func(string, uint16, string) string
+	processMux       sync.RWMutex
+	processLookup    *processAttributor
 	// Event batching
 	eventBuffer    []database.NetworkEvent
 	eventBufferMux sync.Mutex
@@ -90,6 +93,7 @@ func NewSessionManager(logger *log.Logger, db *database.DB, onlyFilter, excludeF
 		cleanupInterval:  30 * time.Second,
 		sessionTimeout:   2 * time.Minute,
 		stopChan:         make(chan struct{}),
+		cleanupDone:      make(chan struct{}),
 		filters:          filters,
 		exclusions:       exclusions,
 		excludePorts:     excludePorts,
@@ -258,12 +262,41 @@ func isMetadataAddress(addr string) bool {
 // Stop stops the session manager cleanup goroutine and flushes remaining events
 func (sm *SessionManager) Stop() {
 	close(sm.stopChan)
+	<-sm.cleanupDone
+	if lookup := sm.currentProcessLookup(); lookup != nil {
+		lookup.stop()
+	}
 	// Flush any remaining buffered events
 	sm.flushEvents()
 }
 
-// queueEvent adds an event to the buffer and flushes when batch size is reached
+// EnableProcessAttribution enables bounded host-side TLS attribution.
+func (sm *SessionManager) EnableProcessAttribution(root string) error {
+	lookup, err := newProcessAttributor(root, sm.logger, sm.storeEvent)
+	if err != nil {
+		return err
+	}
+	sm.processMux.Lock()
+	sm.processLookup = lookup
+	sm.processMux.Unlock()
+	return nil
+}
+
+func (sm *SessionManager) currentProcessLookup() *processAttributor {
+	sm.processMux.RLock()
+	defer sm.processMux.RUnlock()
+	return sm.processLookup
+}
+
 func (sm *SessionManager) queueEvent(event database.NetworkEvent) {
+	if lookup := sm.currentProcessLookup(); lookup != nil && event.EventType == database.EventTLSSNI && lookup.enqueue(event) {
+		return
+	}
+	sm.storeEvent(event)
+}
+
+// storeEvent enriches an event and flushes when the database batch is full.
+func (sm *SessionManager) storeEvent(event database.NetworkEvent) {
 	if sm.db == nil {
 		return
 	}
@@ -744,6 +777,7 @@ func (sm *SessionManager) TrackTLSHandshake(iface, src, dst, sni string, isIPv6 
 
 // cleanupLoop removes stale connections (the "Ghost" problem solution)
 func (sm *SessionManager) cleanupLoop() {
+	defer close(sm.cleanupDone)
 	ticker := time.NewTicker(sm.cleanupInterval)
 	defer ticker.Stop()
 
@@ -752,6 +786,9 @@ func (sm *SessionManager) cleanupLoop() {
 		case <-sm.stopChan:
 			return
 		case <-ticker.C:
+			if lookup := sm.currentProcessLookup(); lookup != nil {
+				lookup.report()
+			}
 			sm.mutex.Lock()
 			threshold := time.Now().Add(-sm.sessionTimeout)
 			for key, session := range sm.sessions {

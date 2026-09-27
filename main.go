@@ -50,6 +50,8 @@ FLAGS:
     --kubernetes         Enrich with read-only Kubernetes inventory; include pod interfaces
     --kube-context       Explicit kubectl context (otherwise use in-cluster identity)
     --owned-cidrs        Comma-separated operator-owned IP ranges for map labels
+    --process-attribution  Best-effort host TLS PID/name using read-only procfs
+    --process-proc-root    Host procfs mount (default: /host/proc)
     --include-virtual    Include bridge/veth interfaces during automatic discovery
     --db                 SQLite database path (default: netwatcher.db)
     --max-db-size-gb     Maximum central/standalone SQLite size in GiB (default: 10)
@@ -94,6 +96,8 @@ func main() {
 		kubernetes := startCmd.Bool("kubernetes", false, "Enable read-only Kubernetes inventory")
 		kubeContext := startCmd.String("kube-context", "", "Explicit kubectl context for inventory")
 		ownedCIDRs := startCmd.String("owned-cidrs", "", "Comma-separated operator-owned CIDRs for network map classification")
+		processAttribution := startCmd.Bool("process-attribution", false, "Best-effort host TLS process attribution from read-only procfs")
+		processProcRoot := startCmd.String("process-proc-root", "/host/proc", "Read-only host procfs mount for process attribution")
 		includeVirtual := startCmd.Bool("include-virtual", false, "Include bridge/veth interfaces")
 		ingestURL := startCmd.String("ingest-url", "", "Authenticated central ingestion base URL for this collector")
 		ingestToken := startCmd.String("ingest-token", "", "Bearer token for central ingestion")
@@ -249,6 +253,11 @@ func main() {
 			return
 		}
 		w.SetContextLookup(inventory.Lookup)
+		if *processAttribution {
+			if err := w.EnableProcessAttribution(*processProcRoot); err != nil {
+				log.Warn("Process attribution unavailable; continuing packet capture", "error", err)
+			}
+		}
 		if autoInterfaces {
 			w.Discover = func() ([]net.Interface, error) {
 				return getUsableInterfaces(*interfaceExclude, *includeVirtual || *kubernetes)

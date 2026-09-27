@@ -124,3 +124,19 @@ for a non-root host-network process. It also has an `Unconfined` seccomp profile
 because CRI-O's `RuntimeDefault` profile blocks AF_PACKET sockets. These
 exceptions apply only to the node-local collector; the ingester remains
 non-root, capability-free, and `RuntimeDefault`.
+
+### Optional host-process attribution
+
+Add `--process-attribution` to a collector and mount the host's `/proc` at
+`/host/proc` **read-only** (or set `--process-proc-root` explicitly). No
+`hostPID`, eBPF program, new capabilities, or writable host mount is needed.
+This experimental attribution is limited to host-side TLS handshakes. A
+single background worker attempts at most two socket lookups per second, each
+with a 20 ms deadline and bounded `/proc` work; packet capture never waits for
+it. Successful matches record only the host PID and kernel process name
+(`comm`), never command-line arguments. Short-lived sockets, container-private
+network namespaces, or unreadable process descriptors may remain unattributed.
+The Events table has a Process column: a matched host PID/name, **Unattributed**
+for TLS without a match, or a dash for event types not sampled. The remote
+server's process is not observable. Disable the flag and remove the mount if
+the measured CPU, capture drops, or match rate are unacceptable.
