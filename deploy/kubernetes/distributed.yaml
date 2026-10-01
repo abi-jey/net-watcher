@@ -103,6 +103,9 @@ metadata:
     app.kubernetes.io/name: net-watcher-ingest
 spec:
   replicas: 1
+  # The durable ingestion spool has one background consumer.
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app.kubernetes.io/name: net-watcher-ingest

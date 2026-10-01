@@ -81,8 +81,24 @@ map may represent duplicate observations captured on multiple node interfaces.
 The forwarder sends up to 250 events per request, splitting batches that would
 exceed the 5 MiB request limit. The ingester looks up retry keys in indexed
 groups and inserts new events and DNS evidence in bounded SQL batches inside a
-transaction; the collector cursor advances only after the transaction is
-acknowledged. Retry deduplication does not attempt to merge distinct capture
+transaction. The ingester first commits each request to a separate durable SQLite
+queue (`<db>.ingest-queue.db`) before acknowledging it to the collector. A background
+worker drains that queue into the central database, independently of the HTTP
+request lifetime. Maintenance already runs in a background goroutine; when it
+occupies the central writer, requests continue to enter the separate queue.
+Both queue and central ingest commits use SQLite FULL synchronization so the
+handoff remains durable before a queue entry is removed.
+Pending batches survive restarts and are replayed idempotently. Invalid DNS
+references are rejected before queuing.
+
+`--ingest-queue-size-mb=256` bounds pending JSON payload bytes. Allow additional
+disk space for SQLite pages and WAL; the queue is separate from `--max-db-size-gb`.
+When full or unavailable, the ingester returns HTTP 503 and collectors retain
+their local data for retry. Queue depth, payload bytes, and oldest batch age are
+logged at startup and every minute, including during maintenance. The map reflects
+drained events, so it can lag behind while maintenance runs. Keep one ingester
+replica and use the supplied `Recreate` rollout strategy so only one worker
+consumes the spool. Retry deduplication does not attempt to merge distinct capture
 observations.
 
 SQLite WAL keeps the single ingestion writer and the web query pool separate.

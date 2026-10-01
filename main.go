@@ -61,6 +61,7 @@ FLAGS:
     --ingest-url         Central ingest base URL for a collector
     --ingest-token       Required bearer token for ingest send/receive
     --ingest-port        Run the central ingest listener on this port
+    --ingest-queue-size-mb  Maximum pending ingestion payload in MiB (default: 256)
     --collector-id       Stable collector identity (defaults to hostname)
 
 `, version)
@@ -102,8 +103,13 @@ func main() {
 		ingestURL := startCmd.String("ingest-url", "", "Authenticated central ingestion base URL for this collector")
 		ingestToken := startCmd.String("ingest-token", "", "Bearer token for central ingestion")
 		ingestPort := startCmd.Int("ingest-port", 0, "Run authenticated central ingestion listener on this port")
+		ingestQueueMB := startCmd.Int64("ingest-queue-size-mb", 256, "Maximum pending ingestion payload in MiB; stored beside --db")
 		collectorID := startCmd.String("collector-id", "", "Stable collector identity for central ingestion")
 		_ = startCmd.Parse(os.Args[2:])
+		if *ingestQueueMB <= 0 || *ingestQueueMB > (1<<63-1)/(1<<20) {
+			log.Error("--ingest-queue-size-mb must be a positive number of MiB")
+			os.Exit(1)
+		}
 		if *maxDBSizeGB <= 0 || *maxDBSizeGB > (1<<63-1)/(1<<30) {
 			log.Error("--max-db-size-gb must be a positive number of GiB")
 			os.Exit(1)
@@ -194,7 +200,28 @@ func main() {
 			go forwarder.Run(ctx)
 		}
 		if *ingestPort > 0 {
-			receiver := &ingest.Receiver{DB: db, Token: *ingestToken}
+			// A central commit must survive power loss before its durable queue
+			// entry is deleted; NORMAL synchronization cannot guarantee that handoff.
+			if err := db.Exec("PRAGMA synchronous=FULL").Error; err != nil {
+				log.Error("Failed to enable durable central ingestion", "error", err)
+				return
+			}
+			queue, err := ingest.OpenQueue(*dbPath+".ingest-queue.db", *ingestQueueMB*(1<<20))
+			if err != nil {
+				log.Error("Failed to open ingestion queue", "error", err)
+				return
+			}
+			receiver := &ingest.Receiver{DB: db, Token: *ingestToken, Queue: queue}
+			workerDone := make(chan struct{})
+			go func() {
+				defer close(workerDone)
+				queue.Run(ctx, receiver)
+			}()
+			defer func() {
+				cancel()
+				<-workerDone
+				_ = queue.Close()
+			}()
 			go func() {
 				if err := receiver.Serve(ctx, net.JoinHostPort("", strconv.Itoa(*ingestPort))); err != nil {
 					log.Error("Ingest server error", "error", err)

@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"strings"
 	"time"
@@ -40,8 +41,10 @@ type Batch struct {
 type Receiver struct {
 	DB    *database.DB
 	Token string
+	Queue *Queue
 }
 
+// Handler returns the authenticated ingestion handler.
 func (r *Receiver) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc(batchPath, r.handleBatch)
@@ -80,7 +83,14 @@ func (r *Receiver) handleBatch(w http.ResponseWriter, request *http.Request) {
 		http.Error(w, "invalid ingest batch", http.StatusBadRequest)
 		return
 	}
-	if err := r.store(request.Context(), batch); err != nil {
+	if r.Queue != nil {
+		if err := r.Queue.enqueue(request.Context(), batch); err != nil {
+			log.Warn("Could not queue ingest batch", "collector_id", batch.CollectorID, "error", err)
+			w.Header().Set("Retry-After", "2")
+			http.Error(w, "ingestion queue unavailable; retry later", http.StatusServiceUnavailable)
+			return
+		}
+	} else if err := r.store(request.Context(), batch); err != nil {
 		log.Error("Could not store ingest batch", "collector_id", batch.CollectorID, "error", err)
 		http.Error(w, "could not store ingest batch", http.StatusInternalServerError)
 		return
@@ -102,16 +112,28 @@ func validBatch(batch Batch) bool {
 	}
 	eventIDs, resolutionIDs := make(map[uint]bool), make(map[uint]bool)
 	for _, event := range batch.Events {
-		if event.ID == 0 || event.Timestamp.IsZero() || event.EventType == "" || eventIDs[event.ID] {
+		if event.ID == 0 || uint64(event.ID) > math.MaxInt64 || event.Timestamp.IsZero() || event.EventType == "" || eventIDs[event.ID] {
 			return false
 		}
 		eventIDs[event.ID] = true
 	}
 	for _, resolution := range batch.Resolutions {
-		if resolution.ID == 0 || resolution.ResponseTime.IsZero() || resolution.Name == "" || resolution.IP == "" || resolutionIDs[resolution.ID] {
+		if resolution.ID == 0 || uint64(resolution.ID) > math.MaxInt64 || resolution.ResponseTime.IsZero() || resolution.Name == "" || resolution.IP == "" || resolutionIDs[resolution.ID] {
 			return false
 		}
 		resolutionIDs[resolution.ID] = true
+	}
+	// Reject permanently invalid evidence before acknowledging it into the spool.
+	for _, event := range batch.Events {
+		var ids []uint
+		if event.DNSResolutionIDs != "" && json.Unmarshal([]byte(event.DNSResolutionIDs), &ids) != nil {
+			return false
+		}
+		for _, id := range ids {
+			if !resolutionIDs[id] {
+				return false
+			}
+		}
 	}
 	return true
 }
