@@ -52,7 +52,7 @@ func TestSummaryDashboardAPIs(t *testing.T) {
 	}
 	var stats StatsResponse
 	request(server.handleStats, "/api/stats", &stats)
-	if stats.TotalEvents != 4 || stats.EventCounts["DNS"] != 3 {
+	if !stats.Aggregation.Ready || stats.TotalEvents != 4 || stats.EventCounts["DNS"] != 3 {
 		t.Fatalf("stats=%+v", stats)
 	}
 	for _, test := range []struct {
@@ -73,7 +73,7 @@ func TestSummaryDashboardAPIs(t *testing.T) {
 	var timeline TrafficTimelineResponse
 	params := url.Values{"start": {at.Add(17 * time.Minute).Format(time.RFC3339)}, "end": {at.Add(24*time.Hour + 17*time.Minute).Format(time.RFC3339)}}
 	request(server.handleTrafficTimeline, "/api/traffic-timeline?"+params.Encode(), &timeline)
-	if timeline.BucketSize != "1hour" || timeline.TotalIn != 20 || timeline.TotalOut != 40 {
+	if !timeline.Aggregation.Ready || timeline.BucketSize != "1hour" || timeline.TotalIn != 20 || timeline.TotalOut != 40 {
 		t.Fatalf("timeline=%+v", timeline)
 	}
 	var count int64

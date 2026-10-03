@@ -158,6 +158,7 @@ NetWatcher.Pages.DashboardPage = function() {
     const [hostType, setHostType] = useState('hostname'); // 'hostname', 'srcIP', 'dstIP'
     const [limit, setLimit] = useState(10);
     const [hours, setHours] = useState('24');
+    const [warming, setWarming] = useState(true);
     const request = React.useRef(null);
 
     const fetchTopHosts = useCallback(async () => {
@@ -176,6 +177,7 @@ NetWatcher.Pages.DashboardPage = function() {
             if (!res.ok) throw new Error(`Top hosts request failed: ${res.status}`);
             const data = await res.json();
             if (controller.signal.aborted) return;
+            setWarming(Boolean(data.aggregation?.enabled && !data.aggregation?.ready));
             setHosts(data.hosts || []);
             setTotal(data.total || 0);
         } catch (err) {
@@ -192,11 +194,11 @@ NetWatcher.Pages.DashboardPage = function() {
 
     // Auto-refresh
     useEffect(() => {
-        const interval = setInterval(() => { if (!document.hidden) fetchTopHosts(); }, CONFIG.AUTO_REFRESH_INTERVAL);
-        const onVisible = () => { if (!document.hidden) fetchTopHosts(); };
+        const interval = setInterval(() => { if (!document.hidden) fetchTopHosts(); }, warming ? CONFIG.ANALYTICS_WARMUP_INTERVAL : CONFIG.AUTO_REFRESH_INTERVAL);
+        const onVisible = () => { if (!document.hidden && !warming) fetchTopHosts(); };
         document.addEventListener('visibilitychange', onVisible);
         return () => { clearInterval(interval); document.removeEventListener('visibilitychange', onVisible); };
-    }, [fetchTopHosts]);
+    }, [fetchTopHosts, warming]);
 
     const metricOptions = [
         { value: 'events', label: 'By Events' },
@@ -286,6 +288,7 @@ NetWatcher.Pages.DashboardPage = function() {
                             <span className="dashboard-card-subtitle">
                                 {metric === 'traffic' ? 'by Traffic Volume' : 'by Event Count'}
                                 {loading && hosts.length > 0 ? ' · Updating…' : ''}
+                                {warming ? ' · Historical summaries warming; refresh every 5 minutes' : ''}
                             </span>
                         </h2>
                     </div>

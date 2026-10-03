@@ -45,21 +45,35 @@ function App() {
 
     // Update total events from stats
     useEffect(() => {
+        let stopped = false;
+        let pending = false;
+        let warming = true;
+        let timer;
+        const controller = new AbortController();
         const fetchTotal = async () => {
-            if (document.hidden) return;
+            if (document.hidden || stopped || pending) return;
+            pending = true;
             try {
-                const res = await fetch(`${CONFIG.API_BASE}/api/stats`);
+                const res = await fetch(`${CONFIG.API_BASE}/api/stats`, { signal: controller.signal });
+                if (!res.ok) throw new Error(`Statistics request failed: ${res.status}`);
                 const data = await res.json();
+                if (stopped) return;
+                warming = Boolean(data.aggregation?.enabled && !data.aggregation?.ready);
                 setStats(data);
             } catch (err) {
-                console.error('Failed to fetch total:', err);
+                if (err.name !== 'AbortError') console.error('Failed to fetch total:', err);
+            } finally {
+                pending = false;
             }
         };
-        fetchTotal();
-        const interval = setInterval(fetchTotal, CONFIG.AUTO_REFRESH_INTERVAL);
-        const onVisible = () => { if (!document.hidden) fetchTotal(); };
+        const tick = async () => {
+            await fetchTotal();
+            if (!stopped) timer = setTimeout(tick, warming ? CONFIG.ANALYTICS_WARMUP_INTERVAL : CONFIG.AUTO_REFRESH_INTERVAL);
+        };
+        tick();
+        const onVisible = () => { if (!document.hidden && !warming) fetchTotal(); };
         document.addEventListener('visibilitychange', onVisible);
-        return () => { clearInterval(interval); document.removeEventListener('visibilitychange', onVisible); };
+        return () => { stopped = true; controller.abort(); clearTimeout(timer); document.removeEventListener('visibilitychange', onVisible); };
     }, []);
 
     return (

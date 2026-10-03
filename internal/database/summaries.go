@@ -39,6 +39,28 @@ type AggregateState struct {
 	Paused bool
 }
 
+// AggregationStatus describes historical coverage without an expensive row count.
+type AggregationStatus struct {
+	Enabled bool `json:"enabled"`
+	Ready   bool `json:"ready"`
+	Cursor  uint `json:"cursor"`
+	Target  uint `json:"target"`
+	Paused  bool `json:"paused"`
+}
+
+// SummaryStatus reads the transactional summary high-water marks.
+func SummaryStatus(tx *gorm.DB) (AggregationStatus, error) {
+	var state AggregateState
+	err := tx.First(&state, 1).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return AggregationStatus{}, nil
+	}
+	if err != nil {
+		return AggregationStatus{}, err
+	}
+	return AggregationStatus{Enabled: true, Ready: !state.Paused && state.Cursor >= state.Target, Cursor: state.Cursor, Target: state.Target, Paused: state.Paused}, nil
+}
+
 const summaryColumns = "id, timestamp, event_type, src_ip, dst_ip, hostname, byte_count"
 
 // EnableSummaries snapshots the historical high-water mark without scanning or
@@ -73,12 +95,8 @@ func resetSummaries(tx *gorm.DB) error {
 // SummariesReady reports whether all retained historical rows have been covered.
 // Call it inside the same read transaction as queries using the summaries.
 func SummariesReady(tx *gorm.DB) (bool, error) {
-	var state AggregateState
-	err := tx.First(&state, 1).Error
-	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return false, nil
-	}
-	return err == nil && !state.Paused && state.Cursor >= state.Target, err
+	status, err := SummaryStatus(tx)
+	return status.Ready, err
 }
 
 // ApplyEventSummaries updates only already-covered rows, within the transaction

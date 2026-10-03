@@ -17,6 +17,7 @@ import (
 
 const dnsWindow = 30 * time.Second
 const maxDNSState = 16384
+const dnsPruneInterval = time.Second
 
 // DNSRecord retains answer ownership as well as its value: unrelated answers cannot
 // establish a binding for the question's name.
@@ -52,10 +53,11 @@ func contextIdentity(raw string) string {
 }
 
 type dnsTracker struct {
-	mu       sync.Mutex
-	pending  map[dnsKey]dnsQuery
-	bindings map[string][]database.DNSResolution
-	streams  map[string]*dnsStream
+	lastPrune time.Time
+	mu        sync.Mutex
+	pending   map[dnsKey]dnsQuery
+	bindings  map[string][]database.DNSResolution
+	streams   map[string]*dnsStream
 }
 
 func newDNSTracker() *dnsTracker {
@@ -82,6 +84,12 @@ func (d *dnsTracker) restore(db *database.DB) error {
 func dnsName(name []byte) string { return strings.ToLower(strings.TrimSuffix(string(name), ".")) }
 
 func (d *dnsTracker) prune(now time.Time) {
+	// Packet handlers still check individual entries; global eviction need not
+	// walk all shared state on every packet. Callers hold d.mu.
+	if !d.lastPrune.IsZero() && now.Sub(d.lastPrune) < dnsPruneInterval {
+		return
+	}
+	d.lastPrune = now
 	for key, query := range d.pending {
 		if now.Sub(query.At) > dnsWindow {
 			delete(d.pending, key)
@@ -180,6 +188,9 @@ func (sm *SessionManager) TrackDNSPacket(iface, src, dst, transport string, payl
 			DNSVersion: 1, DNSID: message.ID, DNSQuery: name, DNSQuestionType: question.Type.String(), Protocol: transport,
 			DNSType: "QUERY", DNSRecords: string(recordJSON)}
 		if !message.QR {
+			if old, exists := d.pending[key]; exists && at.Sub(old.At) > dnsWindow {
+				delete(d.pending, key)
+			}
 			if len(d.pending) < maxDNSState {
 				if _, exists := d.pending[key]; !exists {
 					query := dnsQuery{At: at}
@@ -236,7 +247,8 @@ func (sm *SessionManager) TrackDNSPacket(iface, src, dst, transport string, payl
 					for _, r := range resolutions {
 						ids = append(ids, r.ID)
 						cacheKey := clientIP + "\x00" + r.IP
-						if r.TTL > 0 && len(d.bindings) < maxDNSState {
+						_, exists := d.bindings[cacheKey]
+						if r.TTL > 0 && (exists || len(d.bindings) < maxDNSState) {
 							entries := d.bindings[cacheKey]
 							if len(entries) >= 32 {
 								entries = entries[len(entries)-31:]
@@ -315,10 +327,15 @@ func (sm *SessionManager) TrackDNSTCP(iface, src, dst string, tcp *layers.TCP, a
 	d := sm.dns
 	d.mu.Lock()
 	d.prune(at)
-	if tcp.SYN && len(d.streams) < maxDNSState {
+	stream := d.streams[key]
+	if stream != nil && at.Sub(stream.Seen) > dnsWindow {
+		delete(d.streams, key)
+		stream = nil
+	}
+	if tcp.SYN && (stream != nil || len(d.streams) < maxDNSState) {
 		d.streams[key] = &dnsStream{Next: tcp.Seq + 1, Seen: at}
 	}
-	stream := d.streams[key]
+	stream = d.streams[key]
 	var messages [][]byte
 	if stream != nil && len(tcp.Payload) > 0 {
 		seq := tcp.Seq

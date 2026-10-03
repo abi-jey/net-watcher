@@ -2,6 +2,7 @@ package watcher
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net"
@@ -94,6 +95,7 @@ func (w *Watcher) Run(ctx context.Context) error {
 		}
 		for index, cancel := range active {
 			if !present[index] {
+				w.logger.Info("Capture interface removed", "index", index)
 				cancel()
 			}
 		}
@@ -158,7 +160,7 @@ func (w *Watcher) sniffInterface(ctx context.Context, iface net.Interface) error
 	if len(iface.HardwareAddr) == 0 {
 		decoder = layers.LinkTypeRaw
 	}
-	source := gopacket.NewPacketSource(handle, decoder)
+	source := ownedPacketSource(handle, decoder)
 
 	// 3. Start packet drop monitoring goroutine
 	go w.monitorDrops(ctx, handle, iface.Name)
@@ -179,6 +181,14 @@ func (w *Watcher) sniffInterface(ctx context.Context, iface net.Interface) error
 		w.processPacket(packet, iface.Name)
 	}
 	return nil
+}
+
+// ownedPacketSource is only for readers whose ReadPacketData returns an owned
+// buffer, as TPacket does. Never use it with reusable or mmap-backed buffers.
+func ownedPacketSource(reader gopacket.PacketDataSource, decoder gopacket.Decoder) *gopacket.PacketSource {
+	source := gopacket.NewPacketSource(reader, decoder)
+	source.DecodeOptions.NoCopy = true
+	return source
 }
 
 // monitorDrops periodically checks for packet drops and logs warnings
@@ -218,7 +228,7 @@ func (w *Watcher) monitorDrops(ctx context.Context, handle *afpacket.TPacket, if
 					"drop_rate", fmt.Sprintf("%.2f%%", dropRate),
 				)
 			}
-			w.logger.Info("[SNIFFER STATS]",
+			w.logger.Debug("[SNIFFER STATS]",
 				"timeframe", "30s",
 				"interface", ifaceName,
 				"total_packets", total,
@@ -235,22 +245,15 @@ func (w *Watcher) monitorDrops(ctx context.Context, handle *afpacket.TPacket, if
 func (w *Watcher) processPacket(packet gopacket.Packet, ifaceName string) {
 	// Check for packet decoding errors
 	if errLayer := packet.ErrorLayer(); errLayer != nil {
-		// Get full hex dump for debugging
-		data := packet.Data()
-		hexDump := ""
-		for i := 0; i < len(data); i++ {
-			if i > 0 && i%16 == 0 {
-				hexDump += " "
-			}
-			hexDump += fmt.Sprintf("%02x", data[i])
+		if w.logger.GetLevel() <= log.DebugLevel {
+			data := packet.Data()
+			w.logger.Debug("[PACKET ERROR]",
+				"interface", ifaceName,
+				"error", errLayer.Error(),
+				"len", len(data),
+				"hex", hex.EncodeToString(data),
+			)
 		}
-
-		w.logger.Debug("[PACKET ERROR]",
-			"interface", ifaceName,
-			"error", errLayer.Error(),
-			"len", len(data),
-			"hex", hexDump,
-		)
 		return
 	}
 

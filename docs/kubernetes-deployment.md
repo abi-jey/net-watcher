@@ -139,8 +139,12 @@ late-arriving timestamps and retention during backfill are supported. Collector-
 databases do not start prefill or maintain summaries.
 
 `Hourly summary backfill` logs expose the cursor, target, and completion status
-once per minute. Queries use raw data until prefill is complete, then switch to
-summaries automatically. Compaction that rewrites observations invalidates the
+once per minute. While warming, queries combine completed summaries with only
+historical IDs not yet processed; already-covered rows and live inserts are
+excluded from the raw interior scan. Partial boundary hours and sub-hour charts
+still use raw detail. Responses expose `aggregation` coverage status, and
+automatic dashboard/statistics refresh slows to five minutes while warming.
+Compaction that rewrites observations invalidates the
 summaries and schedules another throttled rebuild. No second database copy or
 per-event aggregation marker is required.
 
@@ -153,6 +157,13 @@ use raw events to keep arbitrary time ranges exact, with an exclusive end time.
 Traffic direction is evaluated using private IPv4/IPv6 addresses and configured
 owned CIDRs at query time, so changing owned networks does not require a rebuild.
 The existing SQLite size limit includes summary storage.
+
+Collector INFO logs cover lifecycle changes and maintenance. Routine TCP/UDP,
+DNS, TLS, ICMP, and per-interface statistics are available with `--debug`; event
+recording is independent of the console log level. Capture decodes the owned
+AF_PACKET read buffer without a second copy. DNS global cleanup runs at most once
+per second, while individual lookups, reused query IDs, and TCP streams retain
+their expiry checks.
 
 The ingester exposes its authenticated batch endpoint only through the ClusterIP
 Service on port 8921. The map UI is exposed through the Tailscale `ts-serve`

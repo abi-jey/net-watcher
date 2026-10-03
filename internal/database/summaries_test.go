@@ -159,6 +159,7 @@ func TestBackfillResumesWithLiveIngestionAndPartialCleanup(t *testing.T) {
 	if removed, err := db.ReclaimCollectorSpace("test"); err != nil || removed != 3 {
 		t.Fatalf("removed=%d err=%v", removed, err)
 	}
+	assertSummaryMatchesRaw(t, db)
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 	if _, err := db.BackfillSummaries(ctx, 2); err == nil {
@@ -249,6 +250,63 @@ func TestSummaryAnalyticsMatchesRawIncludingHourBoundaries(t *testing.T) {
 		t.Fatalf("summary ranking: %+v %d %v, want %+v %d", after, total, err, hosts, unique)
 	}
 	assertSummaryMatchesRaw(t, db)
+}
+
+func TestHybridAnalyticsAtEveryBackfillCursor(t *testing.T) {
+	db := summaryDB(t)
+	at := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	var events []NetworkEvent
+	for i := range 12 {
+		events = append(events, NetworkEvent{Timestamp: at.Add(time.Duration(i) * time.Hour), EventType: EventTCPEnd, SrcIP: fmt.Sprintf("10.0.0.%d", i%3), DstIP: "203.0.113.1", Hostname: "api.test", ByteCount: int64(i + 1)})
+	}
+	if err := db.InsertBatch(events); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.EnableSummaries(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	for _, hour := range []int{4, 20} {
+		if err := db.InsertEvent(&NetworkEvent{Timestamp: at.Add(time.Duration(hour)*time.Hour + time.Minute), EventType: EventDNS, SrcIP: "10.0.0.8", DstIP: "203.0.113.2", Hostname: "live.test", ByteCount: 100}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	start, end := at.Add(90*time.Minute), at.Add(570*time.Minute)
+	local := func(string) bool { return true }
+	var wantHosts []HostTotal
+	var wantUnique int64
+	var wantTraffic map[int64]*TrafficBucket
+	// The paused path is the raw-data oracle; toggling it here affects no worker.
+	if err := db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Model(&AggregateState{}).Where("id=1").Update("paused", true).Error; err != nil {
+			return err
+		}
+		var err error
+		wantHosts, wantUnique, err = TopHosts(tx, "srcIP", start, end, 100, true)
+		if err != nil {
+			return err
+		}
+		wantTraffic, err = TrafficTotals(tx, start, end, 3600, local)
+		if err != nil {
+			return err
+		}
+		return tx.Model(&AggregateState{}).Where("id=1").Update("paused", false).Error
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for step := 0; step <= 4; step++ {
+		assertSummaryMatchesRaw(t, db)
+		hosts, unique, err := TopHosts(db.DB, "srcIP", start, end, 100, true)
+		if err != nil || unique != wantUnique || !reflect.DeepEqual(hosts, wantHosts) {
+			t.Fatalf("step=%d hybrid hosts=%+v, want %+v: %v", step, hosts, wantHosts, err)
+		}
+		traffic, err := TrafficTotals(db.DB, start, end, 3600, local)
+		if err != nil || !reflect.DeepEqual(traffic, wantTraffic) {
+			t.Fatalf("step=%d hybrid traffic differs: %v", step, err)
+		}
+		if _, err := db.BackfillSummaries(t.Context(), 3); err != nil {
+			t.Fatal(err)
+		}
+	}
 }
 
 func BenchmarkBatchWithHourlySummaries(b *testing.B) {

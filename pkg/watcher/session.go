@@ -417,7 +417,7 @@ func (sm *SessionManager) TrackTCP(iface, src, dst string, isSyn, isFin, isRst b
 
 		// Log and save to DB
 		if hostname != "" {
-			sm.logger.Info("[TCP START]",
+			sm.logger.Debug("[TCP START]",
 				"iface", iface,
 				"src", src,
 				"dst", dst,
@@ -437,7 +437,7 @@ func (sm *SessionManager) TrackTCP(iface, src, dst string, isSyn, isFin, isRst b
 				DNSAge:    dnsAge.Milliseconds(),
 			})
 		} else {
-			sm.logger.Info("[TCP START]",
+			sm.logger.Debug("[TCP START]",
 				"iface", iface,
 				"src", src,
 				"dst", dst,
@@ -468,7 +468,7 @@ func (sm *SessionManager) TrackTCP(iface, src, dst string, isSyn, isFin, isRst b
 			if isRst {
 				endReason = "RST"
 			}
-			sm.logger.Info("[TCP END]",
+			sm.logger.Debug("[TCP END]",
 				"iface", session.Iface,
 				"src", src,
 				"dst", dst,
@@ -551,14 +551,14 @@ func (sm *SessionManager) TrackUDP(iface, src, dst string, srcPort, dstPort uint
 		dstIP, dstPortNum := parseAddr(dst)
 
 		if service != "" {
-			sm.logger.Info("[UDP START]",
+			sm.logger.Debug("[UDP START]",
 				"iface", iface,
 				"src", src,
 				"dst", dst,
 				"service", service,
 			)
 		} else {
-			sm.logger.Info("[UDP START]",
+			sm.logger.Debug("[UDP START]",
 				"iface", iface,
 				"src", src,
 				"dst", dst,
@@ -641,7 +641,7 @@ func (sm *SessionManager) TrackICMP(iface, src, dst string, icmpType, icmpCode u
 		}
 
 		desc := icmpTypeDescription(icmpType, isIPv6)
-		sm.logger.Info("[ICMP]",
+		sm.logger.Debug("[ICMP]",
 			"iface", iface,
 			"src", src,
 			"dst", dst,
@@ -695,7 +695,7 @@ func (sm *SessionManager) TrackDNS(iface, src, dst string, queries []string, isR
 			answersStr = strings.Join(resolvedIPs, ",")
 			if len(cnames) > 0 {
 				cnamesStr = strings.Join(cnames, ",")
-				sm.logger.Info("[DNS]",
+				sm.logger.Debug("[DNS]",
 					"iface", iface,
 					"type", queryType,
 					"src", src,
@@ -705,7 +705,7 @@ func (sm *SessionManager) TrackDNS(iface, src, dst string, queries []string, isR
 					"answers", resolvedIPs,
 				)
 			} else {
-				sm.logger.Info("[DNS]",
+				sm.logger.Debug("[DNS]",
 					"iface", iface,
 					"type", queryType,
 					"src", src,
@@ -715,7 +715,7 @@ func (sm *SessionManager) TrackDNS(iface, src, dst string, queries []string, isR
 				)
 			}
 		} else {
-			sm.logger.Info("[DNS]",
+			sm.logger.Debug("[DNS]",
 				"iface", iface,
 				"type", queryType,
 				"src", src,
@@ -752,7 +752,7 @@ func (sm *SessionManager) TrackTLSHandshake(iface, src, dst, sni string, isIPv6 
 		ipVersion = 6
 	}
 
-	sm.logger.Info("[TLS SNI]",
+	sm.logger.Debug("[TLS SNI]",
 		"iface", iface,
 		"src", src,
 		"dst", dst,
@@ -799,7 +799,7 @@ func (sm *SessionManager) cleanupLoop() {
 
 					// Log as UDP END for UDP sessions, TIMEOUT for others
 					if session.Protocol == ProtoUDP {
-						sm.logger.Info("[UDP END]",
+						sm.logger.Debug("[UDP END]",
 							"iface", session.Iface,
 							"src", session.Src,
 							"dst", session.Dst,
@@ -820,7 +820,7 @@ func (sm *SessionManager) cleanupLoop() {
 							ByteCount: session.ByteCount,
 						})
 					} else {
-						sm.logger.Info("[TIMEOUT]",
+						sm.logger.Debug("[TIMEOUT]",
 							"protocol", session.Protocol,
 							"iface", session.Iface,
 							"src", session.Src,

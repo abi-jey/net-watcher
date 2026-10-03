@@ -366,7 +366,6 @@ func getInterfacesByName(names string) ([]net.Interface, error) {
 func getUsableInterfaces(excludePattern string, includeVirtual bool) ([]net.Interface, error) {
 	var usableInterfaces []net.Interface
 	interfaces, err := net.Interfaces()
-	log.Info("Getting usable interfaces")
 	if err != nil || len(interfaces) == 0 {
 		log.Error("Failed to list network interfaces", "error", err)
 		return nil, fmt.Errorf("failed to list network interfaces: %w", err)
@@ -389,26 +388,20 @@ func getUsableInterfaces(excludePattern string, includeVirtual bool) ([]net.Inte
 
 		// Check explicit exclusion list
 		if excludeSet[candidateInterfaceName] {
-			log.Info("Excluding interface (user specified)", "interface", candidateInterfaceName)
 			continue
 		}
 
-		addrs, err := i.Addrs()
-		if err != nil || (!includeVirtual && len(addrs) == 0) {
-			log.Info("Skipping interface", "interface", candidateInterfaceName, "addrs", addrs, "error", err)
-			continue
+		if !includeVirtual {
+			addrs, err := i.Addrs()
+			if err != nil || len(addrs) == 0 {
+				continue
+			}
 		}
-		addr := ""
-		if len(addrs) > 0 {
-			addr = addrs[0].String()
-		}
-		log.Info("Checking interface", "candidateInterfaceName", candidateInterfaceName, "addr", addr)
 		if !includeVirtual && (strings.HasPrefix(candidateInterfaceName, "docker") ||
 			strings.HasPrefix(candidateInterfaceName, "br-") ||
 			strings.HasPrefix(candidateInterfaceName, "veth")) {
 			continue
 		}
-		log.Info("Usable interface found", "candidateInterfaceName", candidateInterfaceName)
 		usableInterfaces = append(usableInterfaces, i)
 	}
 	return usableInterfaces, nil

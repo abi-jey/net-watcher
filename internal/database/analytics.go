@@ -30,9 +30,9 @@ func bucketSQL(value string, seconds int64) string {
 }
 
 // summarySource combines complete summary hours with raw boundary fragments.
-// During historical backfill it uses raw rows, never incomplete summary totals.
+// During backfill, only IDs not yet summarized contribute raw interior rows.
 func summarySource(tx *gorm.DB, kind string, start, end time.Time, seconds int64) (string, []interface{}, error) {
-	ready, err := SummariesReady(tx)
+	status, err := SummaryStatus(tx)
 	if err != nil {
 		return "", nil, err
 	}
@@ -67,10 +67,13 @@ func summarySource(tx *gorm.DB, kind string, start, end time.Time, seconds int64
 		raw += " AND timestamp < ?"
 		rawArgs = append(rawArgs, end.UTC())
 	}
-	if !ready || seconds < 3600 || seconds%3600 != 0 {
+	if !status.Enabled || status.Paused || seconds < 3600 || seconds%3600 != 0 {
 		return raw, rawArgs, nil
 	}
 	if start.IsZero() && end.IsZero() {
+		if !status.Ready {
+			return summary + " UNION ALL " + raw + " AND id > ? AND id <= ?", append(summaryArgs, status.Cursor, status.Target), nil
+		}
 		return summary, summaryArgs, nil
 	}
 	if start.IsZero() || end.IsZero() {
@@ -89,6 +92,10 @@ func summarySource(tx *gorm.DB, kind string, start, end time.Time, seconds int64
 	// Separate index range scans prevent the planner from scanning the entire
 	// requested raw interval just to discard its already-summarized interior.
 	parts := []string{summary}
+	if !status.Ready {
+		parts = append(parts, rawBase+" AND id > ? AND id <= ? AND timestamp >= ? AND timestamp < ?")
+		summaryArgs = append(summaryArgs, status.Cursor, status.Target, fullStart, fullEnd)
+	}
 	if start.Before(fullStart) {
 		parts = append(parts, rawBase+" AND timestamp >= ? AND timestamp < ?")
 		summaryArgs = append(summaryArgs, start.UTC(), fullStart)

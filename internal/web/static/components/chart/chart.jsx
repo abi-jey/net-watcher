@@ -305,6 +305,7 @@ NetWatcher.Components.TrafficChart = function() {
     const [data, setData] = useState([]);
     const [loading, setLoading] = useState(true);
     const [bucketSize, setBucketSize] = useState('1hour');
+    const [warming, setWarming] = useState(true);
     const request = React.useRef(null);
     const [totalIn, setTotalIn] = useState(0);
     const [totalOut, setTotalOut] = useState(0);
@@ -330,6 +331,7 @@ NetWatcher.Components.TrafficChart = function() {
             if (!res.ok) throw new Error(`Timeline request failed: ${res.status}`);
             const result = await res.json();
             if (controller.signal.aborted) return;
+            setWarming(Boolean(result.aggregation?.enabled && !result.aggregation?.ready));
             setData(result.data || []);
             setBucketSize(result.bucketSize || '1hour');
             setTotalIn(result.totalIn || 0);
@@ -348,11 +350,11 @@ NetWatcher.Components.TrafficChart = function() {
 
     // Auto-refresh
     useEffect(() => {
-        const interval = setInterval(() => { if (!document.hidden) fetchData(); }, CONFIG.AUTO_REFRESH_INTERVAL);
-        const onVisible = () => { if (!document.hidden) fetchData(); };
+        const interval = setInterval(() => { if (!document.hidden) fetchData(); }, warming ? CONFIG.ANALYTICS_WARMUP_INTERVAL : CONFIG.AUTO_REFRESH_INTERVAL);
+        const onVisible = () => { if (!document.hidden && !warming) fetchData(); };
         document.addEventListener('visibilitychange', onVisible);
         return () => { clearInterval(interval); document.removeEventListener('visibilitychange', onVisible); };
-    }, [fetchData]);
+    }, [fetchData, warming]);
 
     const handleQuickRange = (range) => {
         const now = new Date();
@@ -388,6 +390,7 @@ NetWatcher.Components.TrafficChart = function() {
                         <span className="dashboard-card-subtitle">
                             Traffic over time ({bucketSize} intervals)
                             {loading && data.length > 0 ? ' · Updating…' : ''}
+                            {warming ? ' · Historical summaries warming; refresh every 5 minutes' : ''}
                         </span>
                     </h2>
                 </div>

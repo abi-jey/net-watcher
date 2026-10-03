@@ -169,10 +169,11 @@ type EventsResponse struct {
 
 // StatsResponse represents database statistics
 type StatsResponse struct {
-	TotalEvents int64            `json:"totalEvents"`
-	EventCounts map[string]int64 `json:"eventCounts"`
-	LastEvent   *time.Time       `json:"lastEvent,omitempty"`
-	FirstEvent  *time.Time       `json:"firstEvent,omitempty"`
+	Aggregation database.AggregationStatus `json:"aggregation"`
+	TotalEvents int64                      `json:"totalEvents"`
+	EventCounts map[string]int64           `json:"eventCounts"`
+	LastEvent   *time.Time                 `json:"lastEvent,omitempty"`
+	FirstEvent  *time.Time                 `json:"firstEvent,omitempty"`
 }
 
 // handleEvents returns paginated and filtered events
@@ -292,6 +293,10 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	var response StatsResponse
 	err := s.db.WithContext(r.Context()).Transaction(func(tx *gorm.DB) error {
 		var err error
+		response.Aggregation, err = database.SummaryStatus(tx)
+		if err != nil {
+			return err
+		}
 		response.EventCounts, response.TotalEvents, err = database.EventCounts(tx)
 		if err != nil {
 			return err
@@ -363,10 +368,11 @@ type TopHostEntry = database.HostTotal
 
 // TopHostsResponse represents the top hosts response
 type TopHostsResponse struct {
-	Hosts    []TopHostEntry `json:"hosts"`
-	Total    int64          `json:"total"`
-	Metric   string         `json:"metric"`
-	HostType string         `json:"hostType"`
+	Aggregation database.AggregationStatus `json:"aggregation"`
+	Hosts       []TopHostEntry             `json:"hosts"`
+	Total       int64                      `json:"total"`
+	Metric      string                     `json:"metric"`
+	HostType    string                     `json:"hostType"`
 }
 
 // handleTopHosts returns top hosts by traffic or event count
@@ -401,8 +407,13 @@ func (s *Server) handleTopHosts(w http.ResponseWriter, r *http.Request) {
 	}
 	var results []TopHostEntry
 	var total int64
+	var aggregation database.AggregationStatus
 	err := s.db.WithContext(r.Context()).Transaction(func(tx *gorm.DB) error {
 		var err error
+		aggregation, err = database.SummaryStatus(tx)
+		if err != nil {
+			return err
+		}
 		results, total, err = database.TopHosts(tx, hostType, start, end, limit, metric == "traffic")
 		return err
 	})
@@ -412,10 +423,11 @@ func (s *Server) handleTopHosts(w http.ResponseWriter, r *http.Request) {
 	}
 
 	response := TopHostsResponse{
-		Hosts:    results,
-		Total:    total,
-		Metric:   metric,
-		HostType: hostType,
+		Aggregation: aggregation,
+		Hosts:       results,
+		Total:       total,
+		Metric:      metric,
+		HostType:    hostType,
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -432,12 +444,13 @@ type TrafficDataPoint struct {
 
 // TrafficTimelineResponse represents the traffic timeline response
 type TrafficTimelineResponse struct {
-	Data       []TrafficDataPoint `json:"data"`
-	StartTime  time.Time          `json:"startTime"`
-	EndTime    time.Time          `json:"endTime"`
-	BucketSize string             `json:"bucketSize"`
-	TotalIn    int64              `json:"totalIn"`
-	TotalOut   int64              `json:"totalOut"`
+	Aggregation database.AggregationStatus `json:"aggregation"`
+	Data        []TrafficDataPoint         `json:"data"`
+	StartTime   time.Time                  `json:"startTime"`
+	EndTime     time.Time                  `json:"endTime"`
+	BucketSize  string                     `json:"bucketSize"`
+	TotalIn     int64                      `json:"totalIn"`
+	TotalOut    int64                      `json:"totalOut"`
 }
 
 // handleTrafficTimeline returns time-series traffic data
@@ -507,8 +520,13 @@ func (s *Server) handleTrafficTimeline(w http.ResponseWriter, r *http.Request) {
 	}
 	seconds := int64(bucketDuration / time.Second)
 	var buckets map[int64]*database.TrafficBucket
+	var aggregation database.AggregationStatus
 	err := s.db.WithContext(r.Context()).Transaction(func(tx *gorm.DB) error {
 		var err error
+		aggregation, err = database.SummaryStatus(tx)
+		if err != nil {
+			return err
+		}
 		buckets, err = database.TrafficTotals(tx, startTime, endTime, seconds, s.isLocalTrafficAddress)
 		return err
 	})
@@ -532,12 +550,13 @@ func (s *Server) handleTrafficTimeline(w http.ResponseWriter, r *http.Request) {
 	}
 
 	response := TrafficTimelineResponse{
-		Data:       data,
-		StartTime:  startTime,
-		EndTime:    endTime,
-		BucketSize: bucketSize,
-		TotalIn:    totalIn,
-		TotalOut:   totalOut,
+		Aggregation: aggregation,
+		Data:        data,
+		StartTime:   startTime,
+		EndTime:     endTime,
+		BucketSize:  bucketSize,
+		TotalIn:     totalIn,
+		TotalOut:    totalOut,
 	}
 
 	w.Header().Set("Content-Type", "application/json")
