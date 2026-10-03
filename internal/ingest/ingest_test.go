@@ -35,6 +35,9 @@ func sampleBatch() Batch {
 
 func TestReceiverStoresIdempotentBatchAndRemapsEvidence(t *testing.T) {
 	db := testDB(t, "central.db")
+	if err := db.EnableSummaries(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 	receiver := Receiver{DB: db, Token: "token"}
 	batch := sampleBatch()
 	if err := receiver.store(t.Context(), batch); err != nil {
@@ -53,6 +56,10 @@ func TestReceiverStoresIdempotentBatchAndRemapsEvidence(t *testing.T) {
 	var resolutions []database.DNSResolution
 	if err := db.Find(&resolutions).Error; err != nil || len(resolutions) != 1 || resolutions[0].CollectorID != "node-a" {
 		t.Fatalf("resolutions: %#v, %v", resolutions, err)
+	}
+	counts, total, err := database.EventCounts(db.DB)
+	if err != nil || total != 1 || counts[string(database.EventTCPStart)] != 1 {
+		t.Fatalf("replayed batch changed summaries: %v %d %v", counts, total, err)
 	}
 }
 

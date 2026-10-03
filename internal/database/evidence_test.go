@@ -23,12 +23,17 @@ func TestCompactionKeepsVersionedDNSAndConnectionEvidence(t *testing.T) {
 		{Timestamp: at, EventType: EventTCPStart, SrcIP: "10.2.0.8", SrcPort: 1234, DstIP: "203.0.113.20", DstPort: 443, DNSResolutionIDs: "[1]", SourceContext: `{"UID":"pod-at-capture"}`},
 		{Timestamp: at.Add(time.Second), EventType: EventTCPEnd, SrcIP: "10.2.0.8", SrcPort: 1234, DstIP: "203.0.113.20", DstPort: 443, ByteCount: 500},
 	}
+	if err := db.EnableSummaries(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 	if err := db.InsertBatch(rows); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.Compact(time.Now(), time.Second); err != nil {
 		t.Fatal(err)
 	}
+	finishBackfill(t, db)
+	assertSummaryMatchesRaw(t, db)
 	var count int64
 	db.Model(&NetworkEvent{}).Where("dns_version = 1").Count(&count)
 	if count != 2 {

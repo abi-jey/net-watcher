@@ -38,7 +38,7 @@ func New(dbPath string) (*DB, error) {
 	_, _ = sqlDB.Exec("PRAGMA synchronous=NORMAL")
 	_, _ = sqlDB.Exec("PRAGMA cache_size=2000")
 
-	if err := db.AutoMigrate(&NetworkEvent{}, &DNSResolution{}, &IngestedEvent{}, &IngestedResolution{}, &IngestCursor{}); err != nil {
+	if err := db.AutoMigrate(&NetworkEvent{}, &DNSResolution{}, &IngestedEvent{}, &IngestedResolution{}, &IngestCursor{}, &HourlyEvent{}, &HourlyHost{}, &AggregateState{}); err != nil {
 		_ = sqlDB.Close()
 		return nil, err
 	}
@@ -79,7 +79,12 @@ func (db *DB) Close() error {
 
 // InsertEvent inserts a single network event
 func (db *DB) InsertEvent(event *NetworkEvent) error {
-	return db.Create(event).Error
+	return db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Create(event).Error; err != nil {
+			return err
+		}
+		return ApplyEventSummaries(tx, []NetworkEvent{*event}, 1)
+	})
 }
 
 // InsertBatch inserts multiple events in batches
@@ -87,7 +92,12 @@ func (db *DB) InsertBatch(events []NetworkEvent) error {
 	if len(events) == 0 {
 		return nil
 	}
-	return db.CreateInBatches(events, 100).Error
+	return db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Session(&gorm.Session{SkipDefaultTransaction: true}).CreateInBatches(&events, 20).Error; err != nil {
+			return err
+		}
+		return ApplyEventSummaries(tx, events, 1)
+	})
 }
 
 // CompactStats holds statistics about compaction operations
@@ -107,6 +117,19 @@ type CompactStats struct {
 
 // Compact performs database compaction with various strategies
 func (db *DB) Compact(olderThan time.Time, dedupeWindow time.Duration) (*CompactStats, error) {
+	// Compaction rewrites observations rather than merely expiring them. Readers
+	// fall back to raw data until the throttled worker rebuilds the summaries.
+	paused := db.Model(&AggregateState{}).Where("id = 1").Update("paused", true)
+	if paused.Error != nil {
+		return nil, paused.Error
+	}
+	if paused.RowsAffected > 0 {
+		defer func() {
+			if err := db.Transaction(resetSummaries); err != nil {
+				log.Error("Could not reset summaries after compaction", "error", err)
+			}
+		}()
+	}
 	stats := &CompactStats{}
 
 	// 1. Compact TCP: Merge TCP_START + TCP_END pairs

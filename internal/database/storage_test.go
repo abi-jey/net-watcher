@@ -48,6 +48,12 @@ func TestPruneToSizeRemovesOldestAndPreservesReferencedEvidence(t *testing.T) {
 		}
 		newestID = event.ID
 	}
+	if err := db.EnableSummaries(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.BackfillSummaries(t.Context(), 1000); err != nil {
+		t.Fatal(err)
+	}
 	if err := db.checkpoint(); err != nil {
 		t.Fatal(err)
 	}
@@ -63,6 +69,7 @@ func TestPruneToSizeRemovesOldestAndPreservesReferencedEvidence(t *testing.T) {
 	if removed == 0 || removed >= 120 {
 		t.Fatalf("removed = %d", removed)
 	}
+	assertSummaryMatchesRaw(t, db)
 	size, err = db.StorageBytes()
 	if err != nil || size > limit {
 		t.Fatalf("size = %d, limit = %d, error = %v", size, limit, err)

@@ -72,6 +72,13 @@ func (db *DB) PruneToSize(maxBytes int64) (int64, error) {
 			batch := min(toRemove, 10000)
 			var deleted int64
 			err := db.Transaction(func(tx *gorm.DB) error {
+				var events []NetworkEvent
+				if err := tx.Select(summaryColumns).Order("timestamp ASC, id ASC").Limit(int(batch)).Find(&events).Error; err != nil {
+					return err
+				}
+				if err := ApplyEventSummaries(tx, events, -1); err != nil {
+					return err
+				}
 				oldest := "SELECT id FROM network_events ORDER BY timestamp ASC, id ASC LIMIT ?"
 				if err := tx.Exec("DELETE FROM ingested_events WHERE event_id IN ("+oldest+")", batch).Error; err != nil {
 					return err
@@ -116,11 +123,48 @@ func (db *DB) ReclaimCollectorSpace(endpoint string) (int64, error) {
 	if err := db.Where("endpoint = ?", endpoint).First(&cursor).Error; err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 		return 0, err
 	}
-	result := db.Where("id <= ?", cursor.EventID).Delete(&NetworkEvent{})
-	if result.Error != nil {
-		return 0, result.Error
+	var summaryState AggregateState
+	summaryErr := db.First(&summaryState, 1).Error
+	if summaryErr != nil && !errors.Is(summaryErr, gorm.ErrRecordNotFound) {
+		return 0, summaryErr
 	}
-	removed := result.RowsAffected
+	// Avoid loading event details on collector-only databases. A database that
+	// previously served a standalone UI still needs consistent summary cleanup.
+	var removed int64
+	if errors.Is(summaryErr, gorm.ErrRecordNotFound) {
+		result := db.Where("id <= ?", cursor.EventID).Delete(&NetworkEvent{})
+		if result.Error != nil {
+			return 0, result.Error
+		}
+		removed = result.RowsAffected
+	}
+	if summaryErr == nil {
+		for {
+			var count int64
+			err := db.Transaction(func(tx *gorm.DB) error {
+				var events []NetworkEvent
+				if err := tx.Select(summaryColumns).Where("id <= ?", cursor.EventID).Order("id").Limit(1000).Find(&events).Error; err != nil {
+					return err
+				}
+				if len(events) == 0 {
+					return nil
+				}
+				if err := ApplyEventSummaries(tx, events, -1); err != nil {
+					return err
+				}
+				result := tx.Where("id <= ?", events[len(events)-1].ID).Delete(&NetworkEvent{})
+				count = result.RowsAffected
+				return result.Error
+			})
+			if err != nil {
+				return removed, err
+			}
+			removed += count
+			if count == 0 {
+				break
+			}
+		}
+	}
 	if err := db.removeUnusedEvidence(time.Now(), true); err != nil {
 		return removed, err
 	}

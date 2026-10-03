@@ -185,6 +185,15 @@ func main() {
 
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
+		if *ingestURL == "" {
+			if err := db.EnableSummaries(ctx); err != nil {
+				log.Error("Could not initialize hourly summaries", "error", err)
+				return
+			}
+			backfillDone := make(chan struct{})
+			go func() { defer close(backfillDone); db.RunSummaryBackfill(ctx) }()
+			defer func() { cancel(); <-backfillDone }()
+		}
 		go maintainStorage(ctx, db, *ingestURL, *maxDBSizeGB*(1<<30), *storageCheckInterval)
 
 		// Handle shutdown signals

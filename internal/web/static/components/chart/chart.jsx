@@ -304,7 +304,8 @@ function AreaChart({ data, bucketSize, width = 800, height = 240 }) {
 NetWatcher.Components.TrafficChart = function() {
     const [data, setData] = useState([]);
     const [loading, setLoading] = useState(true);
-    const [bucketSize, setBucketSize] = useState('30min');
+    const [bucketSize, setBucketSize] = useState('1hour');
+    const request = React.useRef(null);
     const [totalIn, setTotalIn] = useState(0);
     const [totalOut, setTotalOut] = useState(0);
     const [activeRange, setActiveRange] = useState('24H');
@@ -316,27 +317,33 @@ NetWatcher.Components.TrafficChart = function() {
     const [endDate, setEndDate] = useState(now.toISOString().slice(0, 16));
 
     const fetchData = useCallback(async () => {
+        if (request.current) return;
+        const controller = new AbortController();
+        request.current = controller;
         setLoading(true);
         try {
             const params = new URLSearchParams({
                 start: new Date(startDate).toISOString(),
                 end: new Date(endDate).toISOString()
             });
-            const res = await fetch(`${CONFIG.API_BASE}/api/traffic-timeline?${params}`);
+            const res = await fetch(`${CONFIG.API_BASE}/api/traffic-timeline?${params}`, { signal: controller.signal });
+            if (!res.ok) throw new Error(`Timeline request failed: ${res.status}`);
             const result = await res.json();
+            if (controller.signal.aborted) return;
             setData(result.data || []);
-            setBucketSize(result.bucketSize || '30min');
+            setBucketSize(result.bucketSize || '1hour');
             setTotalIn(result.totalIn || 0);
             setTotalOut(result.totalOut || 0);
         } catch (err) {
-            console.error('Failed to fetch traffic timeline:', err);
-            setData([]);
+            if (err.name !== 'AbortError') console.error('Failed to fetch traffic timeline:', err);
         }
-        setLoading(false);
+        if (!controller.signal.aborted) setLoading(false);
+        if (request.current === controller) request.current = null;
     }, [startDate, endDate]);
 
     useEffect(() => {
         fetchData();
+        return () => { request.current?.abort(); request.current = null; };
     }, [fetchData]);
 
     // Auto-refresh
@@ -380,6 +387,7 @@ NetWatcher.Components.TrafficChart = function() {
                         Network Activity
                         <span className="dashboard-card-subtitle">
                             Traffic over time ({bucketSize} intervals)
+                            {loading && data.length > 0 ? ' · Updating…' : ''}
                         </span>
                     </h2>
                 </div>
@@ -393,7 +401,7 @@ NetWatcher.Components.TrafficChart = function() {
                         onQuickRange={handleQuickRange}
                     />
 
-                    {loading ? (
+                    {loading && data.length === 0 ? (
                         <div className="chart-area">
                             <UI.LoadingState message="Loading chart data..." />
                         </div>

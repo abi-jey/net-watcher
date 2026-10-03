@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -234,7 +235,29 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 
 	// Get total count
 	var total int64
-	if err := dbQuery.Count(&total).Error; err != nil {
+	err := s.db.WithContext(r.Context()).Transaction(func(tx *gorm.DB) error {
+		if srcIP == "" && dstIP == "" && searchQuery == "" && startDate == "" && endDate == "" {
+			ready, err := database.SummariesReady(tx)
+			if err != nil {
+				return err
+			}
+			if ready {
+				counts := tx.Model(&database.HourlyEvent{})
+				if eventType != "" {
+					counts = counts.Where("event_type IN ?", strings.Split(eventType, ","))
+				}
+				return counts.Select("COALESCE(SUM(event_count), 0)").Scan(&total).Error
+			}
+		}
+		// Reuse the filtered statement on this snapshot rather than acquiring a
+		// second pooled connection while the count transaction is active.
+		filtered := tx.Model(&database.NetworkEvent{})
+		if where, ok := dbQuery.Statement.Clauses["WHERE"]; ok {
+			filtered = filtered.Clauses(where.Expression)
+		}
+		return filtered.Count(&total).Error
+	})
+	if err != nil {
 		http.Error(w, "could not count events", http.StatusServiceUnavailable)
 		return
 	}
@@ -266,53 +289,31 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 
 // handleStats returns database statistics
 func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
-	reader := s.db.WithContext(r.Context())
-	var total int64
-	if err := reader.Model(&database.NetworkEvent{}).Count(&total).Error; err != nil {
-		http.Error(w, "could not count events", http.StatusServiceUnavailable)
+	var response StatsResponse
+	err := s.db.WithContext(r.Context()).Transaction(func(tx *gorm.DB) error {
+		var err error
+		response.EventCounts, response.TotalEvents, err = database.EventCounts(tx)
+		if err != nil {
+			return err
+		}
+		var first, last database.NetworkEvent
+		if err := tx.Select("id, timestamp").Order("timestamp ASC").First(&first).Error; err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+			return err
+		}
+		if err := tx.Select("id, timestamp").Order("timestamp DESC").First(&last).Error; err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+			return err
+		}
+		if first.ID != 0 {
+			response.FirstEvent = &first.Timestamp
+		}
+		if last.ID != 0 {
+			response.LastEvent = &last.Timestamp
+		}
+		return nil
+	})
+	if err != nil {
+		http.Error(w, "could not read statistics", http.StatusServiceUnavailable)
 		return
-	}
-
-	// Count by event type
-	type eventCount struct {
-		EventType string
-		Count     int64
-	}
-	var counts []eventCount
-	if err := reader.Model(&database.NetworkEvent{}).
-		Select("event_type, count(*) as count").
-		Group("event_type").
-		Scan(&counts).Error; err != nil {
-		http.Error(w, "could not count event types", http.StatusServiceUnavailable)
-		return
-	}
-
-	eventCounts := make(map[string]int64)
-	for _, c := range counts {
-		eventCounts[c.EventType] = c.Count
-	}
-
-	// Get first and last event timestamps
-	var firstEvent, lastEvent database.NetworkEvent
-	if err := reader.Model(&database.NetworkEvent{}).Order("timestamp ASC").First(&firstEvent).Error; err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
-		http.Error(w, "could not read first event", http.StatusServiceUnavailable)
-		return
-	}
-	if err := reader.Model(&database.NetworkEvent{}).Order("timestamp DESC").First(&lastEvent).Error; err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
-		http.Error(w, "could not read latest event", http.StatusServiceUnavailable)
-		return
-	}
-
-	response := StatsResponse{
-		TotalEvents: total,
-		EventCounts: eventCounts,
-	}
-
-	if firstEvent.ID != 0 {
-		response.FirstEvent = &firstEvent.Timestamp
-	}
-	if lastEvent.ID != 0 {
-		response.LastEvent = &lastEvent.Timestamp
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -321,13 +322,22 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 
 // handleEventTypes returns available event types
 func (s *Server) handleEventTypes(w http.ResponseWriter, r *http.Request) {
-	var types []string
-	if err := s.db.WithContext(r.Context()).Model(&database.NetworkEvent{}).
-		Distinct("event_type").
-		Pluck("event_type", &types).Error; err != nil {
+	types := []string{}
+	err := s.db.WithContext(r.Context()).Transaction(func(tx *gorm.DB) error {
+		ready, err := database.SummariesReady(tx)
+		if err != nil {
+			return err
+		}
+		if !ready {
+			return tx.Model(&database.NetworkEvent{}).Distinct("event_type").Pluck("event_type", &types).Error
+		}
+		return tx.Model(&database.HourlyEvent{}).Distinct("event_type").Pluck("event_type", &types).Error
+	})
+	if err != nil {
 		http.Error(w, "could not read event types", http.StatusServiceUnavailable)
 		return
 	}
+	sort.Strings(types)
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(types)
@@ -349,11 +359,7 @@ func (s *Server) handleVersion(w http.ResponseWriter, r *http.Request) {
 }
 
 // TopHostEntry represents a single host entry in the top hosts response
-type TopHostEntry struct {
-	Host       string `json:"host"`
-	EventCount int64  `json:"eventCount"`
-	ByteCount  int64  `json:"byteCount"`
-}
+type TopHostEntry = database.HostTotal
 
 // TopHostsResponse represents the top hosts response
 type TopHostsResponse struct {
@@ -383,53 +389,25 @@ func (s *Server) handleTopHosts(w http.ResponseWriter, r *http.Request) {
 		hostType = "hostname"
 	}
 
-	// Determine which column to group by
-	var groupColumn string
-	switch hostType {
-	case "srcIP":
-		groupColumn = "src_ip"
-	case "dstIP":
-		groupColumn = "dst_ip"
-	default:
-		groupColumn = "hostname"
+	var start, end time.Time
+	if value := query.Get("hours"); value != "" && value != "all" {
+		hours, err := strconv.Atoi(value)
+		if err != nil || hours < 1 || hours > 24*365 {
+			http.Error(w, "invalid hours", http.StatusBadRequest)
+			return
+		}
+		end = time.Now().UTC()
+		start = end.Add(-time.Duration(hours) * time.Hour)
 	}
-
-	// Build query based on metric
 	var results []TopHostEntry
-
-	if metric == "traffic" {
-		// Order by total bytes
-		if err := s.db.WithContext(r.Context()).Model(&database.NetworkEvent{}).
-			Select(groupColumn + " as host, count(*) as event_count, COALESCE(sum(byte_count), 0) as byte_count").
-			Where(groupColumn + " != '' AND " + groupColumn + " IS NOT NULL").
-			Group(groupColumn).
-			Order("byte_count DESC").
-			Limit(limit).
-			Scan(&results).Error; err != nil {
-			http.Error(w, "could not read top hosts", http.StatusServiceUnavailable)
-			return
-		}
-	} else {
-		// Order by event count
-		if err := s.db.WithContext(r.Context()).Model(&database.NetworkEvent{}).
-			Select(groupColumn + " as host, count(*) as event_count, COALESCE(sum(byte_count), 0) as byte_count").
-			Where(groupColumn + " != '' AND " + groupColumn + " IS NOT NULL").
-			Group(groupColumn).
-			Order("event_count DESC").
-			Limit(limit).
-			Scan(&results).Error; err != nil {
-			http.Error(w, "could not read top hosts", http.StatusServiceUnavailable)
-			return
-		}
-	}
-
-	// Get total unique hosts
 	var total int64
-	if err := s.db.WithContext(r.Context()).Model(&database.NetworkEvent{}).
-		Where(groupColumn + " != '' AND " + groupColumn + " IS NOT NULL").
-		Distinct(groupColumn).
-		Count(&total).Error; err != nil {
-		http.Error(w, "could not count top hosts", http.StatusServiceUnavailable)
+	err := s.db.WithContext(r.Context()).Transaction(func(tx *gorm.DB) error {
+		var err error
+		results, total, err = database.TopHosts(tx, hostType, start, end, limit, metric == "traffic")
+		return err
+	})
+	if err != nil {
+		http.Error(w, "could not read top hosts", http.StatusServiceUnavailable)
 		return
 	}
 
@@ -467,7 +445,7 @@ func (s *Server) handleTrafficTimeline(w http.ResponseWriter, r *http.Request) {
 	query := r.URL.Query()
 
 	// Parse date range
-	now := time.Now()
+	now := time.Now().UTC()
 	var startTime, endTime time.Time
 
 	if start := query.Get("start"); start != "" {
@@ -481,7 +459,7 @@ func (s *Server) handleTrafficTimeline(w http.ResponseWriter, r *http.Request) {
 		if t, err := time.Parse(time.RFC3339, end); err == nil {
 			endTime = t
 		} else if t, err := time.Parse("2006-01-02", end); err == nil {
-			endTime = t.Add(24*time.Hour - time.Second)
+			endTime = t.Add(24 * time.Hour)
 		}
 	}
 
@@ -502,97 +480,59 @@ func (s *Server) handleTrafficTimeline(w http.ResponseWriter, r *http.Request) {
 	duration := endTime.Sub(startTime)
 	var bucketSize string
 	var bucketDuration time.Duration
-	var sqlFormat string
 
 	switch {
 	case duration <= 4*time.Hour:
 		bucketSize = "5min"
 		bucketDuration = 5 * time.Minute
-		sqlFormat = "%Y-%m-%d %H:%M"
 	case duration <= 24*time.Hour:
-		bucketSize = "30min"
-		bucketDuration = 30 * time.Minute
-		sqlFormat = "%Y-%m-%d %H:%M"
+		bucketSize = "1hour"
+		bucketDuration = time.Hour
 	case duration <= 7*24*time.Hour:
 		bucketSize = "2hour"
 		bucketDuration = 2 * time.Hour
-		sqlFormat = "%Y-%m-%d %H:00"
 	case duration <= 30*24*time.Hour:
 		bucketSize = "6hour"
 		bucketDuration = 6 * time.Hour
-		sqlFormat = "%Y-%m-%d %H:00"
 	case duration <= 90*24*time.Hour:
 		bucketSize = "1day"
 		bucketDuration = 24 * time.Hour
-		sqlFormat = "%Y-%m-%d"
 	default:
 		bucketSize = "1week"
 		bucketDuration = 7 * 24 * time.Hour
-		sqlFormat = "%Y-%W"
 	}
-
-	// Query aggregated data
-	type bucketData struct {
-		Bucket     string
-		BytesIn    int64
-		BytesOut   int64
-		EventCount int64
+	if duration <= 0 || duration > 366*24*time.Hour {
+		http.Error(w, "traffic range must be positive and at most one year", http.StatusBadRequest)
+		return
 	}
-
-	var buckets []bucketData
-
-	// SQLite date formatting for grouping
-	if err := s.db.WithContext(r.Context()).Model(&database.NetworkEvent{}).
-		Select(`strftime('`+sqlFormat+`', timestamp) as bucket,
-			COALESCE(SUM(CASE WHEN src_ip LIKE '192.168.%' OR src_ip LIKE '10.%' OR src_ip LIKE '172.16.%' THEN byte_count ELSE 0 END), 0) as bytes_out,
-			COALESCE(SUM(CASE WHEN dst_ip LIKE '192.168.%' OR dst_ip LIKE '10.%' OR dst_ip LIKE '172.16.%' THEN byte_count ELSE 0 END), 0) as bytes_in,
-			COUNT(*) as event_count`).
-		Where("timestamp >= ? AND timestamp <= ?", startTime, endTime).
-		Group("bucket").
-		Order("bucket ASC").
-		Scan(&buckets).Error; err != nil {
+	seconds := int64(bucketDuration / time.Second)
+	var buckets map[int64]*database.TrafficBucket
+	err := s.db.WithContext(r.Context()).Transaction(func(tx *gorm.DB) error {
+		var err error
+		buckets, err = database.TrafficTotals(tx, startTime, endTime, seconds, s.isLocalTrafficAddress)
+		return err
+	})
+	if err != nil {
 		http.Error(w, "could not read traffic timeline", http.StatusServiceUnavailable)
 		return
 	}
-
-	// Convert to response format with proper timestamps
-	data := make([]TrafficDataPoint, 0, len(buckets))
+	// Align gaps with the same epoch-based boundaries used by SQL, not with the
+	// arbitrary minute/second chosen in the date picker.
+	first := startTime.Unix() - ((startTime.Unix()%seconds + seconds) % seconds)
+	data := make([]TrafficDataPoint, 0)
 	var totalIn, totalOut int64
-
-	for _, b := range buckets {
-		var ts time.Time
-		// Parse bucket string back to time
-		switch bucketSize {
-		case "5min", "30min":
-			ts, _ = time.Parse("2006-01-02 15:04", b.Bucket)
-		case "2hour", "6hour":
-			ts, _ = time.Parse("2006-01-02 15:00", b.Bucket)
-		case "1day":
-			ts, _ = time.Parse("2006-01-02", b.Bucket)
-		case "1week":
-			// Parse year-week format
-			ts, _ = time.Parse("2006-01-02", b.Bucket+"-1") // Approximate
+	for at := first; time.Unix(at, 0).Before(endTime); at += seconds {
+		point := TrafficDataPoint{Timestamp: time.Unix(at, 0).UTC()}
+		if bucket := buckets[at]; bucket != nil {
+			point.BytesIn, point.BytesOut, point.EventCount = bucket.BytesIn, bucket.BytesOut, bucket.EventCount
 		}
-
-		if ts.IsZero() {
-			continue
-		}
-
-		data = append(data, TrafficDataPoint{
-			Timestamp:  ts,
-			BytesIn:    b.BytesIn,
-			BytesOut:   b.BytesOut,
-			EventCount: b.EventCount,
-		})
-		totalIn += b.BytesIn
-		totalOut += b.BytesOut
+		totalIn += point.BytesIn
+		totalOut += point.BytesOut
+		data = append(data, point)
 	}
 
-	// Fill in missing buckets with zero values for a complete timeline
-	filledData := fillTimeGaps(data, startTime, endTime, bucketDuration)
-
 	response := TrafficTimelineResponse{
-		Data:       filledData,
+		Data:       data,
 		StartTime:  startTime,
 		EndTime:    endTime,
 		BucketSize: bucketSize,
@@ -604,43 +544,19 @@ func (s *Server) handleTrafficTimeline(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(response)
 }
 
-// fillTimeGaps fills in missing time buckets with zero values
-func fillTimeGaps(data []TrafficDataPoint, start, end time.Time, bucketDuration time.Duration) []TrafficDataPoint {
-	if len(data) == 0 {
-		return data
+func (s *Server) isLocalTrafficAddress(value string) bool {
+	address, err := netip.ParseAddr(value)
+	if err != nil {
+		return false
 	}
-
-	// Create a map for quick lookup
-	dataMap := make(map[int64]TrafficDataPoint)
-	for _, d := range data {
-		// Round to bucket
-		bucket := d.Timestamp.Truncate(bucketDuration).Unix()
-		dataMap[bucket] = d
+	address = address.Unmap()
+	if address.IsPrivate() {
+		return true
 	}
-
-	// Generate complete timeline
-	var result []TrafficDataPoint
-	current := start.Truncate(bucketDuration)
-
-	for current.Before(end) || current.Equal(end) {
-		bucket := current.Unix()
-		if dp, exists := dataMap[bucket]; exists {
-			result = append(result, dp)
-		} else {
-			result = append(result, TrafficDataPoint{
-				Timestamp:  current,
-				BytesIn:    0,
-				BytesOut:   0,
-				EventCount: 0,
-			})
-		}
-		current = current.Add(bucketDuration)
-
-		// Safety limit
-		if len(result) > 1000 {
-			break
+	for _, prefix := range s.OwnedCIDRs {
+		if prefix.Contains(address) {
+			return true
 		}
 	}
-
-	return result
+	return false
 }

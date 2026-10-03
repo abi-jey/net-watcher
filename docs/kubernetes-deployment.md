@@ -108,8 +108,51 @@ request between its sidebar and Events page and pauses automatic polling in
 hidden tabs. Frequently requested statistics are cached for 35 seconds, and
 Top Hosts and timeline responses for 65 seconds.
 Other read use cases can use the same read-only query path; long-range queries
-should eventually use pre-aggregated views instead of repeatedly scanning raw
-events. The example ingester is capped at 1 CPU core and 512 MiB memory.
+use sparse hourly summaries instead of repeatedly scanning raw events. The
+example ingester remains capped at 1 CPU core and 512 MiB memory.
+
+### Sparse hourly summaries and historical prefill
+
+The central ingester and standalone mode maintain two additional tables in the
+same SQLite database, preserving atomicity with event writes and retry keys:
+
+- `hourly_events`: counts and observed bytes per UTC hour and event type.
+- `hourly_hosts`: counts and observed bytes per UTC hour and source IP,
+  destination IP, or hostname, stored as three independent dimensions.
+
+Only hours and hosts with events get rows. There are no source/destination pair,
+port, or process combinations and no preallocated empty buckets. Repeated events
+in an ingestion batch are combined before bulk upserts, limiting extra writer
+work. Source bytes mean bytes observed on events with that source; destination
+bytes mean bytes observed on events with that destination. These are observation
+totals, not deduplicated physical-link traffic; multiple collectors/interfaces
+can observe the same flow. Summaries describe retained raw events: pruning
+subtracts their contributions transactionally and removes empty summary rows.
+
+On upgrade, startup snapshots the historical maximum event ID without scanning
+the full table. One background worker prefills at most 1,000 events per chunk,
+then yields for at least 100 ms and at least nine times the chunk runtime. This
+targets a low wall-time duty cycle, not an additional CPU allocation. New events
+are summarized immediately in their insertion transaction. The historical cursor
+is persisted with each chunk, so interruptions resume without double counting;
+late-arriving timestamps and retention during backfill are supported. Collector-only
+databases do not start prefill or maintain summaries.
+
+`Hourly summary backfill` logs expose the cursor, target, and completion status
+once per minute. Queries use raw data until prefill is complete, then switch to
+summaries automatically. Compaction that rewrites observations invalidates the
+summaries and schedules another throttled rebuild. No second database copy or
+per-event aggregation marker is required.
+
+Statistics, event types, unfiltered/event-type-only event counts, and top-host
+rankings use the summaries. The dashboard supports 1-hour, 24-hour, 7-day, and
+all-retained host rankings (`/api/top-hosts?hours=24`). The standard 24-hour
+timeline uses hourly buckets; ranges up to four hours retain 5-minute detail
+from raw events. Larger timeline buckets combine hours. Partial boundary hours
+use raw events to keep arbitrary time ranges exact, with an exclusive end time.
+Traffic direction is evaluated using private IPv4/IPv6 addresses and configured
+owned CIDRs at query time, so changing owned networks does not require a rebuild.
+The existing SQLite size limit includes summary storage.
 
 The ingester exposes its authenticated batch endpoint only through the ClusterIP
 Service on port 8921. The map UI is exposed through the Tailscale `ts-serve`

@@ -157,28 +157,37 @@ NetWatcher.Pages.DashboardPage = function() {
     const [metric, setMetric] = useState('events'); // 'events' or 'traffic'
     const [hostType, setHostType] = useState('hostname'); // 'hostname', 'srcIP', 'dstIP'
     const [limit, setLimit] = useState(10);
+    const [hours, setHours] = useState('24');
+    const request = React.useRef(null);
 
     const fetchTopHosts = useCallback(async () => {
+        if (request.current) return;
+        const controller = new AbortController();
+        request.current = controller;
         setLoading(true);
         try {
             const params = new URLSearchParams({
                 metric,
                 type: hostType,
+                hours,
                 limit: limit.toString()
             });
-            const res = await fetch(`${CONFIG.API_BASE}/api/top-hosts?${params}`);
+            const res = await fetch(`${CONFIG.API_BASE}/api/top-hosts?${params}`, { signal: controller.signal });
+            if (!res.ok) throw new Error(`Top hosts request failed: ${res.status}`);
             const data = await res.json();
+            if (controller.signal.aborted) return;
             setHosts(data.hosts || []);
             setTotal(data.total || 0);
         } catch (err) {
-            console.error('Failed to fetch top hosts:', err);
-            setHosts([]);
+            if (err.name !== 'AbortError') console.error('Failed to fetch top hosts:', err);
         }
-        setLoading(false);
-    }, [metric, hostType, limit]);
+        if (!controller.signal.aborted) setLoading(false);
+        if (request.current === controller) request.current = null;
+    }, [metric, hostType, limit, hours]);
 
     useEffect(() => {
         fetchTopHosts();
+        return () => { request.current?.abort(); request.current = null; };
     }, [fetchTopHosts]);
 
     // Auto-refresh
@@ -226,6 +235,19 @@ NetWatcher.Pages.DashboardPage = function() {
                 {/* Controls */}
                 <div className="dashboard-controls">
                     <div className="control-group">
+                        <label className="control-label">Time Range</label>
+                        <ToggleGroup
+                            options={[
+                                { value: '1', label: '1 Hour' },
+                                { value: '24', label: '24 Hours' },
+                                { value: '168', label: '7 Days' },
+                                { value: 'all', label: 'All Retained' }
+                            ]}
+                            value={hours}
+                            onChange={setHours}
+                        />
+                    </div>
+                    <div className="control-group">
                         <label className="control-label">Metric</label>
                         <ToggleGroup 
                             options={metricOptions} 
@@ -252,7 +274,7 @@ NetWatcher.Pages.DashboardPage = function() {
                 </div>
 
                 {/* Stats Summary */}
-                {!loading && hosts.length > 0 && (
+                {hosts.length > 0 && (
                     <StatsSummary hosts={hosts} metric={metric} hostType={hostType} total={total} />
                 )}
 
@@ -263,11 +285,12 @@ NetWatcher.Pages.DashboardPage = function() {
                             Top {limit} {hostType === 'hostname' ? 'Hosts' : hostType === 'srcIP' ? 'Source IPs' : 'Destination IPs'}
                             <span className="dashboard-card-subtitle">
                                 {metric === 'traffic' ? 'by Traffic Volume' : 'by Event Count'}
+                                {loading && hosts.length > 0 ? ' · Updating…' : ''}
                             </span>
                         </h2>
                     </div>
                     <div className="dashboard-card-content">
-                        {loading ? (
+                        {loading && hosts.length === 0 ? (
                             <UI.LoadingState message="Loading top hosts..." />
                         ) : (
                             <TopHostsBarChart hosts={hosts} metric={metric} />

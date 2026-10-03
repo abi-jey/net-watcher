@@ -234,7 +234,7 @@ func (r *Receiver) store(ctx context.Context, batch Batch) error {
 				return err
 			}
 		}
-		return nil
+		return database.ApplyEventSummaries(tx, newEvents, 1)
 	})
 }
 
