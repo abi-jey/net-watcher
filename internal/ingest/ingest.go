@@ -517,7 +517,7 @@ func (f *Forwarder) postBody(ctx context.Context, body []byte) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	response.Body.Close()
+	_ = response.Body.Close()
 	if response.StatusCode == http.StatusNoContent {
 		return false, nil
 	}

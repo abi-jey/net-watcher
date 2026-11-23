@@ -16,7 +16,7 @@ func TestFlushRetainsEventsOnWriteFailureAndRecordsOverflowGap(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	sm := NewSessionManager(log.Default(), db, "", "", "")
 	defer sm.Stop()
 	sm.maxRetained = 5
@@ -65,7 +65,7 @@ func TestCaptureDropsBecomeGapEvents(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	sm := NewSessionManager(log.Default(), db, "", "", "")
 	defer sm.Stop()
 	from := time.Now().UTC().Add(-30 * time.Second)

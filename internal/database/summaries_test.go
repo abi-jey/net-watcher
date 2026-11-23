@@ -66,9 +66,10 @@ func assertSummaryMatchesRaw(t *testing.T, db *DB) {
 		want := map[string][2]int64{}
 		for _, event := range events {
 			host := event.Hostname
-			if kind == "srcIP" {
+			switch kind {
+			case "srcIP":
 				host = event.SrcIP
-			} else if kind == "dstIP" {
+			case "dstIP":
 				host = event.DstIP
 			}
 			if host == "" {
@@ -316,7 +317,7 @@ func BenchmarkBatchWithHourlySummaries(b *testing.B) {
 			if err != nil {
 				b.Fatal(err)
 			}
-			defer db.Close()
+			defer func() { _ = db.Close() }()
 			if enabled {
 				if err := db.EnableSummaries(b.Context()); err != nil {
 					b.Fatal(err)
@@ -343,7 +344,7 @@ func BenchmarkDashboardSummaryQueries(b *testing.B) {
 	if err != nil {
 		b.Fatal(err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	at := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	events := make([]NetworkEvent, 20000)
 	for i := range events {

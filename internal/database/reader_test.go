@@ -15,12 +15,12 @@ func TestReadOnlyPoolDoesNotBlockWALWriter(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer writer.Close()
+	defer func() { _ = writer.Close() }()
 	reader, err := OpenReadOnly(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer reader.Close()
+	defer func() { _ = reader.Close() }()
 
 	err = reader.Transaction(func(tx *gorm.DB) error {
 		var count int64

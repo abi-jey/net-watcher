@@ -363,7 +363,7 @@ func (s *Server) handleVersion(w http.ResponseWriter, r *http.Request) {
 		Version: s.version,
 	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(response)
+	_ = json.NewEncoder(w).Encode(response)
 }
 
 // TopHostEntry represents a single host entry in the top hosts response
@@ -434,7 +434,7 @@ func (s *Server) handleTopHosts(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(response)
+	_ = json.NewEncoder(w).Encode(response)
 }
 
 // TrafficDataPoint represents a single time-series data point
@@ -563,7 +563,7 @@ func (s *Server) handleTrafficTimeline(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(response)
+	_ = json.NewEncoder(w).Encode(response)
 }
 
 func (s *Server) isLocalTrafficAddress(value string) bool {

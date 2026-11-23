@@ -172,7 +172,7 @@ func main() {
 			log.Error("Failed to open database", "error", err)
 			os.Exit(1)
 		}
-		defer db.Close()
+		defer func() { _ = db.Close() }()
 		if *collectorID == "" {
 			*collectorID, _ = os.Hostname()
 		}
@@ -291,7 +291,7 @@ func main() {
 				log.Error("Failed to open read-only web database", "error", err)
 				return
 			}
-			defer reader.Close()
+			defer func() { _ = reader.Close() }()
 			server := web.NewServer(reader, *webPort, logger, version)
 			server.Host = *webHost
 			server.Kubernetes = inventory
