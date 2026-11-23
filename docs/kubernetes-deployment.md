@@ -72,10 +72,52 @@ applies in standalone mode. Temporary SQLite files use the writable data
 volume during compaction; allow enough free disk space for SQLite to vacuum.
 
 Each collector keeps its own database until batches are acknowledged. Every
-10 minutes it removes acknowledged events and expired, unreferenced DNS
-evidence, then reclaims unused disk pages. Pending events are never discarded
-to meet the central size limit; a collector can grow while ingestion is
-unavailable. The forwarder drains acknowledged batches immediately when behind,
+10 minutes it removes acknowledged events and DNS evidence that expired more
+than 15 minutes ago and is no longer referenced, then reclaims unused disk
+pages. The grace period covers events still buffered in memory that reference
+an answer close to its expiry.
+
+Collectors are bounded by `--max-collector-db-size-gb` (default 5 GiB). While the
+ingester is unreachable a collector grows up to that limit; beyond it, the oldest
+unforwarded events are discarded and replaced by one `GAP` event recording how
+many events were lost and the time span they covered. The GAP is forwarded like
+any other event, so the loss is visible centrally.
+
+### Loss is recorded, never silent
+
+Audit queries must distinguish "nothing happened" from "nothing was recorded".
+Net Watcher writes a `GAP` event (`reason`, `event_count`, `timestamp`..`end_time`)
+whenever observations are knowingly lost:
+
+| Reason | Cause |
+| --- | --- |
+| `capture-drops` | The kernel capture ring dropped packets (per interface, per 30 s). |
+| `write-buffer-overflow` | Local database writes failed long enough that more than 50,000 events were waiting. Failed writes are otherwise retried, not dropped. |
+| `collector-size-limit` | Unforwarded events were discarded to respect `--max-collector-db-size-gb`. |
+| `rejected-by-ingester` | The ingester permanently rejected one specific event. |
+
+Delivery never stops on a single bad record. If an event references DNS
+evidence that no longer exists locally, it is forwarded without that reference
+and `DNSEvidenceMissing` counts the omission. If the ingester rejects a batch's
+content (HTTP 400 with `X-Net-Watcher-Reject`), the collector narrows the batch
+down to the offending event and skips only that one. A 400 without that header,
+for example from an older ingester or a proxy, is retried and never skips data.
+Upgrade the ingester before collectors: older ingesters reject the new fields.
+
+On the ingester, a queued batch that fails to store 10 times over at least
+10 minutes is moved to a `dead_batches` table in the queue database so later
+batches continue. Set-aside batches are retried hourly and never deleted
+automatically; their count appears in the `Ingestion queue status` log.
+
+### Collector health
+
+Every request from a collector carries a health report, and idle collectors send
+a heartbeat every 30 seconds. `GET /api/collectors` on the central UI lists each
+collector's last report (backlog, oldest unforwarded event, consecutive delivery
+failures and last error, storage against its limit, discarded events, capture
+drops, missing DNS evidence, Kubernetes inventory age) with a derived state:
+`ok`, `degraded`, `backlog`, `failing`, or `stale` (no report for 2 minutes). It
+also totals GAP events per collector and reason for the last 24 hours. The forwarder drains acknowledged batches immediately when behind,
 and checks again after two seconds when idle or retrying a failure. The central
 map may represent duplicate observations captured on multiple node interfaces.
 The forwarder sends up to 250 events per request, splitting batches that would

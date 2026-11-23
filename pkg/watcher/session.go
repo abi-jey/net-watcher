@@ -7,6 +7,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/abja/net-watcher/internal/database"
@@ -65,6 +66,65 @@ type SessionManager struct {
 	eventBuffer    []database.NetworkEvent
 	eventBufferMux sync.Mutex
 	batchSize      int
+	// Events that failed to write are retried up to maxRetainedEvents; beyond
+	// that the oldest are discarded and summarised as a GAP event.
+	writeLoss    lossSpan
+	discarded    atomic.Int64
+	captureDrops atomic.Int64
+	maxRetained  int // Zero means maxRetainedEvents.
+}
+
+func (sm *SessionManager) retainLimit() int {
+	if sm.maxRetained > 0 {
+		return sm.maxRetained
+	}
+	return maxRetainedEvents
+}
+
+// maxRetainedEvents bounds memory used for events awaiting a successful write.
+const maxRetainedEvents = 50000
+
+type lossSpan struct {
+	count       int64
+	first, last time.Time
+}
+
+func (l *lossSpan) add(events []database.NetworkEvent) {
+	for _, event := range events {
+		if l.first.IsZero() || event.Timestamp.Before(l.first) {
+			l.first = event.Timestamp
+		}
+		if event.Timestamp.After(l.last) {
+			l.last = event.Timestamp
+		}
+	}
+	l.count += int64(len(events))
+}
+
+// Stats reports cumulative loss counters for collector health.
+type Stats struct {
+	DiscardedEvents int64
+	CaptureDrops    int64
+	BufferedEvents  int
+}
+
+// Stats returns cumulative counters since the process started.
+func (sm *SessionManager) Stats() Stats {
+	sm.eventBufferMux.Lock()
+	buffered := len(sm.eventBuffer)
+	sm.eventBufferMux.Unlock()
+	return Stats{DiscardedEvents: sm.discarded.Load(), CaptureDrops: sm.captureDrops.Load(), BufferedEvents: buffered}
+}
+
+// RecordCaptureDrops records kernel packet drops as a GAP event for the interval.
+func (sm *SessionManager) RecordCaptureDrops(iface string, drops int64, from, to time.Time) {
+	if drops <= 0 || sm.db == nil {
+		return
+	}
+	sm.captureDrops.Add(drops)
+	sm.eventBufferMux.Lock()
+	sm.eventBuffer = append(sm.eventBuffer, database.NewGapEvent(database.GapCaptureDrops, drops, from, to, iface))
+	sm.eventBufferMux.Unlock()
 }
 
 // NewSessionManager creates a new session manager and starts the cleanup goroutine
@@ -337,27 +397,52 @@ func (sm *SessionManager) storeEvent(event database.NetworkEvent) {
 	}
 }
 
-// flushEvents writes all buffered events to the database
+// flushEvents writes all buffered events to the database. On failure the events
+// are kept for the next flush rather than dropped; if failures persist, the
+// oldest events beyond maxRetainedEvents are discarded and recorded as a GAP.
 func (sm *SessionManager) flushEvents() {
 	sm.eventBufferMux.Lock()
 	if len(sm.eventBuffer) == 0 {
 		sm.eventBufferMux.Unlock()
 		return
 	}
-	// Copy buffer and reset
-	events := make([]database.NetworkEvent, len(sm.eventBuffer))
+	events := make([]database.NetworkEvent, len(sm.eventBuffer), len(sm.eventBuffer)+1)
 	copy(events, sm.eventBuffer)
 	sm.eventBuffer = sm.eventBuffer[:0]
+	loss := sm.writeLoss
 	sm.eventBufferMux.Unlock()
 
+	if loss.count > 0 {
+		events = append(events, database.NewGapEvent(database.GapWriteFailure, loss.count, loss.first, loss.last, ""))
+	}
 	if err := sm.db.InsertBatch(events); err != nil {
-		sm.logger.Error("Failed to insert event batch", "count", len(events), "error", err)
-	} else {
-		sm.logger.Debug("Flushed event batch", "count", len(events))
-		// Publish events to WebSocket subscribers
-		for i := range events {
-			database.PublishEvent(&events[i])
+		if loss.count > 0 {
+			events = events[:len(events)-1]
 		}
+		sm.eventBufferMux.Lock()
+		// Keep failed events ahead of anything captured meanwhile to preserve order.
+		retained := append(events, sm.eventBuffer...)
+		if overflow := len(retained) - sm.retainLimit(); overflow > 0 {
+			sm.writeLoss.add(retained[:overflow])
+			sm.discarded.Add(int64(overflow))
+			retained = retained[overflow:]
+		}
+		sm.eventBuffer = retained
+		sm.eventBufferMux.Unlock()
+		sm.logger.Error("Failed to insert event batch; retaining for retry", "count", len(events), "retained", len(retained), "error", err)
+		return
+	}
+	if loss.count > 0 {
+		sm.eventBufferMux.Lock()
+		sm.writeLoss.count -= loss.count
+		if sm.writeLoss.count == 0 {
+			sm.writeLoss = lossSpan{}
+		}
+		sm.eventBufferMux.Unlock()
+	}
+	sm.logger.Debug("Flushed event batch", "count", len(events))
+	for i := range events {
+		database.PublishEvent(&events[i])
 	}
 }
 

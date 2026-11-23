@@ -97,7 +97,7 @@ func (db *DB) PruneToSize(maxBytes int64) (int64, error) {
 			toRemove -= deleted
 		}
 	}
-	if err := db.removeUnusedEvidence(time.Now(), false); err != nil {
+	if err := db.removeUnusedEvidence(time.Now()); err != nil {
 		return removed, err
 	}
 	if err := db.Exec("VACUUM").Error; err != nil {
@@ -165,7 +165,7 @@ func (db *DB) ReclaimCollectorSpace(endpoint string) (int64, error) {
 			}
 		}
 	}
-	if err := db.removeUnusedEvidence(time.Now(), true); err != nil {
+	if err := db.removeUnusedEvidence(time.Now()); err != nil {
 		return removed, err
 	}
 	if err := db.checkpoint(); err != nil {
@@ -200,22 +200,23 @@ func (db *DB) RecordAcknowledgment(endpoint string, eventID uint) error {
 	}).Create(&cursor).Error
 }
 
-// removeUnusedEvidence keeps evidence referenced by retained events. Collectors
-// also keep unexpired DNS answers for connections that have not occurred yet.
-func (db *DB) removeUnusedEvidence(now time.Time, collector bool) error {
-	cutoff := now.Add(-time.Minute)
-	condition := "response_time < ?"
-	if collector {
-		condition += " AND expires_at < ?"
-	}
+// EvidenceGrace is how long expired DNS evidence is kept after expiry. Capture
+// buffers events in memory before writing them, so a connection can reference
+// an answer that is about to expire; deleting it immediately would leave the
+// event pointing at evidence that no longer exists.
+const EvidenceGrace = 15 * time.Minute
+
+// removeUnusedEvidence deletes DNS evidence that has expired for longer than
+// EvidenceGrace and is not referenced by any retained event. Unexpired evidence
+// is always kept: capture may still attach it to new connections.
+func (db *DB) removeUnusedEvidence(now time.Time) error {
+	cutoff := now.Add(-EvidenceGrace)
+	condition := "response_time < ? AND expires_at < ?"
 	query := "SELECT id FROM dns_resolutions WHERE " + condition + ` AND id NOT IN (
 		SELECT CAST(reference.value AS INTEGER) FROM network_events AS event,
 		json_each(CASE WHEN json_valid(event.dns_resolution_ids) THEN event.dns_resolution_ids ELSE '[]' END) AS reference
 	)`
-	args := []interface{}{cutoff}
-	if collector {
-		args = append(args, now)
-	}
+	args := []interface{}{cutoff, cutoff}
 	var candidates bool
 	if err := db.Raw("SELECT EXISTS(SELECT 1 FROM dns_resolutions WHERE "+condition+" LIMIT 1)", args...).Scan(&candidates).Error; err != nil || !candidates {
 		return err
@@ -226,4 +227,82 @@ func (db *DB) removeUnusedEvidence(now time.Time, collector bool) error {
 		}
 		return tx.Exec("DELETE FROM dns_resolutions WHERE id IN ("+query+")", args...).Error
 	})
+}
+
+// EnforceCollectorLimit discards the oldest unforwarded events when a collector
+// database exceeds maxBytes, for example while the ingester is unreachable.
+// Discarded events are replaced by a single GAP event that is forwarded like any
+// other observation, so the loss is visible centrally instead of silent.
+func (db *DB) EnforceCollectorLimit(endpoint string, maxBytes int64) (int64, error) {
+	if maxBytes <= 0 {
+		return 0, fmt.Errorf("maximum collector size must be positive")
+	}
+	size, err := db.StorageBytes()
+	if err != nil || size <= maxBytes {
+		return 0, err
+	}
+	if err := db.checkpoint(); err != nil {
+		return 0, err
+	}
+	if size, err = db.StorageBytes(); err != nil || size <= maxBytes {
+		return 0, err
+	}
+	var cursor IngestCursor
+	if err := db.Where("endpoint = ?", endpoint).First(&cursor).Error; err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+		return 0, err
+	}
+	var count int64
+	if err := db.Model(&NetworkEvent{}).Where("id > ?", cursor.EventID).Count(&count).Error; err != nil {
+		return 0, err
+	}
+	var removed int64
+	var first, last time.Time
+	if count > 0 {
+		target := maxBytes - maxBytes/5
+		toRemove := max(int64(math.Ceil(float64(count)*float64(size-target)/float64(size))), 1)
+		for toRemove > 0 {
+			batch := min(toRemove, 10000)
+			var events []NetworkEvent
+			err := db.Transaction(func(tx *gorm.DB) error {
+				if err := tx.Select(summaryColumns).Where("id > ?", cursor.EventID).Order("id ASC").Limit(int(batch)).Find(&events).Error; err != nil {
+					return err
+				}
+				if len(events) == 0 {
+					return nil
+				}
+				if err := ApplyEventSummaries(tx, events, -1); err != nil {
+					return err
+				}
+				return tx.Where("id > ? AND id <= ?", cursor.EventID, events[len(events)-1].ID).Delete(&NetworkEvent{}).Error
+			})
+			if err != nil {
+				return removed, err
+			}
+			if len(events) == 0 {
+				break
+			}
+			for _, event := range events {
+				if first.IsZero() || event.Timestamp.Before(first) {
+					first = event.Timestamp
+				}
+				if event.Timestamp.After(last) {
+					last = event.Timestamp
+				}
+			}
+			removed += int64(len(events))
+			toRemove -= int64(len(events))
+		}
+	}
+	if removed > 0 {
+		if err := db.InsertBatch([]NetworkEvent{NewGapEvent(GapCollectorLimit, removed, first, last, "")}); err != nil {
+			return removed, err
+		}
+	}
+	if err := db.removeUnusedEvidence(time.Now()); err != nil {
+		return removed, err
+	}
+	if err := db.Exec("VACUUM").Error; err != nil {
+		return removed, err
+	}
+	return removed, db.checkpoint()
 }
