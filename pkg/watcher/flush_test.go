@@ -138,7 +138,7 @@ func TestPacketTrackingDoesNotWaitForDatabaseWrites(t *testing.T) {
 }
 
 func TestRingSizeByInterfaceRole(t *testing.T) {
-	for name, blocks := range map[string]int{"lxc1234abcd": 8, "veth0": 8, "lxc_health": 64, "enp0s25": 64, "tailscale0": 64, "cilium_vxlan": 64} {
+	for name, blocks := range map[string]int{"lxc1234abcd": 16, "veth0": 16, "lxc_health": 64, "enp0s25": 64, "tailscale0": 64, "cilium_vxlan": 64} {
 		if got := ringBlocks(name); got != blocks {
 			t.Errorf("%s: %d blocks, want %d", name, got, blocks)
 		}

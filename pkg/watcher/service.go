@@ -187,15 +187,16 @@ func (w *Watcher) sniffInterface(ctx context.Context, iface net.Interface) error
 	return nil
 }
 
-// Ring sizes per interface. Pod links (one per pod) carry a single pod's
-// traffic and keep a small ring; the node's own uplinks, tunnels and overlay
-// carry everything and absorb bursts and garbage-collection pauses with a
-// larger one: 4 MiB is about 2,800 full-size packets.
+// Ring sizes per interface. The node's own uplinks, tunnels and overlay
+// carry everything and get 4 MiB (about 2,800 full-size packets) to absorb
+// bursts and garbage-collection pauses. Pod links, one per pod, get 1 MiB:
+// enough for a busy pod's bursts while keeping kernel memory bounded on
+// nodes with many pods (the ring is not charged to the collector's cgroup).
 const ringBlockSize = 64 << 10
 
 func ringBlocks(name string) int {
 	if podLink(name) {
-		return 8 // 512 KiB
+		return 16 // 1 MiB
 	}
 	return 64 // 4 MiB
 }

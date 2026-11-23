@@ -909,6 +909,9 @@ func (sm *SessionManager) cleanupLoop() {
 			if lookup := sm.currentProcessLookup(); lookup != nil {
 				lookup.report()
 			}
+			// Expire under the lock, but enrich and queue the end events after
+			// releasing it: every capture goroutine waits for this mutex.
+			var expired []database.NetworkEvent
 			sm.mutex.Lock()
 			threshold := time.Now().Add(-sm.sessionTimeout)
 			for key, session := range sm.sessions {
@@ -927,7 +930,7 @@ func (sm *SessionManager) cleanupLoop() {
 							"bytes", session.ByteCount,
 						)
 
-						sm.queueEvent(database.NetworkEvent{
+						expired = append(expired, database.NetworkEvent{
 							Timestamp: time.Now(),
 							EventType: database.EventUDPEnd,
 							Interface: session.Iface,
@@ -949,7 +952,7 @@ func (sm *SessionManager) cleanupLoop() {
 							"bytes", session.ByteCount,
 						)
 
-						sm.queueEvent(database.NetworkEvent{
+						expired = append(expired, database.NetworkEvent{
 							Timestamp: time.Now(),
 							EventType: database.EventTimeout,
 							Interface: session.Iface,
@@ -967,6 +970,9 @@ func (sm *SessionManager) cleanupLoop() {
 				}
 			}
 			sm.mutex.Unlock()
+			for _, event := range expired {
+				sm.queueEvent(event)
+			}
 
 			sm.dns.mu.Lock()
 			sm.dns.prune(time.Now())
