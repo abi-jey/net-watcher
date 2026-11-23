@@ -129,7 +129,7 @@ func TestReceiverRequiresBearerToken(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 	if response.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("status = %d", response.StatusCode)
 	}
@@ -277,7 +277,7 @@ func BenchmarkReceiverStore(b *testing.B) {
 			if err != nil {
 				b.Fatal(err)
 			}
-			defer db.Close()
+			defer func() { _ = db.Close() }()
 			receiver := Receiver{DB: db}
 			at := time.Now().UTC()
 			batch := Batch{CollectorID: "node-a", Events: make([]database.NetworkEvent, maxEvents)}

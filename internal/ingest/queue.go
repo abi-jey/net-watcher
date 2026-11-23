@@ -66,7 +66,7 @@ func (q *Queue) enqueue(ctx context.Context, batch Batch) error {
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	var exists bool
 	if err := tx.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM pending_batches WHERE digest = ?)", digest[:]).Scan(&exists); err != nil {
 		return err

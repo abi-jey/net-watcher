@@ -130,7 +130,7 @@ capture:
 	wg.Wait()
 	w.sessionManager.Stop()
 	if w.db != nil {
-		w.db.Close()
+		_ = w.db.Close()
 	}
 
 	return nil
@@ -187,7 +187,7 @@ func (w *Watcher) sniffInterface(ctx context.Context, iface net.Interface) error
 // buffer, as TPacket does. Never use it with reusable or mmap-backed buffers.
 func ownedPacketSource(reader gopacket.PacketDataSource, decoder gopacket.Decoder) *gopacket.PacketSource {
 	source := gopacket.NewPacketSource(reader, decoder)
-	source.DecodeOptions.NoCopy = true
+	source.NoCopy = true
 	return source
 }
 

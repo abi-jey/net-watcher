@@ -1,12 +1,13 @@
 name: Setup Go
-description: Setup Go environment with caching
+description: Setup the latest stable Go (go.mod sets the minimum), with caching
 
 runs:
   using: composite
   steps:
-    - uses: actions/setup-go@v5
+    - uses: actions/setup-go@v7
       with:
-        go-version: '1.25'
+        go-version: stable
+        check-latest: true
 
     - name: Download dependencies
       shell: bash

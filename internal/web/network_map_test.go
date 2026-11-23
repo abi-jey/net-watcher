@@ -16,7 +16,7 @@ func TestMapSeparatesDNSProofFromSNIAndUnknownConnections(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	context := `{"Kind":"pod","Namespace":"demo","Name":"worker","UID":"original-pod"}`
 	now := time.Now()
 	evidence := database.DNSResolution{Name: "api.test", ClientIP: "10.2.0.8", IP: "203.0.113.20", QueryTime: now.Add(-time.Second), ResponseTime: now, ExpiresAt: now.Add(time.Minute), TTL: 60, ClientContext: context}
@@ -122,7 +122,7 @@ func TestMapAssociatesUnattributedNodeHistoryOnlyWhenIdentityIsUnambiguous(t *te
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	at := time.Now()
 	old := database.NetworkEvent{Timestamp: at.Add(-time.Minute), EventType: database.EventTCPStart, SrcIP: "10.0.1.155", DstIP: "10.2.0.8", DstPort: 8000}
 	current := database.NetworkEvent{Timestamp: at, EventType: database.EventTCPStart, SrcIP: old.SrcIP, DstIP: old.DstIP, DstPort: 8000, SourceContext: `{"Kind":"node","Name":"abja","UID":"node-1"}`}

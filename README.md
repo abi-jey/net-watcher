@@ -114,7 +114,7 @@ net-watcher --help
 
 ### System Requirements
 - **Linux only** (uses AF_PACKET raw sockets)
-- **Go 1.25+** for building from source
+- **Go 1.27.4+** (latest stable recommended) with cgo and a C compiler for building from source
 - **CAP_NET_RAW** capability for packet capture
 
 ### Automated Installation
@@ -142,7 +142,7 @@ sudo ./net-watcher install
 ## 🔧 Development
 
 ### Prerequisites
-- Go 1.25+ for development builds
+- Go 1.27.4+ for development builds
 - Linux only (uses AF_PACKET raw sockets)
 
 ### Build Commands
@@ -330,7 +330,7 @@ sudo setcap -v cap_net_raw+ep /usr/local/bin/net-watcher
 ## 📦 CI/CD Pipeline
 
 ### Automated Workflows
-- **Go Version**: Go 1.25
+- **Go Version**: latest stable (minimum 1.27.4, enforced by go.mod)
 - **Cross-Platform Builds**: Linux, macOS, Windows (amd64/arm64)
 - **Security Scanning**: Gosec, Trivy, Snyk, CodeQL
 - **Release Automation**: Semantic versioning with changelog generation
@@ -445,3 +445,23 @@ MIT License - see [LICENSE](LICENSE) file for details.
 | `install` | Setup service | `sudo ./install.sh` |
 
 Net-Watcher provides robust network monitoring with minimal dependencies and maximum security.
+
+## Security checks
+
+Every CI run and release fails when a known vulnerability is found:
+
+- `govulncheck` (latest) fails when the code reaches a vulnerable symbol in a
+  module or in the Go standard library of the toolchain in use.
+- The container image is built from the latest `golang:bookworm` and
+  `distroless/base-nossl-debian12` and scanned with the latest Trivy; fixable
+  HIGH or CRITICAL findings in OS packages or the binary fail the build.
+- `golangci-lint` (latest v2) runs on every push.
+
+Toolchain, base images and scanners are not pinned, so every build picks up
+the latest patches. Dependabot proposes Go module and GitHub Actions updates.
+Run the same checks locally:
+
+    go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+    docker build -t net-watcher:scan . && \
+      docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:latest \
+        image --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 net-watcher:scan

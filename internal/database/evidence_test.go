@@ -11,7 +11,7 @@ func TestCompactionKeepsVersionedDNSAndConnectionEvidence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	at := time.Now().Add(-time.Hour)
 	resolution := DNSResolution{Name: "api.test", IP: "203.0.113.20", ClientIP: "10.2.0.8", QueryTime: at, ResponseTime: at.Add(time.Millisecond), ExpiresAt: at.Add(time.Minute), TTL: 60}
 	if err := db.Create(&resolution).Error; err != nil {
