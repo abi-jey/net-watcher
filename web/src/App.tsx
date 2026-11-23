@@ -8,6 +8,7 @@ import { Overview } from './pages/Overview.tsx';
 const Events = lazy(() => import('./pages/Events.tsx').then(module => ({ default: module.Events })));
 const Pods = lazy(() => import('./pages/Pods.tsx').then(module => ({ default: module.Pods })));
 const PodInspector = lazy(() => import('./pages/PodInspector.tsx').then(module => ({ default: module.PodInspector })));
+const Processes = lazy(() => import('./pages/Processes.tsx').then(module => ({ default: module.Processes })));
 const Collectors = lazy(() => import('./pages/Collectors.tsx').then(module => ({ default: module.Collectors })));
 const NetworkMap = lazy(() => import('./pages/NetworkMap.tsx').then(module => ({ default: module.NetworkMap })));
 
@@ -15,6 +16,7 @@ const nav = [
   { id: '', label: 'Overview', icon: 'overview' },
   { id: 'events', label: 'Events', icon: 'events' },
   { id: 'pods', label: 'Pods', icon: 'pods' },
+  { id: 'processes', label: 'Processes', icon: 'processes' },
   { id: 'map', label: 'Network map', icon: 'map' },
   { id: 'collectors', label: 'Collectors', icon: 'collectors' },
 ];
@@ -35,6 +37,7 @@ export function App() {
   switch (section) {
     case 'events': page = <Events query={route.query} />; break;
     case 'pods': page = rest.length ? <PodInspector path={rest} query={route.query} /> : <Pods query={route.query} />; break;
+    case 'processes': page = <Processes query={route.query} />; break;
     case 'map': page = <NetworkMap />; break;
     case 'collectors': page = <Collectors />; break;
     default: page = <Overview />;

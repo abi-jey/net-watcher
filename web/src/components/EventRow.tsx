@@ -91,7 +91,7 @@ export function EventRow({ event, expanded, onToggle }: { event: NetworkEvent; e
         <div className="ev-detail">
           <Details event={event} />
           <span className="ev-context">
-            {event.ProcessCommand && <span className="ctx process" title={`Process observed through procfs${event.ProcessPID ? `, host PID ${event.ProcessPID}` : ''}`}><Icon name="process" size={12} />{event.ProcessCommand}</span>}
+            {event.ProcessCommand && <span className="ctx process" title={processTitle(event)}><Icon name="process" size={12} />{event.ProcessCommand}{event.ProcessContainer && event.ProcessContainer !== event.ProcessCommand ? <span className="muted"> · {event.ProcessContainer}</span> : null}</span>}
             <span className="ctx" title={`${event.Interface}: ${link.help}`}><Icon name="network" size={12} />{link.role}</span>
             {event.IPVersion > 0 && <span className="ctx">IPv{event.IPVersion}</span>}
             <span className="ctx" title="Collector (node) that captured the packet">{event.CollectorID || 'local'}</span>
@@ -103,7 +103,23 @@ export function EventRow({ event, expanded, onToggle }: { event: NetworkEvent; e
   );
 }
 
-function SideFacts({ title, side }: { title: string; side: Side }) {
+function processTitle(event: NetworkEvent): string {
+  const role = event.ProcessSide === 'dst' ? 'accepted this connection (owns the destination socket)' : 'opened this connection (owns the source socket)';
+  const where = event.ProcessPod ? ` in pod ${event.ProcessPod}${event.ProcessContainer ? `, container ${event.ProcessContainer}` : ''}` : ' on the node (outside any pod)';
+  return `Process that ${role}${where}${event.ProcessPID ? `; host PID ${event.ProcessPID}` : ''}`;
+}
+
+function ProcessFacts({ event }: { event: NetworkEvent }) {
+  return <>
+    <dt>Process</dt>
+    <dd>
+      <span className="mono">{event.ProcessCommand || 'unknown'}</span>{event.ProcessPID ? <span className="muted"> · host PID {event.ProcessPID}</span> : null}
+      <div className="muted small">{event.ProcessSide === 'dst' ? 'accepted' : 'opened'} this connection{event.ProcessContainer ? ` · container ${event.ProcessContainer}` : ''}{event.ProcessPod ? '' : ' · node process outside any pod'}</div>
+    </dd>
+  </>;
+}
+
+function SideFacts({ title, side, process }: { title: string; side: Side; process?: NetworkEvent }) {
   const scope = ipScope(side.ip);
   return (
     <section>
@@ -118,6 +134,7 @@ function SideFacts({ title, side }: { title: string; side: Side }) {
           {side.uid && <><dt>UID</dt><dd className="mono">{side.uid}</dd></>}
           <dt>Attribution</dt><dd><Attribution value={side.attribution || 'none'} /></dd>
         </> : <><dt>Kubernetes</dt><dd className="muted">not a known cluster address</dd></>}
+        {process && <ProcessFacts event={process} />}
       </dl>
     </section>
   );
@@ -129,8 +146,8 @@ function EventDetails({ event }: { event: NetworkEvent }) {
   return (
     <div className="ev-details">
       <div className="facts">
-        <SideFacts title="Source" side={source(event)} />
-        <SideFacts title="Destination" side={destination(event)} />
+        <SideFacts title="Source" side={source(event)} process={event.ProcessSide === 'src' ? event : undefined} />
+        <SideFacts title="Destination" side={destination(event)} process={event.ProcessSide === 'dst' ? event : undefined} />
         <section>
           <h3>Capture</h3>
           <dl className="kv">
@@ -139,7 +156,7 @@ function EventDetails({ event }: { event: NetworkEvent }) {
             <dt>Collector</dt><dd>{event.CollectorID || 'local'}</dd>
             <dt>Interface</dt><dd><span className="mono">{event.Interface || '—'}</span> · {link.role}<div className="muted small">{link.help}</div></dd>
             <dt>Protocol</dt><dd>{[event.Protocol, event.IPVersion ? `IPv${event.IPVersion}` : ''].filter(Boolean).join(' · ') || '—'}</dd>
-            <dt>Process</dt><dd>{event.ProcessCommand ? <>{event.ProcessCommand}{event.ProcessPID ? <span className="muted"> · host PID {event.ProcessPID}</span> : null}</> : <span className="muted">not attributed</span>}</dd>
+            {!event.ProcessSide && <><dt>Process</dt><dd>{event.ProcessCommand ? <>{event.ProcessCommand}{event.ProcessPID ? <span className="muted"> · host PID {event.ProcessPID}</span> : null}</> : <span className="muted" title="See Processes for why some connections have no process">not attributed</span>}</dd></>}
             {event.ByteCount > 0 && <><dt>Bytes</dt><dd>{bytes(event.ByteCount)} <span className="muted small">both directions</span></dd></>}
           </dl>
         </section>

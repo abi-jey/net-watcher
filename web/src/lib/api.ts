@@ -13,6 +13,8 @@ export interface NetworkEvent {
   SrcKind: string; SrcNamespace: string; SrcName: string; SrcUID: string; SrcWorkload: string; SrcAttribution: string;
   DstKind: string; DstNamespace: string; DstName: string; DstUID: string; DstWorkload: string; DstAttribution: string;
   ProcessPID: number; ProcessCommand: string; EventCount: number; CollectorID: string;
+  /** 'src' or 'dst': whose socket the process owns. Empty when not attributed. */
+  ProcessSide: string; ProcessPod: string; ProcessContainer: string;
 }
 
 export interface EventsResponse {
@@ -47,6 +49,14 @@ export interface HealthResponse { generatedAt: string; collectors: CollectorHeal
 export interface PodSummary {
   namespace: string; name: string; uid: string; workload: string; firstSeen: string; lastSeen: string;
   egress: number; ingress: number; egressBytes: number; ingressBytes: number; uncertain: number; replacement: boolean;
+}
+export interface ProcessSummary {
+  collector: string; pod: string; namespace: string; container: string; command: string;
+  opened: number; accepted: number; openedBytes: number; acceptedBytes: number; events: number; firstSeen: string; lastSeen: string;
+}
+export interface ProcessesResponse {
+  from: string; to: string; granularity: 'hour' | 'event'; truncated: boolean;
+  coverage: { flowStarts: number; attributedFlows: number }; processes: ProcessSummary[] | null;
 }
 export interface PodsResponse { from: string; to: string; granularity: 'hour' | 'event'; truncated: boolean; pods: PodSummary[] | null }
 // Go encodes empty slices as null; fields that may be null are typed so.

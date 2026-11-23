@@ -239,21 +239,54 @@ because CRI-O's `RuntimeDefault` profile blocks AF_PACKET sockets. These
 exceptions apply only to the node-local collector; the ingester remains
 non-root, capability-free, and `RuntimeDefault`.
 
-### Optional host-process attribution
+### Optional process attribution
 
-Add `--process-attribution` to a collector and mount the host's `/proc` at
-`/host/proc` **read-only** (or set `--process-proc-root` explicitly). No
-`hostPID`, eBPF program, new capabilities, or writable host mount is needed.
-This experimental attribution is limited to host-side TLS handshakes. A
-single background worker attempts at most two socket lookups per second, each
-with a 20 ms deadline and bounded `/proc` work; packet capture never waits for
-it. Successful matches record only the host PID and kernel process name
-(`comm`), never command-line arguments. Short-lived sockets, container-private
-network namespaces, or unreadable process descriptors may remain unattributed.
-The Events table has a Process column: a matched host PID/name, **Unattributed**
-for TLS without a match, or a dash for event types not sampled. The remote
-server's process is not observable. Disable the flag and remove the mount if
-the measured CPU, capture drops, or match rate are unacceptable.
+With `--process-attribution`, each collector records which process on its node
+opened or accepted a connection: the kernel command name (`comm`), host PID,
+and for pods the pod and container name. It works for pods (each in its own
+network namespace) and for host processes, including host-network pods. Add to
+the collector:
+
+```yaml
+args:
+  - --process-attribution
+securityContext:
+  capabilities:
+    drop: ["ALL"]
+    add: ["NET_RAW", "SYS_PTRACE"]
+volumeMounts:
+  - name: host-proc
+    mountPath: /host/proc
+    readOnly: true
+# under volumes:
+  - name: host-proc
+    hostPath:
+      path: /proc
+      type: Directory
+```
+
+`CAP_SYS_PTRACE` is needed only to *read* other processes' `/proc` entries
+(their network namespace link, socket tables and file-descriptor links); the
+collector never attaches to, traces or signals a process, and needs no
+`hostPID`, eBPF or writable host mount. Command-line arguments are never read.
+
+How it works: every 15 seconds (and at most every 3 when an unknown pod shows
+up) the collector maps processes to pods through `/proc/<pid>/cgroup`, which
+names the pod UID and container ID. When a connection starts, it looks the flow
+up in the socket table of that pod's network namespace (or the host's), then
+finds which of that pod's processes holds the socket. For the receiving side
+of a connection not yet accepted, the listening socket identifies the server.
+Later events of the same connection (TLS, end, timeout) reuse the result.
+All `/proc` reads happen on one background worker within a CPU-time budget of
+about 3% of one core, so packet capture never waits for it; lookups beyond the
+budget are skipped and counted. The collector logs counters every 30 seconds
+(`Process attribution`: attempted, matched, inherited, no_socket, over_budget,
+expired, proc_ms).
+
+Connections stay unattributed when the socket closed before the lookup ran,
+when neither end runs on a node with a collector, or during bursts beyond the
+budget. The Processes page shows the attributed share of connections. Remove
+the flag, capability and mount to disable it.
 
 ## Pod attribution
 

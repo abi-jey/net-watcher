@@ -78,9 +78,17 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		if value := query.Get("dstIP"); value != "" {
 			db = db.Where("dst_ip LIKE ?", "%"+value+"%")
 		}
+		// Exact process identity, as listed by /api/processes. An empty pod
+		// selects host processes once a command is given.
+		if value := query.Get("process"); value != "" {
+			db = db.Where("process_command = ? AND process_pod = ? AND process_container = ?", value, query.Get("processPod"), query.Get("processContainer"))
+		}
+		if value := query.Get("collector"); value != "" {
+			db = db.Where("collector_id = ?", value)
+		}
 		if value := query.Get("q"); value != "" {
 			like := "%" + value + "%"
-			columns := []string{"src_ip", "dst_ip", "hostname", "dns_query", "tls_sni", "src_name", "dst_name", "src_namespace", "dst_namespace", "src_workload", "dst_workload", "process_command"}
+			columns := []string{"src_ip", "dst_ip", "hostname", "dns_query", "tls_sni", "src_name", "dst_name", "src_namespace", "dst_namespace", "src_workload", "dst_workload", "process_command", "process_pod", "process_container"}
 			clauses := make([]string, len(columns))
 			args := make([]interface{}, len(columns))
 			for i, column := range columns {
