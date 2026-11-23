@@ -254,3 +254,46 @@ The Events table has a Process column: a matched host PID/name, **Unattributed**
 for TLS without a match, or a dash for event types not sampled. The remote
 server's process is not observable. Disable the flag and remove the mount if
 the measured CPU, capture drops, or match rate are unacceptable.
+
+## Pod attribution
+
+Every event records the Kubernetes identity of its source and destination *at
+capture time* in indexed columns (`src_*`/`dst_*`: kind, namespace, name, UID,
+workload as `Kind/name` of the top-level owner, and attribution confidence), in
+addition to the JSON context snapshot.
+
+Collectors keep a history of which pod held each address. A pod's assignment
+starts at its creation timestamp (an address cannot predate its pod) and ends
+when its deletion or terminal phase is observed. Completed and failed pods keep
+`status.podIP` in the API although the address is already released, so they
+never claim it. With the `watch` permission on pods, a watch stream updates the
+history within about a second; the 30-second full list remains as a safety net
+and cannot undo or resurrect what the watch has seen. Ended assignments are kept
+for 15 minutes so buffered events are still attributed correctly.
+
+| Attribution | Meaning |
+| --- | --- |
+| `exact` | One pod held the address at capture time and the inventory was current. |
+| `ambiguous` | The address changed hands near capture time. The newest pod is recorded; the JSON context lists the alternatives. |
+| `stale` | Best candidate, but the inventory had not refreshed for over 90 seconds. |
+| `node` | A node or host-network address. The pod cannot be determined from the address. |
+| `service` | A Service virtual IP; the backend is not determined. |
+| empty | Not a known cluster address. Events from before this change have empty columns (shown as `legacy` in the API when only JSON context exists). |
+
+If the watch is unavailable (missing RBAC, API errors), collector health reports
+`pod watch disconnected` and attribution falls back to the list interval, where
+reuse within those 30 seconds is reported as `ambiguous` rather than guessed.
+
+### Inspecting a pod
+
+- `GET /api/pods?namespace=&from=&to=` lists pods observed in the window (default
+  24 h), with egress/ingress counts, uncertain attributions, and a `replacement`
+  flag when another pod with the same name appears in the window.
+- `GET /api/pod-connections?uid=<pod UID>` (or `namespace=&workload=Deployment/api`
+  for all replicas and restarts) returns connections for the window (default 1 h,
+  at most 7 days), `direction=egress|ingress|both`, `limit` up to 1000 and a
+  `cursor` for the next page. Filters are applied before the limit. Rows include
+  the peer's capture-time identity, DNS evidence with TTL when an answer matched,
+  capture source (collector and interface), and GAP totals overlapping the window.
+  `verdict` is always `unknown`: a captured packet is an observation, not proof
+  that a policy allowed or denied it.

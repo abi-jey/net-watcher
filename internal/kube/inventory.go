@@ -22,6 +22,9 @@ type Metadata struct {
 	Name, Namespace, UID string
 	Labels               map[string]string
 	OwnerReferences      []Owner
+	CreationTimestamp    time.Time
+	DeletionTimestamp    *time.Time
+	ResourceVersion      string
 }
 type Port struct {
 	Name, Protocol string
@@ -41,6 +44,7 @@ type Object struct {
 		Ports       []Port
 	}
 	Status struct {
+		Phase     string
 		PodIP     string
 		PodIPs    []struct{ IP string }
 		Addresses []struct{ Type, Address string }
@@ -56,7 +60,7 @@ type Object struct {
 }
 type List struct {
 	Items    []Object
-	Metadata struct{ Continue string }
+	Metadata struct{ Continue, ResourceVersion string }
 }
 
 // Source returns a complete inventory; partial refreshes must not replace the index.
@@ -97,9 +101,10 @@ func (s KubectlSource) List(ctx context.Context) ([]Object, error) {
 }
 
 type clusterSource struct {
-	base      string
-	client    *http.Client
-	tokenFile string
+	base        string
+	client      *http.Client
+	watchClient *http.Client // No overall timeout; watches are bounded by timeoutSeconds and context.
+	tokenFile   string
 }
 
 // InClusterSource uses the projected service-account CA and renewable token.
@@ -117,8 +122,11 @@ func InClusterSource() (Source, error) {
 	if !roots.AppendCertsFromPEM(certificate) {
 		return nil, fmt.Errorf("invalid service-account CA")
 	}
-	client := &http.Client{Timeout: 10 * time.Second, Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS12}}, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-	return &clusterSource{base: "https://" + net.JoinHostPort(host, port), client: client, tokenFile: directory + "token"}, nil
+	transport := &http.Transport{TLSClientConfig: &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS12}}
+	noRedirect := func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	client := &http.Client{Timeout: 10 * time.Second, Transport: transport, CheckRedirect: noRedirect}
+	watchClient := &http.Client{Transport: transport, CheckRedirect: noRedirect}
+	return &clusterSource{base: "https://" + net.JoinHostPort(host, port), client: client, watchClient: watchClient, tokenFile: directory + "token"}, nil
 }
 
 func (s *clusterSource) List(ctx context.Context) ([]Object, error) {
@@ -195,12 +203,24 @@ type Endpoint struct {
 	Owner                            Owner
 	Services                         []Service `json:",omitempty"`
 	ObservedAt                       time.Time
+	// Confidence qualifies the attribution; see the Confidence* constants.
+	Confidence string `json:",omitempty"`
+	// Alternatives lists other pods that may have held the address at capture time.
+	Alternatives []Candidate `json:",omitempty"`
 }
+
+// Candidate identifies another pod that held an address near capture time.
+type Candidate struct{ Namespace, Name, UID string }
 type Status struct {
 	Enabled   bool
 	LastSync  time.Time
 	Error     string
 	Resources int
+	// Watching is true while a pod watch stream is connected; attribution
+	// boundaries are then accurate to seconds rather than the list interval.
+	Watching   bool
+	WatchError string
+	Pods       int
 }
 type serviceKey struct {
 	IP, Protocol string
@@ -211,13 +231,18 @@ type Index struct {
 	source    Source
 	endpoints map[string]Endpoint
 	services  map[serviceKey][]Service
+	owners    map[string]Owner
 	status    Status
+	pods      *podHistory
 }
 
-func New(source Source) *Index  { return &Index{source: source, status: Status{Enabled: source != nil}} }
+func New(source Source) *Index {
+	return &Index{source: source, status: Status{Enabled: source != nil}, pods: newPodHistory(), owners: map[string]Owner{}}
+}
 func (i *Index) Status() Status { i.mu.RLock(); defer i.mu.RUnlock(); return i.status }
 
 func (i *Index) Refresh(ctx context.Context) error {
+	started := time.Now()
 	objects, err := i.source.List(ctx)
 	if err != nil {
 		i.mu.Lock()
@@ -225,7 +250,7 @@ func (i *Index) Refresh(ctx context.Context) error {
 		i.mu.Unlock()
 		return err
 	}
-	i.Replace(objects, time.Now())
+	i.replace(objects, started, time.Now())
 	return nil
 }
 
@@ -247,7 +272,12 @@ func (i *Index) Run(ctx context.Context) {
 
 // Replace publishes one consistent inventory snapshot. Host-network pods do not
 // take ownership of their shared node IP; EndpointSlices provide service candidates.
-func (i *Index) Replace(objects []Object, at time.Time) {
+func (i *Index) Replace(objects []Object, at time.Time) { i.replace(objects, at, at) }
+
+// replace applies a snapshot requested at listedAt and received at at. Pods are
+// reconciled into the assignment history; listedAt guards against a slow list
+// ending assignments the watch has already seen created.
+func (i *Index) replace(objects []Object, listedAt, at time.Time) {
 	endpoints := make(map[string]Endpoint)
 	services := make(map[serviceKey][]Service)
 	owners := make(map[string]Owner)
@@ -270,16 +300,6 @@ func (i *Index) Replace(objects []Object, at time.Time) {
 			}
 		}
 		switch object.Kind {
-		case "Pod":
-			if object.Spec.HostNetwork {
-				continue
-			}
-			if object.Status.PodIP != "" {
-				endpoints[object.Status.PodIP] = endpoint
-			}
-			for _, address := range object.Status.PodIPs {
-				endpoints[address.IP] = endpoint
-			}
 		case "Service":
 			ips := append(append([]string{}, object.Spec.ClusterIPs...), object.Spec.ExternalIPs...)
 			ips = append(ips, object.Spec.ClusterIP)
@@ -352,27 +372,82 @@ func (i *Index) Replace(objects []Object, at time.Time) {
 			}
 		}
 	}
+	var pods []Object
+	for _, object := range objects {
+		if object.Kind == "Pod" {
+			pods = append(pods, object)
+		}
+	}
 	i.mu.Lock()
 	defer i.mu.Unlock()
-	i.endpoints, i.services = endpoints, services
-	i.status = Status{Enabled: true, LastSync: at, Resources: len(objects)}
+	i.endpoints, i.services, i.owners = endpoints, services, owners
+	i.pods.reconcile(pods, owners, listedAt, at)
+	watching, watchErr := i.status.Watching, i.status.WatchError
+	i.status = Status{Enabled: true, LastSync: at, Resources: len(objects), Watching: watching, WatchError: watchErr, Pods: i.pods.active()}
 }
 
+// Lookup returns the JSON capture-time context for an address observed now.
+// Prefer Attribute, which also returns indexed identity fields and confidence.
 func (i *Index) Lookup(ip string, port uint16, protocol string) string {
+	return i.Attribute(ip, port, protocol, time.Now()).Context
+}
+
+// Attribution is an address's Kubernetes identity at a capture time.
+type Attribution struct {
+	Context                                          string // JSON Endpoint snapshot.
+	Kind, Namespace, Name, UID, Workload, Confidence string
+}
+
+// Confidence values for Attribution and Endpoint.
+const (
+	ConfidenceExact     = "exact"     // One pod held the address at capture time; inventory current.
+	ConfidenceAmbiguous = "ambiguous" // The address changed hands near capture time; alternatives listed.
+	ConfidenceStale     = "stale"     // Best candidate, but inventory has not refreshed for over 90 s.
+	ConfidenceNode      = "node"      // Node or host-network address; the pod cannot be determined.
+	ConfidenceService   = "service"   // Service virtual IP; the backend is not determined.
+)
+
+// staleAfter is how long an inventory snapshot is trusted without refresh.
+const staleAfter = 90 * time.Second
+
+// Attribute identifies ip at time at. Pods are resolved from the assignment
+// history, so an address reused by a replacement pod is attributed by time
+// rather than by whichever pod holds it now.
+func (i *Index) Attribute(ip string, port uint16, protocol string, at time.Time) Attribution {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
-	if i.status.LastSync.IsZero() || time.Since(i.status.LastSync) > 90*time.Second {
-		return ""
+	if i.status.LastSync.IsZero() {
+		return Attribution{}
 	}
-	endpoint, exists := i.endpoints[ip]
+	fresh := time.Since(i.status.LastSync) <= staleAfter
 	candidates := i.services[serviceKey{ip, strings.ToUpper(protocol), int(port)}]
-	if !exists && len(candidates) == 0 {
-		return ""
+	endpoint, confidence, found := i.pods.resolve(ip, at)
+	if !found {
+		endpoint, found = i.endpoints[ip]
+		switch {
+		case found && endpoint.Kind == "node":
+			confidence = ConfidenceNode
+		case found && endpoint.Kind == "service":
+			confidence = ConfidenceService
+		}
 	}
-	if !exists {
+	if !found && len(candidates) == 0 {
+		return Attribution{}
+	}
+	if !found {
 		endpoint = Endpoint{Kind: "endpoint", ObservedAt: i.status.LastSync}
 	}
+	if !fresh {
+		confidence = ConfidenceStale
+	}
 	endpoint.Services = candidates
+	endpoint.Confidence = confidence
 	encoded, _ := json.Marshal(endpoint)
-	return string(encoded)
+	attribution := Attribution{Context: string(encoded), Kind: endpoint.Kind, Namespace: endpoint.Namespace, Name: endpoint.Name, UID: endpoint.UID, Confidence: confidence}
+	if endpoint.Owner.Name != "" {
+		attribution.Workload = endpoint.Owner.Kind + "/" + endpoint.Owner.Name
+	} else if endpoint.Kind == "pod" {
+		attribution.Workload = "Pod/" + endpoint.Name
+	}
+	return attribution
 }

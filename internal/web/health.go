@@ -65,7 +65,9 @@ func assessCollector(status database.CollectorStatus, now time.Time) CollectorHe
 		health.Problems = append(health.Problems, "storage above 90% of limit")
 	}
 	if status.InventoryAgeSeconds > int64(inventoryStaleAfter.Seconds()) {
-		health.Problems = append(health.Problems, "Kubernetes inventory stale; pod attribution unavailable")
+		health.Problems = append(health.Problems, "Kubernetes inventory stale; pod attributions are marked stale")
+	} else if status.InventoryAgeSeconds >= 0 && !status.PodWatch {
+		health.Problems = append(health.Problems, "pod watch disconnected; address reuse within the 30 s list interval is reported as ambiguous")
 	}
 	if status.DiscardedEvents > 0 || status.CaptureDrops > 0 {
 		health.Problems = append(health.Problems, "observations lost since collector start; see gaps")

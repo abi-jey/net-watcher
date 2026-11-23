@@ -150,7 +150,6 @@ func TestHeartbeatStoresCollectorHealthAndIgnoresOlderReports(t *testing.T) {
 	}
 }
 
-
 // A batch that keeps failing is set aside after the attempt and time budget;
 // the next batch drains, and the set-aside batch is recovered later.
 func TestQueueDeadLettersPoisonBatchAndRecoversIt(t *testing.T) {

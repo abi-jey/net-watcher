@@ -17,7 +17,13 @@ metadata:
   name: net-watcher-reader
 rules:
   - apiGroups: [""]
-    resources: ["pods", "services", "nodes"]
+    resources: ["pods"]
+    # watch keeps pod address ownership accurate to seconds, so reused pod IPs
+    # are attributed to the right pod; without it attribution falls back to
+    # the 30-second list interval.
+    verbs: ["list", "watch"]
+  - apiGroups: [""]
+    resources: ["services", "nodes"]
     verbs: ["list"]
   - apiGroups: ["apps"]
     resources: ["replicasets"]

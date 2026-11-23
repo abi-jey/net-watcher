@@ -29,7 +29,7 @@ const (
 // NetworkEvent represents a captured network event
 type NetworkEvent struct {
 	ID        uint      `gorm:"primaryKey"`
-	Timestamp time.Time `gorm:"index;not null"`
+	Timestamp time.Time `gorm:"index;not null;index:idx_src_uid_time,priority:2;index:idx_dst_uid_time,priority:2"`
 	EventType EventType `gorm:"index;not null"`
 	Interface string    `gorm:"index"`
 	IPVersion uint8     `gorm:"index"` // 4 or 6
@@ -78,8 +78,25 @@ type NetworkEvent struct {
 	Protocol           string
 	SourceContext      string // JSON Kubernetes inventory snapshot at capture time.
 	DestinationContext string
-	ProcessPID         int    // Host PID observed through read-only procfs; zero when unavailable.
-	ProcessCommand     string // Kernel comm name; never full command-line arguments.
+	// Indexed capture-time Kubernetes identity. Kind is pod, node, service or
+	// endpoint; Workload is "Kind/name" of the top-level owner; Attribution is
+	// the confidence (exact, ambiguous, stale, node, service) or empty when the
+	// address was not a known cluster address. Events captured before these
+	// columns existed have them empty and only the JSON context.
+	SrcKind        string
+	SrcNamespace   string `gorm:"index"`
+	SrcName        string
+	SrcUID         string `gorm:"index:idx_src_uid_time,priority:1"`
+	SrcWorkload    string `gorm:"index"`
+	SrcAttribution string
+	DstKind        string
+	DstNamespace   string `gorm:"index"`
+	DstName        string
+	DstUID         string `gorm:"index:idx_dst_uid_time,priority:1"`
+	DstWorkload    string `gorm:"index"`
+	DstAttribution string
+	ProcessPID     int    // Host PID observed through read-only procfs; zero when unavailable.
+	ProcessCommand string // Kernel comm name; never full command-line arguments.
 
 	// Compaction metadata
 	Compacted   bool   // Whether this is a compacted record
@@ -123,6 +140,7 @@ type CollectorStatus struct {
 	MissingEvidence     int64 // Cumulative DNS references forwarded as missing.
 	CaptureDrops        int64 // Cumulative kernel packet drops.
 	InventoryAgeSeconds int64 // -1 when Kubernetes attribution is disabled.
+	PodWatch            bool  // A pod watch stream is connected.
 }
 
 // DNSResolution is immutable historical evidence from an observed query/response pair.

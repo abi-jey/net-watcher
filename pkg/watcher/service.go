@@ -30,7 +30,7 @@ type Watcher struct {
 // Stats reports capture loss counters for health reporting for struct: [Watcher].
 func (w *Watcher) Stats() Stats { return w.sessionManager.Stats() }
 
-func (w *Watcher) SetContextLookup(lookup func(string, uint16, string) string) {
+func (w *Watcher) SetContextLookup(lookup ContextLookup) {
 	w.sessionManager.contextLookup = lookup
 }
 

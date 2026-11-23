@@ -195,7 +195,7 @@ func (sm *SessionManager) TrackDNSPacket(iface, src, dst, transport string, payl
 				if _, exists := d.pending[key]; !exists {
 					query := dnsQuery{At: at}
 					if sm.contextLookup != nil {
-						query.ClientContext = sm.contextLookup(clientIP, clientPort, transport)
+						query.ClientContext = sm.contextLookup(clientIP, clientPort, transport, at).Context
 					}
 					d.pending[key] = query
 				}
@@ -210,7 +210,7 @@ func (sm *SessionManager) TrackDNSPacket(iface, src, dst, transport string, payl
 		queryTime := query.At
 		delete(d.pending, key)
 		event.DNSMatched = matched && !at.Before(queryTime) && at.Sub(queryTime) <= dnsWindow
-		if sm.contextLookup != nil && contextIdentity(query.ClientContext) != contextIdentity(sm.contextLookup(clientIP, clientPort, transport)) {
+		if sm.contextLookup != nil && contextIdentity(query.ClientContext) != contextIdentity(sm.contextLookup(clientIP, clientPort, transport, at).Context) {
 			event.DNSMatched = false
 		}
 		if event.DNSMatched {
@@ -235,7 +235,7 @@ func (sm *SessionManager) TrackDNSPacket(iface, src, dst, transport string, payl
 				r.ResolverIP, r.ResolverPort, r.AnswerRecords = resolverIP, resolverPort, string(recordJSON)
 				r.ClientContext = query.ClientContext
 				if sm.contextLookup != nil {
-					r.AddressContext = sm.contextLookup(r.IP, 0, "")
+					r.AddressContext = sm.contextLookup(r.IP, 0, "", at).Context
 				}
 			}
 			// Persist evidence before making it available to subsequent connections.

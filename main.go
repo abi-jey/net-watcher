@@ -264,6 +264,7 @@ func main() {
 			}
 			stop()
 			go inventory.Run(ctx)
+			go inventory.RunPodWatch(ctx)
 		}
 		// Start after inventory setup: the health callback reads the final index.
 		if *ingestURL != "" {
@@ -276,6 +277,7 @@ func main() {
 					}
 					if status := inventory.Status(); status.Enabled && !status.LastSync.IsZero() {
 						stats.InventoryAgeSeconds = int64(time.Since(status.LastSync).Seconds())
+						stats.PodWatch = status.Watching
 					}
 					return stats
 				}}
@@ -311,7 +313,7 @@ func main() {
 			log.Error("Failed to create watcher", "error", err)
 			return
 		}
-		w.SetContextLookup(inventory.Lookup)
+		w.SetContextLookup(inventory.Attribute)
 		activeWatcher.Store(w)
 		if *processAttribution {
 			if err := w.EnableProcessAttribution(*processProcRoot); err != nil {
