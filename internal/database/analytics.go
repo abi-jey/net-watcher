@@ -96,15 +96,56 @@ func summarySource(tx *gorm.DB, kind string, start, end time.Time, seconds int64
 		parts = append(parts, rawBase+" AND id > ? AND id <= ? AND timestamp >= ? AND timestamp < ?")
 		summaryArgs = append(summaryArgs, status.Cursor, status.Target, fullStart, fullEnd)
 	}
+	// A partial boundary hour is answered either by scanning its rows inside
+	// the window, or by its complete summary minus the rows outside the window,
+	// whichever covers less time. Both are exact. A window ending now therefore
+	// costs almost nothing for the current hour: nothing lies after now.
+	negated := strings.Replace(rawBase, "1 AS event_count, COALESCE(byte_count, 0) AS byte_count", "-1 AS event_count, -COALESCE(byte_count, 0) AS byte_count", 1)
+	edge := func(hour, from, to time.Time, inside bool) {
+		if inside || !status.Ready {
+			parts = append(parts, rawBase+" AND timestamp >= ? AND timestamp < ?")
+			summaryArgs = append(summaryArgs, from, to)
+			return
+		}
+		parts = append(parts, summaryHour(column != ""))
+		if column != "" {
+			summaryArgs = append(summaryArgs, kind)
+		}
+		summaryArgs = append(summaryArgs, hour.Unix())
+		if from.Before(to) {
+			parts = append(parts, negated+" AND timestamp >= ? AND timestamp < ?")
+			summaryArgs = append(summaryArgs, from, to)
+		}
+	}
 	if start.Before(fullStart) {
-		parts = append(parts, rawBase+" AND timestamp >= ? AND timestamp < ?")
-		summaryArgs = append(summaryArgs, start.UTC(), fullStart)
+		// Rows in [start, fullStart), or summary(fullStart-1h) minus [fullStart-1h, start).
+		hour := fullStart.Add(-time.Hour)
+		inside := fullStart.Sub(start) <= start.Sub(hour)
+		if inside {
+			edge(hour, start.UTC(), fullStart, true)
+		} else {
+			edge(hour, hour, start.UTC(), false)
+		}
 	}
 	if fullEnd.Before(end) {
-		parts = append(parts, rawBase+" AND timestamp >= ? AND timestamp < ?")
-		summaryArgs = append(summaryArgs, fullEnd, end.UTC())
+		// Rows in [fullEnd, end), or summary(fullEnd) minus [end, fullEnd+1h).
+		next := fullEnd.Add(time.Hour)
+		inside := end.Sub(fullEnd) <= next.Sub(end)
+		if inside {
+			edge(fullEnd, fullEnd, end.UTC(), true)
+		} else {
+			edge(fullEnd, end.UTC(), next, false)
+		}
 	}
 	return strings.Join(parts, " UNION ALL "), summaryArgs, nil
+}
+
+// summaryHour selects one summary hour with the same columns as summarySource.
+func summaryHour(hosts bool) string {
+	if hosts {
+		return "SELECT hour, host, event_count, byte_count FROM hourly_hosts WHERE kind = ? AND hour = ?"
+	}
+	return "SELECT hour, event_type, event_count, byte_count FROM hourly_events WHERE hour = ?"
 }
 
 // EventCounts returns exact retained counts, using summaries once backfill ends.
@@ -141,7 +182,7 @@ func TopHosts(tx *gorm.DB, kind string, start, end time.Time, limit int, traffic
 		metric = "byte_count"
 	}
 	var hosts []HostTotal
-	query := "SELECT host, SUM(event_count) AS event_count, SUM(byte_count) AS byte_count, COUNT(*) OVER() AS total FROM (" + source + ") GROUP BY host ORDER BY " + metric + " DESC, host ASC LIMIT ?"
+	query := "SELECT host, SUM(event_count) AS event_count, SUM(byte_count) AS byte_count, COUNT(*) OVER() AS total FROM (" + source + ") GROUP BY host HAVING SUM(event_count) > 0 ORDER BY " + metric + " DESC, host ASC LIMIT ?"
 	if err := tx.Raw(query, append(args, limit)...).Scan(&hosts).Error; err != nil {
 		return nil, 0, err
 	}

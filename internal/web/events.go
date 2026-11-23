@@ -102,7 +102,9 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		}
 		var rows []database.NetworkEvent
 		err := filter(s.db.WithContext(ctx).Table("network_events INDEXED BY idx_network_events_timestamp")).
-			Where("timestamp >= ? AND (timestamp < ? OR (timestamp = ? AND id < ?))", sliceStart, position.at, position.at, position.id).
+			// A row value, not "t < ? OR (t = ? AND id < ?)": SQLite plans the OR
+			// as a multi-index union and sorts the whole slice before LIMIT.
+			Where("timestamp >= ? AND (timestamp, id) < (?, ?)", sliceStart, position.at, position.id).
 			Order("timestamp DESC, id DESC").Limit(limit - len(response.Events)).Find(&rows).Error
 		if err != nil {
 			if r.Context().Err() == nil && (errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded)) {

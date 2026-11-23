@@ -359,7 +359,7 @@ func (s *Server) handlePodConnections(w http.ResponseWriter, r *http.Request) {
 			query = query.Where(side+"_namespace = ? AND "+side+"_workload = ?", namespace, workload)
 		}
 		if after != nil {
-			query = query.Where("(timestamp < ? OR (timestamp = ? AND id < ?))", after.at, after.at, after.id)
+			query = query.Where("(timestamp, id) < (?, ?)", after.at, after.id)
 		}
 		var rows []database.NetworkEvent
 		if err := query.Order("timestamp DESC, id DESC").Limit(limit + 1).Find(&rows).Error; err != nil {
