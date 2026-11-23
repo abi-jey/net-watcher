@@ -6,3 +6,5 @@ net-watcher-*
 dist
 report.html
 netwatcher.db*
+web/node_modules
+internal/web/ui/dist

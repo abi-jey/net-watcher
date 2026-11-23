@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "typecheck": "tsc --noEmit",
-    "test": "node --test --experimental-strip-types --no-warnings 'src/**/*.test.ts'",
+    "test": "node --test --no-warnings 'src/**/*.test.ts'",
     "sync-tokens": "node scripts/sync-tokens.mjs"
   },
   "dependencies": {
@@ -21,5 +21,8 @@
     "@vitejs/plugin-react": "^6.0.1",
     "typescript": "~6.0.2",
     "vite": "^8.0.10"
+  },
+  "engines": {
+    "node": ">=22.18"
   }
 }

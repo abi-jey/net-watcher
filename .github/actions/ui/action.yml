@@ -1,0 +1,32 @@
+name: Build web UI
+description: Install, audit, type-check, test and build the web UI into internal/web/ui/dist (embedded by go build)
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-node@v7
+      with:
+        node-version: latest
+        check-latest: true
+        cache: npm
+        cache-dependency-path: web/package-lock.json
+
+    - name: Install
+      shell: bash
+      working-directory: web
+      run: npm ci
+
+    # Blocks the build on any high or critical advisory in UI dependencies,
+    # including build tooling.
+    - name: Audit dependencies
+      shell: bash
+      working-directory: web
+      run: npm audit --audit-level=high
+
+    - name: Type-check, test and build
+      shell: bash
+      working-directory: web
+      run: |
+        npm run typecheck
+        npm test
+        npm run build

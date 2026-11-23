@@ -102,13 +102,12 @@ net-watcher --help
 ### Security-First Design
 - **Minimal Privileges**: Runs as dedicated `netmon` user with CAP_NET_RAW only
 - **Sandboxed**: Systemd service with strict filesystem restrictions
-- **Pure Go**: Static binaries with no external dependencies
+- **Single binary**: the web UI is built ahead of time and embedded; nothing is loaded from third-party hosts
 - **Input Validation**: Comprehensive packet validation and bounds checking
 
-### Linux-Only, Pure Go
+### Linux-Only
 - **AF_PACKET**: Direct kernel packet capture via raw sockets
-- **No CGO**: Pure Go implementation with zero C dependencies
-- **Static Binary**: Single binary deployment with no external libraries
+- **cgo**: SQLite and AF_PACKET capture need cgo and glibc; a `CGO_ENABLED=0` build does not compile
 
 ## 🔧 Installation
 
@@ -142,16 +141,24 @@ sudo ./net-watcher install
 ## 🔧 Development
 
 ### Prerequisites
-- Go 1.27.4+ for development builds
+- Go 1.27.4+ with cgo and a C compiler (`gcc-aarch64-linux-gnu` for arm64)
+- Node.js 22.18+ to build the web UI
 - Linux only (uses AF_PACKET raw sockets)
 
 ### Build Commands
 ```bash
+# Web UI (web/, Vite + TypeScript); go build embeds internal/web/ui/dist
+make ui
+# UI type-check and tests
+make test-ui
+# UI dev server with hot reload; proxies /api to localhost:8920 or $NET_WATCHER_API
+cd web && npm run dev
+
 # Debug build
 make build-debug
 
-# Release build (pure Go)
-CGO_ENABLED=0 make build-all
+# Release builds (cgo, amd64 and arm64)
+make build-all
 
 # Development release
 make dev-release
@@ -330,14 +337,14 @@ sudo setcap -v cap_net_raw+ep /usr/local/bin/net-watcher
 ## 📦 CI/CD Pipeline
 
 ### Automated Workflows
-- **Go Version**: latest stable (minimum 1.27.4, enforced by go.mod)
-- **Cross-Platform Builds**: Linux, macOS, Windows (amd64/arm64)
-- **Security Scanning**: Gosec, Trivy, Snyk, CodeQL
+- **Toolchains**: latest stable Go (minimum 1.27.4, enforced by go.mod) and latest Node.js
+- **Builds**: Linux amd64 and arm64 with cgo, plus a container image
+- **Security gates**: govulncheck, npm audit, Trivy and golangci-lint (see [Security checks](#security-checks))
 - **Release Automation**: Semantic versioning with changelog generation
 
 ### Build Process
 ```yaml
-# Pure Go builds (CGO_ENABLED=0)
+# Web UI built first, then embedded by the cgo build
 - Automatic version injection
 - Checksum generation (SHA256/SHA512)
 - Multi-architecture support
@@ -455,13 +462,16 @@ Every CI run and release fails when a known vulnerability is found:
 - The container image is built from the latest `golang:bookworm` and
   `distroless/base-nossl-debian12` and scanned with the latest Trivy; fixable
   HIGH or CRITICAL findings in OS packages or the binary fail the build.
+- `npm audit --audit-level=high` fails on high or critical advisories in the
+  web UI's dependencies, including build tooling.
 - `golangci-lint` (latest v2) runs on every push.
 
 Toolchain, base images and scanners are not pinned, so every build picks up
-the latest patches. Dependabot proposes Go module and GitHub Actions updates.
+the latest patches. Dependabot proposes Go module, npm and GitHub Actions updates.
 Run the same checks locally:
 
     go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+    (cd web && npm audit --audit-level=high)
     docker build -t net-watcher:scan . && \
       docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:latest \
         image --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 net-watcher:scan
