@@ -324,7 +324,7 @@ func (s *clusterSource) ListPods(ctx context.Context) ([]Object, string, error) 
 		}
 		var list List
 		err = json.NewDecoder(response.Body).Decode(&list)
-		response.Body.Close()
+		_ = response.Body.Close()
 		if err != nil {
 			return nil, "", fmt.Errorf("decode Kubernetes pods: %w", err)
 		}
@@ -352,15 +352,15 @@ func (s *clusterSource) get(ctx context.Context, client *http.Client, path strin
 	request.Header.Set("Authorization", "Bearer "+strings.TrimSpace(string(token)))
 	response, err := client.Do(request)
 	if err != nil {
-		return nil, fmt.Errorf("Kubernetes request failed: %w", err)
+		return nil, fmt.Errorf("request to the Kubernetes API failed: %w", err)
 	}
 	if response.StatusCode == http.StatusGone {
-		response.Body.Close()
+		_ = response.Body.Close()
 		return nil, errWatchExpired
 	}
 	if response.StatusCode != http.StatusOK {
-		response.Body.Close()
-		return nil, fmt.Errorf("Kubernetes %s: HTTP %d", strings.SplitN(path, "?", 2)[0], response.StatusCode)
+		_ = response.Body.Close()
+		return nil, fmt.Errorf("listing %s from the Kubernetes API: HTTP %d", strings.SplitN(path, "?", 2)[0], response.StatusCode)
 	}
 	return response, nil
 }
@@ -376,7 +376,7 @@ func (s *clusterSource) WatchPods(ctx context.Context, version string, handle fu
 	if err != nil {
 		return version, err
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 	decoder := json.NewDecoder(bufio.NewReader(response.Body))
 	for {
 		var event watchEvent

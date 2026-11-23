@@ -260,9 +260,10 @@ func (s *Server) handlePodConnections(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sides := []string{"src", "dst"}
-	if direction == "egress" {
+	switch direction {
+	case "egress":
 		sides = sides[:1]
-	} else if direction == "ingress" {
+	case "ingress":
 		sides = sides[1:]
 	}
 	// Each side uses its own (uid, timestamp) or workload index; merging in Go
