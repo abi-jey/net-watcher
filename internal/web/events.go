@@ -81,7 +81,7 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		// Exact process identity, as listed by /api/processes. An empty pod
 		// selects host processes once a command is given.
 		if value := query.Get("process"); value != "" {
-			db = db.Where("process_command = ? AND process_pod = ? AND process_container = ?", value, query.Get("processPod"), query.Get("processContainer"))
+			db = db.Where("process_command = ? AND process_pod = ? AND process_container = ? AND process_side > ''", value, query.Get("processPod"), query.Get("processContainer"))
 		}
 		if value := query.Get("collector"); value != "" {
 			db = db.Where("collector_id = ?", value)

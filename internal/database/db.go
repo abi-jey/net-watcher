@@ -67,6 +67,14 @@ func New(dbPath string) (*DB, error) {
 		}
 	}
 
+	// Drill-down from a process to its events. Partial: only attributed
+	// events are indexed, so other traffic adds no write cost. Queries must
+	// repeat the condition for SQLite to use it.
+	if err := db.Exec("CREATE INDEX IF NOT EXISTS idx_process_time ON network_events(process_command, process_pod, process_container, timestamp) WHERE process_side > ''").Error; err != nil {
+		_ = sqlDB.Close()
+		return nil, err
+	}
+
 	return &DB{DB: db, path: dbPath}, nil
 }
 

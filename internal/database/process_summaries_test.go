@@ -2,6 +2,7 @@ package database
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -107,4 +108,18 @@ func TestProcessSummaryLiveInsertRemovalAndReset(t *testing.T) {
 		t.Fatalf("not ready after rebuild: %+v %v", status, err)
 	}
 	assertProcessSummaryMatchesRaw(t, db)
+}
+
+// The events drill-down by process uses the partial index, not a time scan.
+func TestProcessFilterUsesPartialIndex(t *testing.T) {
+	db := summaryDB(t)
+	var plan []struct{ Detail string }
+	err := db.Raw(`EXPLAIN QUERY PLAN SELECT * FROM network_events WHERE process_command = ? AND process_pod = ? AND process_container = ? AND process_side > ''
+		AND timestamp >= ? AND timestamp < ? ORDER BY timestamp DESC, id DESC LIMIT 50`, "python3", "demo/api-1", "api", time.Now().Add(-time.Hour), time.Now()).Scan(&plan).Error
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fmt.Sprint(plan) == "" || !strings.Contains(fmt.Sprint(plan), "idx_process_time") {
+		t.Fatalf("plan does not use idx_process_time: %v", plan)
+	}
 }
