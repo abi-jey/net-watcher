@@ -44,10 +44,13 @@ type Object struct {
 		Ports       []Port
 	}
 	Status struct {
-		Phase     string
-		PodIP     string
-		PodIPs    []struct{ IP string }
-		Addresses []struct{ Type, Address string }
+		Phase                      string
+		PodIP                      string
+		PodIPs                     []struct{ IP string }
+		Addresses                  []struct{ Type, Address string }
+		ContainerStatuses          []ContainerStatus
+		InitContainerStatuses      []ContainerStatus
+		EphemeralContainerStatuses []ContainerStatus
 	}
 	Endpoints []struct {
 		Addresses []string
@@ -58,6 +61,10 @@ type Object struct {
 		Port           int
 	}
 }
+
+// ContainerStatus carries the runtime ID ("containerd://<id>") of a container.
+type ContainerStatus struct{ Name, ContainerID string }
+
 type List struct {
 	Items    []Object
 	Metadata struct{ Continue, ResourceVersion string }

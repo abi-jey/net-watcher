@@ -46,10 +46,55 @@ type podHistory struct {
 	byIP       map[string][]*assignment
 	byUID      map[string]*podState
 	tombstones map[string]time.Time // UID -> when deletion was observed.
+	containers map[string]*ContainerRef
 }
 
+// ContainerRef names the container a runtime container ID belongs to.
+type ContainerRef struct {
+	Namespace, Pod, UID, Name string
+	seen                      time.Time
+}
+
+// containerRetention keeps names for containers that stopped recently, so
+// processes still exiting can be named.
+const containerRetention = 10 * time.Minute
+
 func newPodHistory() *podHistory {
-	return &podHistory{byIP: map[string][]*assignment{}, byUID: map[string]*podState{}, tombstones: map[string]time.Time{}}
+	return &podHistory{byIP: map[string][]*assignment{}, byUID: map[string]*podState{}, tombstones: map[string]time.Time{}, containers: map[string]*ContainerRef{}}
+}
+
+// recordContainers indexes container IDs of every pod, host-network pods
+// included: their processes share the node's network namespace.
+func (h *podHistory) recordContainers(object Object, at time.Time) {
+	m := object.Metadata
+	for _, list := range [][]ContainerStatus{object.Status.ContainerStatuses, object.Status.InitContainerStatuses, object.Status.EphemeralContainerStatuses} {
+		for _, status := range list {
+			id := ContainerID(status.ContainerID)
+			if id == "" {
+				continue
+			}
+			h.containers[id] = &ContainerRef{Namespace: m.Namespace, Pod: m.Name, UID: m.UID, Name: status.Name, seen: at}
+		}
+	}
+}
+
+// ContainerID strips the runtime scheme from a status containerID.
+func ContainerID(value string) string {
+	if _, id, found := strings.Cut(value, "://"); found {
+		return id
+	}
+	return value
+}
+
+// Container names the container with a runtime ID, if a pod reported it.
+func (i *Index) Container(id string) (ContainerRef, bool) {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	ref, ok := i.pods.containers[id]
+	if !ok {
+		return ContainerRef{}, false
+	}
+	return *ref, true
 }
 
 func (h *podHistory) active() int { return len(h.byUID) }
@@ -110,6 +155,7 @@ func terminal(object Object) bool {
 
 // apply records one observation of a pod. deleted marks a watch DELETED event.
 func (h *podHistory) apply(object Object, deleted bool, owners map[string]Owner, at time.Time) {
+	h.recordContainers(object, at)
 	uid := object.Metadata.UID
 	if uid == "" || object.Spec.HostNetwork {
 		return
@@ -198,6 +244,11 @@ func (h *podHistory) reconcile(pods []Object, owners map[string]Owner, listedAt,
 }
 
 func (h *podHistory) prune(now time.Time) {
+	for id, ref := range h.containers {
+		if now.Sub(ref.seen) > containerRetention {
+			delete(h.containers, id)
+		}
+	}
 	cutoff := now.Add(-historyRetention)
 	for ip, list := range h.byIP {
 		kept := list[:0]
