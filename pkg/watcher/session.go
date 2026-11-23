@@ -63,10 +63,15 @@ type SessionManager struct {
 	contextLookup    ContextLookup
 	processMux       sync.RWMutex
 	processLookup    *processAttributor
-	// Event batching
+	// Event batching. Packet handlers only append to the buffer; a separate
+	// goroutine writes it, because a database write under the session mutex
+	// stalls every capture goroutine and overflows the kernel rings.
 	eventBuffer    []database.NetworkEvent
 	eventBufferMux sync.Mutex
 	batchSize      int
+	flushSignal    chan struct{} // Buffered 1: "a batch is ready".
+	flushDone      chan struct{}
+	flushMux       sync.Mutex // Serialises writes so retried events keep their order.
 	// Events that failed to write are retried up to maxRetainedEvents; beyond
 	// that the oldest are discarded and summarised as a GAP event.
 	writeLoss    lossSpan
@@ -165,6 +170,8 @@ func NewSessionManager(logger *log.Logger, db *database.DB, onlyFilter, excludeF
 		dns:              newDNSTracker(),
 		eventBuffer:      make([]database.NetworkEvent, 0, 100),
 		batchSize:        100,
+		flushSignal:      make(chan struct{}, 1),
+		flushDone:        make(chan struct{}),
 	}
 	// Start Garbage Collector in background
 	if db != nil {
@@ -173,7 +180,21 @@ func NewSessionManager(logger *log.Logger, db *database.DB, onlyFilter, excludeF
 		}
 	}
 	go sm.cleanupLoop()
+	go sm.flushLoop()
 	return sm
+}
+
+// flushLoop writes full batches off the packet path.
+func (sm *SessionManager) flushLoop() {
+	defer close(sm.flushDone)
+	for {
+		select {
+		case <-sm.stopChan:
+			return
+		case <-sm.flushSignal:
+			sm.flushEvents()
+		}
+	}
 }
 
 // parseFilters converts comma-separated filter string to a map
@@ -327,6 +348,7 @@ func isMetadataAddress(addr string) bool {
 func (sm *SessionManager) Stop() {
 	close(sm.stopChan)
 	<-sm.cleanupDone
+	<-sm.flushDone
 	if lookup := sm.currentProcessLookup(); lookup != nil {
 		lookup.stop()
 	}
@@ -401,7 +423,10 @@ func (sm *SessionManager) storeEvent(event database.NetworkEvent) {
 	sm.eventBufferMux.Unlock()
 
 	if shouldFlush {
-		sm.flushEvents()
+		select {
+		case sm.flushSignal <- struct{}{}:
+		default: // A flush is already pending; it will take this batch too.
+		}
 	}
 }
 
@@ -409,6 +434,8 @@ func (sm *SessionManager) storeEvent(event database.NetworkEvent) {
 // are kept for the next flush rather than dropped; if failures persist, the
 // oldest events beyond maxRetainedEvents are discarded and recorded as a GAP.
 func (sm *SessionManager) flushEvents() {
+	sm.flushMux.Lock()
+	defer sm.flushMux.Unlock()
 	sm.eventBufferMux.Lock()
 	if len(sm.eventBuffer) == 0 {
 		sm.eventBufferMux.Unlock()
