@@ -137,10 +137,15 @@ type processAttributor struct {
 	flowMu sync.Mutex
 	flows  map[string]processIdentity
 
+	// A few failed lookups per report interval, with their reason, so
+	// operators can see why connections stay unattributed.
+	exampleMu sync.Mutex
+	examples  []string
+
 	attempted, matched, inherited, notLocal atomic.Uint64
 	budgetHit, overBudget, expired          atomic.Uint64
 	queueFull, noSocket, snapshots, indexed atomic.Uint64
-	knownMiss                               atomic.Uint64
+	knownMiss, noOwner                      atomic.Uint64
 	work, snapshotWork                      atomic.Int64 // Nanoseconds spent reading /proc.
 }
 
@@ -296,12 +301,16 @@ func (a *processAttributor) report() {
 	attempted, matched, inherited, notLocal := a.attempted.Swap(0), a.matched.Swap(0), a.inherited.Swap(0), a.notLocal.Swap(0)
 	budgetHit, overBudget, expired := a.budgetHit.Swap(0), a.overBudget.Swap(0), a.expired.Swap(0)
 	queueFull, noSocket, snapshots, work := a.queueFull.Swap(0), a.noSocket.Swap(0), a.snapshots.Swap(0), a.work.Swap(0)
-	indexed, snapshotWork, knownMiss := a.indexed.Swap(0), a.snapshotWork.Swap(0), a.knownMiss.Swap(0)
+	indexed, snapshotWork, knownMiss, noOwner := a.indexed.Swap(0), a.snapshotWork.Swap(0), a.knownMiss.Swap(0), a.noOwner.Swap(0)
+	a.exampleMu.Lock()
+	examples := a.examples
+	a.examples = nil
+	a.exampleMu.Unlock()
 	if attempted+inherited+overBudget+expired+queueFull > 0 {
 		a.logger.Info("Process attribution", "attempted", attempted, "matched", matched, "from_index", indexed, "inherited", inherited,
-			"no_socket", noSocket, "known_miss", knownMiss, "not_local", notLocal, "deadline_hit", budgetHit, "over_budget", overBudget,
+			"no_socket", noSocket, "no_owner", noOwner, "known_miss", knownMiss, "not_local", notLocal, "deadline_hit", budgetHit, "over_budget", overBudget,
 			"expired", expired, "queue_full", queueFull, "flows", flows, "snapshots", snapshots,
-			"snapshot_ms", time.Duration(snapshotWork).Milliseconds(), "lookup_ms", time.Duration(work).Milliseconds())
+			"snapshot_ms", time.Duration(snapshotWork).Milliseconds(), "lookup_ms", time.Duration(work).Milliseconds(), "misses", strings.Join(examples, "; "))
 	}
 }
 
@@ -467,9 +476,11 @@ func (a *processAttributor) lookup(event database.NetworkEvent, c candidate, dea
 	if inode == "" {
 		if time.Now().After(deadline) {
 			a.budgetHit.Add(1)
+			a.example(event, c, "deadline reading socket tables")
 		} else {
 			a.noSocket.Add(1)
 			a.lastNoSocket = opened
+			a.example(event, c, fmt.Sprintf("no socket (tables readable: %t)", opened))
 		}
 		return processIdentity{}, false
 	}
@@ -482,6 +493,7 @@ func (a *processAttributor) lookup(event database.NetworkEvent, c candidate, dea
 	for _, proc := range c.procs {
 		if time.Now().After(deadline) || followed >= processMaxFDLinks {
 			a.budgetHit.Add(1)
+			a.example(event, c, fmt.Sprintf("deadline scanning descriptors (%d links)", followed))
 			return processIdentity{}, false
 		}
 		if c.host && proc.uid != owner {
@@ -492,7 +504,22 @@ func (a *processAttributor) lookup(event database.NetworkEvent, c candidate, dea
 		}
 		return a.identify(event, c, proc), true
 	}
+	a.noOwner.Add(1)
+	a.example(event, c, fmt.Sprintf("socket %s (uid %d) held by none of %d processes (%d links read)", inode, owner, len(c.procs), followed))
 	return processIdentity{}, false
+}
+
+func (a *processAttributor) example(event database.NetworkEvent, c candidate, reason string) {
+	a.exampleMu.Lock()
+	defer a.exampleMu.Unlock()
+	if len(a.examples) >= 4 {
+		return
+	}
+	where := "host"
+	if !c.host {
+		where = "pod " + c.procs[0].podUID
+	}
+	a.examples = append(a.examples, fmt.Sprintf("%s %s:%d->%s:%d %s side, %s: %s", event.EventType, event.SrcIP, event.SrcPort, event.DstIP, event.DstPort, c.side, where, reason))
 }
 
 // missKey names what a lookup that found no socket says about later flows:
