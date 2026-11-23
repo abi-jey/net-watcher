@@ -152,7 +152,7 @@ func TestPodWatchAppliesEventsAndRelistsOnExpiry(t *testing.T) {
 		if r.URL.Query().Get("watch") == "" {
 			lists++
 			mu.Unlock()
-			fmt.Fprintf(w, `{"metadata":{"resourceVersion":"5"},"items":[%s]}`, podJSON("a", "10.0.0.1", "Running"))
+			_, _ = fmt.Fprintf(w, `{"metadata":{"resourceVersion":"5"},"items":[%s]}`, podJSON("a", "10.0.0.1", "Running"))
 			return
 		}
 		watches++
@@ -161,11 +161,11 @@ func TestPodWatchAppliesEventsAndRelistsOnExpiry(t *testing.T) {
 		flusher := w.(http.Flusher)
 		switch current {
 		case 1:
-			fmt.Fprintf(w, `{"type":"ADDED","object":%s}`+"\n", podJSON("b", "10.0.0.2", "Running"))
-			fmt.Fprintf(w, `{"type":"DELETED","object":%s}`+"\n", podJSON("a", "10.0.0.1", "Running"))
+			_, _ = fmt.Fprintf(w, `{"type":"ADDED","object":%s}`+"\n", podJSON("b", "10.0.0.2", "Running"))
+			_, _ = fmt.Fprintf(w, `{"type":"DELETED","object":%s}`+"\n", podJSON("a", "10.0.0.1", "Running"))
 			flusher.Flush()
 		case 2:
-			fmt.Fprint(w, `{"type":"ERROR","object":{"kind":"Status","code":410}}`+"\n")
+			_, _ = fmt.Fprint(w, `{"type":"ERROR","object":{"kind":"Status","code":410}}`+"\n")
 		default:
 			<-r.Context().Done()
 		}

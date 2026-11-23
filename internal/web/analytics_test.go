@@ -20,7 +20,7 @@ func TestSummaryDashboardAPIs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer writer.Close()
+	defer func() { _ = writer.Close() }()
 	if err := writer.EnableSummaries(t.Context()); err != nil {
 		t.Fatal(err)
 	}
@@ -38,7 +38,7 @@ func TestSummaryDashboardAPIs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer reader.Close()
+	defer func() { _ = reader.Close() }()
 	server := &Server{db: reader, OwnedCIDRs: []netip.Prefix{netip.MustParsePrefix("203.0.113.1/32")}}
 	request := func(handler http.HandlerFunc, path string, result interface{}) {
 		t.Helper()

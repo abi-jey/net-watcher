@@ -8,7 +8,8 @@ COMMIT_SHA=$(shell git rev-parse HEAD 2>/dev/null || echo "unknown")
 
 # Build flags
 LDFLAGS=-ldflags="-s -w -X main.version=${VERSION} -X main.buildTime=${BUILD_TIME} -X main.commitSHA=${COMMIT_SHA}"
-CGO_FLAGS=CGO_ENABLED=0
+# cgo is required (SQLite, AF_PACKET capture).
+CGO_FLAGS=CGO_ENABLED=1
 
 # Default target
 .PHONY: all
@@ -30,7 +31,7 @@ build-linux:
 .PHONY: build-linux-arm64
 build-linux-arm64:
 	@echo "Building ${BINARY_NAME} ${VERSION} for Linux arm64..."
-	${CGO_FLAGS} GOOS=linux GOARCH=arm64 go build ${LDFLAGS} -o ${BINARY_NAME}-linux-arm64 .
+	${CGO_FLAGS} GOOS=linux GOARCH=arm64 CC=aarch64-linux-gnu-gcc go build ${LDFLAGS} -o ${BINARY_NAME}-linux-arm64 .
 
 # Build all Linux platforms
 .PHONY: build-all

@@ -48,7 +48,7 @@ func TestQueueAcceptsDuringMaintenanceAndSurvivesRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer connection.Close()
+	defer func() { _ = connection.Close() }()
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan struct{})
 	go func() {
@@ -117,7 +117,7 @@ func TestQueueBoundsConcurrentAdmissionAndReusesCapacity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer queue.Close()
+	defer func() { _ = queue.Close() }()
 	var accepted atomic.Int32
 	var wg sync.WaitGroup
 	for i := range 8 {
@@ -156,7 +156,7 @@ func TestQueueRejectsInvalidEvidenceBeforeAcknowledgment(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer queue.Close()
+	defer func() { _ = queue.Close() }()
 	receiver := &Receiver{Token: "token", Queue: queue}
 	for _, ids := range []string{"[99]", "invalid", "[-1]"} {
 		batch := sampleBatch()
