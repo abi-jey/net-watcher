@@ -61,24 +61,40 @@ func timeWindow(r *http.Request, fallback time.Duration) (time.Time, time.Time, 
 
 // PodSummary is a pod observed during the window.
 type PodSummary struct {
-	Namespace   string    `json:"namespace"`
-	Name        string    `json:"name"`
-	UID         string    `json:"uid"`
-	Workload    string    `json:"workload"`
-	FirstSeen   time.Time `json:"firstSeen"`
-	LastSeen    time.Time `json:"lastSeen"`
-	Egress      int64     `json:"egress"`
-	Ingress     int64     `json:"ingress"`
-	Uncertain   int64     `json:"uncertain"`   // Events whose attribution was ambiguous or stale.
-	Replacement bool      `json:"replacement"` // Another pod with the same name was seen in the window.
+	Namespace    string    `json:"namespace"`
+	Name         string    `json:"name"`
+	UID          string    `json:"uid"`
+	Workload     string    `json:"workload"`
+	FirstSeen    time.Time `json:"firstSeen"`
+	LastSeen     time.Time `json:"lastSeen"`
+	Egress       int64     `json:"egress"`       // Events where the pod was the source.
+	Ingress      int64     `json:"ingress"`      // Events where the pod was the destination.
+	EgressBytes  int64     `json:"egressBytes"`  // Bytes (both directions) of connections the pod opened.
+	IngressBytes int64     `json:"ingressBytes"` // Bytes (both directions) of connections to the pod.
+	Uncertain    int64     `json:"uncertain"`    // Events whose attribution was ambiguous or stale.
+	Replacement  bool      `json:"replacement"`  // Another pod with the same name was seen in the window.
 }
 
 type podRow struct {
 	Namespace, Name, UID, Workload string
 	First, Last                    string
-	Events, Uncertain              int64
+	Events, Bytes, Uncertain       int64
 }
 
+// podRawMaxWindow bounds the fallback that aggregates raw events while the
+// hourly pod summary is still being built; longer windows wait for it. The
+// extra minute absorbs clock skew when a client sends only "from" and the
+// server's "now" ends the window.
+const podRawMaxWindow = time.Hour + time.Minute
+
+type sidePodRow struct {
+	side        string
+	row         podRow
+	first, last time.Time
+}
+
+// handlePods lists pods seen in the window. It reads the hourly pod summary,
+// so the window is widened to whole UTC hours and reported back.
 func (s *Server) handlePods(w http.ResponseWriter, r *http.Request) {
 	from, to, err := timeWindow(r, 24*time.Hour)
 	if err != nil {
@@ -86,44 +102,56 @@ func (s *Server) handlePods(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	namespace := r.URL.Query().Get("namespace")
+	status, err := database.PodSummaryStatus(s.db.WithContext(r.Context()))
+	if err != nil {
+		http.Error(w, "could not read summary state", http.StatusInternalServerError)
+		return
+	}
+	var rows []sidePodRow
+	granularity := "hour"
+	switch {
+	case status.Ready:
+		from, to = from.Truncate(time.Hour), to.Add(time.Hour-time.Nanosecond).Truncate(time.Hour)
+		rows, err = s.podRowsFromSummary(r, from, to, namespace)
+	case to.Sub(from) <= podRawMaxWindow:
+		granularity = "event"
+		rows, err = s.podRowsFromEvents(r, from, to, namespace)
+	default:
+		w.Header().Set("Retry-After", "60")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"error": "pod summary is still being built; use a window of at most 1h meanwhile", "aggregation": status})
+		return
+	}
+	if err != nil {
+		http.Error(w, "could not list pods", http.StatusInternalServerError)
+		return
+	}
 	pods := map[string]*PodSummary{}
-	for _, side := range []string{"src", "dst"} {
-		query := fmt.Sprintf(`SELECT %[1]s_namespace AS namespace, %[1]s_name AS name, %[1]s_uid AS uid, MAX(%[1]s_workload) AS workload,
-			MIN(timestamp) AS first, MAX(timestamp) AS last, COUNT(*) AS events,
-			SUM(CASE WHEN %[1]s_attribution IN ('ambiguous', 'stale') THEN 1 ELSE 0 END) AS uncertain
-			FROM network_events WHERE %[1]s_kind = 'pod' AND timestamp >= ? AND timestamp < ?`, side)
-		args := []interface{}{from, to}
-		if namespace != "" {
-			query += " AND " + side + "_namespace = ?"
-			args = append(args, namespace)
+	for _, entry := range rows {
+		row := entry.row
+		pod := pods[row.UID]
+		if pod == nil {
+			pod = &PodSummary{Namespace: row.Namespace, Name: row.Name, UID: row.UID, Workload: row.Workload}
+			pods[row.UID] = pod
 		}
-		query += " GROUP BY " + side + "_uid LIMIT ?"
-		args = append(args, podListMaxRows)
-		var rows []podRow
-		if err := s.db.Raw(query, args...).Scan(&rows).Error; err != nil {
-			http.Error(w, "could not list pods", http.StatusInternalServerError)
-			return
+		if pod.Workload == "" {
+			pod.Workload = row.Workload
 		}
-		for _, row := range rows {
-			pod := pods[row.UID]
-			if pod == nil {
-				pod = &PodSummary{Namespace: row.Namespace, Name: row.Name, UID: row.UID, Workload: row.Workload}
-				pods[row.UID] = pod
-			}
-			first, last := parseSQLiteTime(row.First), parseSQLiteTime(row.Last)
-			if pod.FirstSeen.IsZero() || first.Before(pod.FirstSeen) {
-				pod.FirstSeen = first
-			}
-			if last.After(pod.LastSeen) {
-				pod.LastSeen = last
-			}
-			if side == "src" {
-				pod.Egress += row.Events
-			} else {
-				pod.Ingress += row.Events
-			}
-			pod.Uncertain += row.Uncertain
+		if pod.FirstSeen.IsZero() || entry.first.Before(pod.FirstSeen) {
+			pod.FirstSeen = entry.first
 		}
+		if entry.last.After(pod.LastSeen) {
+			pod.LastSeen = entry.last
+		}
+		if entry.side == "src" {
+			pod.Egress += row.Events
+			pod.EgressBytes += row.Bytes
+		} else {
+			pod.Ingress += row.Events
+			pod.IngressBytes += row.Bytes
+		}
+		pod.Uncertain += row.Uncertain
 	}
 	names := map[string]int{}
 	for _, pod := range pods {
@@ -143,8 +171,67 @@ func (s *Server) handlePods(w http.ResponseWriter, r *http.Request) {
 		}
 		return result[i].FirstSeen.Before(result[j].FirstSeen)
 	})
+	truncated := len(result) > podListMaxRows
+	if truncated {
+		result = result[:podListMaxRows]
+	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]interface{}{"from": from, "to": to, "pods": result})
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{"from": from, "to": to, "granularity": granularity, "truncated": truncated, "pods": result})
+}
+
+func (s *Server) podRowsFromSummary(r *http.Request, from, to time.Time, namespace string) ([]sidePodRow, error) {
+	query := `SELECT side, uid, MAX(namespace) AS namespace, MAX(name) AS name, MAX(workload) AS workload,
+		MIN(first_seen) AS first, MAX(last_seen) AS last, SUM(event_count) AS events, SUM(byte_count) AS bytes, SUM(uncertain) AS uncertain
+		FROM hourly_pods WHERE hour >= ? AND hour < ?`
+	args := []interface{}{from.Unix(), to.Unix()}
+	if namespace != "" {
+		query += " AND namespace = ?"
+		args = append(args, namespace)
+	}
+	query += " GROUP BY side, uid LIMIT ?"
+	args = append(args, 2*podListMaxRows+1)
+	var raw []struct {
+		Side, UID, Namespace, Name, Workload  string
+		First, Last, Events, Bytes, Uncertain int64
+	}
+	if err := s.db.WithContext(r.Context()).Raw(query, args...).Scan(&raw).Error; err != nil {
+		return nil, err
+	}
+	rows := make([]sidePodRow, 0, len(raw))
+	for _, item := range raw {
+		rows = append(rows, sidePodRow{
+			side:  item.Side,
+			row:   podRow{Namespace: item.Namespace, Name: item.Name, UID: item.UID, Workload: item.Workload, Events: item.Events, Bytes: item.Bytes, Uncertain: item.Uncertain},
+			first: time.Unix(0, item.First).UTC(),
+			last:  time.Unix(0, item.Last).UTC(),
+		})
+	}
+	return rows, nil
+}
+
+func (s *Server) podRowsFromEvents(r *http.Request, from, to time.Time, namespace string) ([]sidePodRow, error) {
+	var rows []sidePodRow
+	for _, side := range []string{"src", "dst"} {
+		query := fmt.Sprintf(`SELECT %[1]s_namespace AS namespace, %[1]s_name AS name, %[1]s_uid AS uid, MAX(%[1]s_workload) AS workload,
+			MIN(timestamp) AS first, MAX(timestamp) AS last, COUNT(*) AS events, SUM(COALESCE(byte_count, 0)) AS bytes,
+			SUM(CASE WHEN %[1]s_attribution IN ('ambiguous', 'stale') THEN 1 ELSE 0 END) AS uncertain
+			FROM network_events WHERE %[1]s_kind = 'pod' AND timestamp >= ? AND timestamp < ?`, side)
+		args := []interface{}{from, to}
+		if namespace != "" {
+			query += " AND " + side + "_namespace = ?"
+			args = append(args, namespace)
+		}
+		query += " GROUP BY " + side + "_uid LIMIT ?"
+		args = append(args, podListMaxRows+1)
+		var raw []podRow
+		if err := s.db.WithContext(r.Context()).Raw(query, args...).Scan(&raw).Error; err != nil {
+			return nil, err
+		}
+		for _, row := range raw {
+			rows = append(rows, sidePodRow{side: side, row: row, first: parseSQLiteTime(row.First), last: parseSQLiteTime(row.Last)})
+		}
+	}
+	return rows, nil
 }
 
 // Endpoint side of a connection row.
@@ -278,7 +365,7 @@ func (s *Server) handlePodConnections(w http.ResponseWriter, r *http.Request) {
 			query = query.Where(side+"_namespace = ? AND "+side+"_workload = ?", namespace, workload)
 		}
 		if after != nil {
-			query = query.Where("(timestamp < ? OR (timestamp = ? AND id < ?))", after.at, after.at, after.id)
+			query = query.Where("(timestamp, id) < (?, ?)", after.at, after.id)
 		}
 		var rows []database.NetworkEvent
 		if err := query.Order("timestamp DESC, id DESC").Limit(limit + 1).Find(&rows).Error; err != nil {

@@ -82,12 +82,14 @@ func cacheGET(ttl time.Duration, handler http.HandlerFunc) http.HandlerFunc {
 			response.expires = time.Now().Add(ttl)
 			entries[key] = response
 		}
-		if len(entries) > 32 {
-			for oldKey, entry := range entries {
-				if oldKey != key && time.Now().After(entry.expires) {
-					delete(entries, oldKey)
-				}
+		// Drop expired entries on every write so memory holds only live
+		// responses (some endpoints return hundreds of kilobytes).
+		for oldKey, entry := range entries {
+			if oldKey != key && time.Now().After(entry.expires) {
+				delete(entries, oldKey)
 			}
+		}
+		if len(entries) > 32 {
 			for oldKey := range entries {
 				if len(entries) <= 32 {
 					break

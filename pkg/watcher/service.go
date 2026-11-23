@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"strings"
 	"sync"
 	"time"
 
@@ -148,8 +149,8 @@ func (w *Watcher) sniffInterface(ctx context.Context, iface net.Interface) error
 	handle, err := afpacket.NewTPacket(
 		afpacket.OptInterface(iface.Name),
 		afpacket.OptFrameSize(4096),
-		afpacket.OptBlockSize(4096*16),
-		afpacket.OptNumBlocks(8),
+		afpacket.OptBlockSize(ringBlockSize),
+		afpacket.OptNumBlocks(ringBlocks(iface.Name)),
 		afpacket.OptPollTimeout(500*time.Millisecond),
 	)
 	if err != nil {
@@ -184,6 +185,29 @@ func (w *Watcher) sniffInterface(ctx context.Context, iface net.Interface) error
 		w.processPacket(packet, iface.Name)
 	}
 	return nil
+}
+
+// Ring sizes per interface. The node's own uplinks, tunnels and overlay
+// carry everything and get 4 MiB (about 2,800 full-size packets) to absorb
+// bursts and garbage-collection pauses. Pod links, one per pod, get 1 MiB:
+// enough for a busy pod's bursts while keeping kernel memory bounded on
+// nodes with many pods (the ring is not charged to the collector's cgroup).
+const ringBlockSize = 64 << 10
+
+func ringBlocks(name string) int {
+	if podLink(name) {
+		return 16 // 1 MiB
+	}
+	return 64 // 4 MiB
+}
+
+func podLink(name string) bool {
+	for _, prefix := range []string{"lxc", "veth", "cali", "azv", "eni", "gke"} {
+		if strings.HasPrefix(name, prefix) && name != "lxc_health" {
+			return true
+		}
+	}
+	return false
 }
 
 // ownedPacketSource is only for readers whose ReadPacketData returns an owned

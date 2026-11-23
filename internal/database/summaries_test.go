@@ -387,3 +387,62 @@ func BenchmarkDashboardSummaryQueries(b *testing.B) {
 		})
 	}
 }
+
+// Boundary hours may be answered as their summary minus the rows outside the
+// window. Every window position, including an end after the newest event (as
+// the UI sends for "until now"), must match the raw scan exactly.
+func TestBoundaryHoursMatchRawAtEveryOffset(t *testing.T) {
+	db := summaryDB(t)
+	at := time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC)
+	var events []NetworkEvent
+	for minute := 0; minute < 300; minute += 7 {
+		events = append(events, NetworkEvent{
+			Timestamp: at.Add(time.Duration(minute)*time.Minute + time.Duration(minute)*time.Millisecond),
+			EventType: EventTCPEnd, SrcIP: fmt.Sprintf("10.0.0.%d", minute%5), DstIP: "fd00::1",
+			Hostname: fmt.Sprintf("h%d.test", minute%3), ByteCount: int64(minute + 1),
+		})
+	}
+	if err := db.InsertBatch(events); err != nil {
+		t.Fatal(err)
+	}
+	local := func(value string) bool { address, _ := netip.ParseAddr(value); return address.IsPrivate() }
+	type result struct {
+		traffic map[int64]*TrafficBucket
+		wide    map[int64]*TrafficBucket
+		hosts   []HostTotal
+		total   int64
+	}
+	query := func(start, end time.Time) result {
+		var r result
+		var err error
+		if r.traffic, err = TrafficTotals(db.DB, start, end, 3600, local); err != nil {
+			t.Fatal(err)
+		}
+		if r.wide, err = TrafficTotals(db.DB, start, end, 7200, local); err != nil {
+			t.Fatal(err)
+		}
+		if r.hosts, r.total, err = TopHosts(db.DB, "srcIP", start, end, 100, true); err != nil {
+			t.Fatal(err)
+		}
+		return r
+	}
+	var windows [][2]time.Time
+	for start := 0; start < 120; start += 10 {
+		for end := 130; end <= 330; end += 10 {
+			windows = append(windows, [2]time.Time{at.Add(time.Duration(start) * time.Minute), at.Add(time.Duration(end)*time.Minute + time.Second)})
+		}
+	}
+	want := make([]result, len(windows))
+	for i, window := range windows {
+		want[i] = query(window[0], window[1])
+	}
+	if err := db.EnableSummaries(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	finishBackfill(t, db)
+	for i, window := range windows {
+		if got := query(window[0], window[1]); !reflect.DeepEqual(got, want[i]) {
+			t.Fatalf("window %s – %s: got %+v, want %+v", window[0].Format("15:04:05"), window[1].Format("15:04:05"), got, want[i])
+		}
+	}
+}

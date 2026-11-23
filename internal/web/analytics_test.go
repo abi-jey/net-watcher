@@ -7,6 +7,7 @@ import (
 	"net/netip"
 	"net/url"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -58,11 +59,15 @@ func TestSummaryDashboardAPIs(t *testing.T) {
 	for _, test := range []struct {
 		query string
 		count int64
-	}{{"", 4}, {"?eventType=DNS", 3}, {"?srcIP=203.0.113.1", 1}, {"?q=api.test", 2}, {"?startDate=2026-01-02", 1}} {
+	}{{"", 4}, {"&eventType=DNS", 3}, {"&srcIP=203.0.113.1", 1}, {"&q=api.test", 2}, {"&from=2026-01-02T00:00:00Z", 1}} {
 		var events EventsResponse
-		request(server.handleEvents, "/api/events"+test.query, &events)
-		if events.Total != test.count || len(events.Events) != int(test.count) {
-			t.Fatalf("%s got total=%d rows=%d", test.query, events.Total, len(events.Events))
+		window := "?from=" + at.Add(-time.Hour).Format(time.RFC3339) + "&to=" + at.Add(48*time.Hour).Format(time.RFC3339)
+		if strings.Contains(test.query, "from=") {
+			window = "?to=" + at.Add(48*time.Hour).Format(time.RFC3339)
+		}
+		request(server.handleEvents, "/api/events"+window+test.query, &events)
+		if len(events.Events) != int(test.count) || !events.Complete {
+			t.Fatalf("%s got rows=%d complete=%v", test.query, len(events.Events), events.Complete)
 		}
 	}
 	var hosts TopHostsResponse

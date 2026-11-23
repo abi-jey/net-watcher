@@ -55,9 +55,13 @@ test:
 	@echo "Running tests..."
 	go test -v -race -coverprofile=coverage.out ./...
 
+.PHONY: ui
+ui:
+	cd web && npm ci && npm run build
+
 .PHONY: test-ui
 test-ui:
-	node --test scripts/topology.test.cjs
+	cd web && npm ci && npm run typecheck && npm test
 
 # Run benchmarks
 .PHONY: bench

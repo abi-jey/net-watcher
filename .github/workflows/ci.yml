@@ -15,6 +15,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v7
+    - uses: ./.github/actions/ui
     - uses: ./.github/actions/setup-go
     - run: go test -v -race ./...
     - run: go vet ./...
@@ -36,6 +37,7 @@ jobs:
       with:
         fetch-depth: 0
 
+    - uses: ./.github/actions/ui
     - uses: ./.github/actions/setup-go
 
     - name: Determine version

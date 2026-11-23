@@ -38,9 +38,33 @@ func New(dbPath string) (*DB, error) {
 	_, _ = sqlDB.Exec("PRAGMA synchronous=NORMAL")
 	_, _ = sqlDB.Exec("PRAGMA cache_size=2000")
 
-	if err := db.AutoMigrate(&NetworkEvent{}, &DNSResolution{}, &IngestedEvent{}, &IngestedResolution{}, &IngestCursor{}, &HourlyEvent{}, &HourlyHost{}, &AggregateState{}, &CollectorStatus{}); err != nil {
+	// Pod summaries written before byte totals existed must be rebuilt, or
+	// their hours would report zero traffic.
+	rebuildPods := db.Migrator().HasTable(&HourlyPod{}) && !db.Migrator().HasColumn(&HourlyPod{}, "ByteCount")
+	if err := db.AutoMigrate(&NetworkEvent{}, &DNSResolution{}, &IngestedEvent{}, &IngestedResolution{}, &IngestCursor{}, &HourlyEvent{}, &HourlyHost{}, &AggregateState{}, &HourlyPod{}, &CollectorStatus{}); err != nil {
 		_ = sqlDB.Close()
 		return nil, err
+	}
+	if rebuildPods {
+		var enabled int64
+		if err := db.Model(&AggregateState{}).Where("id = ?", podSummaryState).Count(&enabled).Error; err != nil {
+			_ = sqlDB.Close()
+			return nil, err
+		}
+		if enabled > 0 {
+			if err := db.Transaction(resetPodSummaries); err != nil {
+				_ = sqlDB.Close()
+				return nil, err
+			}
+		}
+	}
+	// Superseded by idx_*_workload_time, which also serves the time range and
+	// order of workload queries instead of reading the workload's full history.
+	for _, index := range []string{"idx_network_events_src_workload", "idx_network_events_dst_workload"} {
+		if err := db.Exec("DROP INDEX IF EXISTS " + index).Error; err != nil {
+			_ = sqlDB.Close()
+			return nil, err
+		}
 	}
 
 	return &DB{DB: db, path: dbPath}, nil
@@ -123,12 +147,15 @@ type CompactStats struct {
 func (db *DB) Compact(olderThan time.Time, dedupeWindow time.Duration) (*CompactStats, error) {
 	// Compaction rewrites observations rather than merely expiring them. Readers
 	// fall back to raw data until the throttled worker rebuilds the summaries.
-	paused := db.Model(&AggregateState{}).Where("id = 1").Update("paused", true)
+	paused := db.Model(&AggregateState{}).Where("id IN ?", []uint{1, podSummaryState}).Update("paused", true)
 	if paused.Error != nil {
 		return nil, paused.Error
 	}
 	if paused.RowsAffected > 0 {
 		defer func() {
+			if err := db.Transaction(resetPodSummaries); err != nil {
+				log.Error("Could not reset pod summaries after compaction", "error", err)
+			}
 			if err := db.Transaction(resetSummaries); err != nil {
 				log.Error("Could not reset summaries after compaction", "error", err)
 			}
