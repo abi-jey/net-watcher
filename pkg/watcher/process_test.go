@@ -223,6 +223,25 @@ func TestProcessAttributionInPodAndHostNamespaces(t *testing.T) {
 	if got := attributed(t, a, events, sourcePort); got.ProcessSide != "" {
 		t.Fatalf("listener attributed as a client: %+v", got)
 	}
+	// A kernel-owned tunnel (no socket on the node) is looked up once, then
+	// skipped for a while whatever its varying source port.
+	tunnel := database.NetworkEvent{EventType: database.EventUDPStart, SrcIP: "192.0.2.10", SrcPort: 40001, DstIP: "198.51.100.9", DstPort: 8472}
+	misses := a.knownMiss.Load()
+	for port := range uint16(3) {
+		tunnel.SrcPort += port
+		if got := attributed(t, a, events, tunnel); got.ProcessSide != "" {
+			t.Fatalf("tunnel attributed: %+v", got)
+		}
+	}
+	if a.knownMiss.Load() != misses+2 {
+		t.Fatalf("known misses %d -> %d, want +2", misses, a.knownMiss.Load())
+	}
+	// DNS responses never start a lookup; they reuse the query's result.
+	response := database.NetworkEvent{EventType: database.EventDNS, DNSType: "RESPONSE", SrcIP: "10.96.0.10", SrcPort: 53, DstIP: "10.2.0.8", DstPort: 5353}
+	podSide(&response, "dst")
+	if a.handle(&response) {
+		t.Fatal("DNS response queued for lookup")
+	}
 	// A different connection on the same port is not matched to the client socket.
 	other := outgoing
 	other.DstPort = 8443

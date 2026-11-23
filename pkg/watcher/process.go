@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -43,6 +44,8 @@ const (
 	processFlowTTL        = 15 * time.Minute
 	processMaxFlows       = 100_000
 	processMaxSockets     = 100_000
+	processMissTTL        = time.Minute // How long an endpoint with no socket is not looked up again.
+	processMaxMisses      = 50_000
 	processQueueSize      = 256
 	processFullRescan     = time.Minute // Between rescans, only new PIDs are read in full.
 	// /proc work is bounded to about 3% of one core on average, with bursts of
@@ -122,9 +125,12 @@ type processAttributor struct {
 	fullAt   time.Time            // Last full rescan.
 	sockets  map[string]socketRef // Socket inode -> where a scan last saw it.
 	remote   map[string]time.Time // Pod UID -> until when it is treated as remote.
+	misses   map[string]time.Time // Endpoint with no socket -> until when it is skipped.
 	recent   []int                // Host PIDs that recently owned sockets, newest first.
 	podWork  workBudget
 	hostWork workBudget
+	// lastNoSocket: the last lookup read the socket tables and found nothing.
+	lastNoSocket bool
 
 	hostIPs atomic.Pointer[map[string]bool]
 
@@ -134,6 +140,7 @@ type processAttributor struct {
 	attempted, matched, inherited, notLocal atomic.Uint64
 	budgetHit, overBudget, expired          atomic.Uint64
 	queueFull, noSocket, snapshots, indexed atomic.Uint64
+	knownMiss                               atomic.Uint64
 	work, snapshotWork                      atomic.Int64 // Nanoseconds spent reading /proc.
 }
 
@@ -162,6 +169,7 @@ func (a *processAttributor) start() error {
 	a.jobs = make(chan processJob, processQueueSize)
 	a.flows = map[string]processIdentity{}
 	a.remote = map[string]time.Time{}
+	a.misses = map[string]time.Time{}
 	a.podWork, a.hostWork = newWorkBudget(podWorkPerSecond, time.Now()), newWorkBudget(hostWorkPerSecond, time.Now())
 	a.refresh(time.Now())
 	if a.snapshot.hostNetns == "" || len(a.snapshot.host) == 0 {
@@ -214,11 +222,14 @@ func (a *processAttributor) remember(event database.NetworkEvent, identity proce
 }
 
 // attributable reports which events start a lookup: those emitted while the
-// flow's socket most likely still exists.
-func attributable(eventType database.EventType) bool {
-	switch eventType {
-	case database.EventTCPStart, database.EventUDPStart, database.EventTLSSNI, database.EventDNS:
+// flow's socket most likely still exists. A DNS response arrives just before
+// the client closes its socket; it reuses the query's result instead.
+func attributable(event database.NetworkEvent) bool {
+	switch event.EventType {
+	case database.EventTCPStart, database.EventUDPStart, database.EventTLSSNI:
 		return true
+	case database.EventDNS:
+		return event.DNSType == "QUERY"
 	}
 	return false
 }
@@ -236,7 +247,7 @@ func (a *processAttributor) handle(event *database.NetworkEvent) bool {
 		a.inherited.Add(1)
 		return false
 	}
-	if !attributable(event.EventType) {
+	if !attributable(*event) {
 		return false
 	}
 	hosts := a.hostIPs.Load()
@@ -285,10 +296,10 @@ func (a *processAttributor) report() {
 	attempted, matched, inherited, notLocal := a.attempted.Swap(0), a.matched.Swap(0), a.inherited.Swap(0), a.notLocal.Swap(0)
 	budgetHit, overBudget, expired := a.budgetHit.Swap(0), a.overBudget.Swap(0), a.expired.Swap(0)
 	queueFull, noSocket, snapshots, work := a.queueFull.Swap(0), a.noSocket.Swap(0), a.snapshots.Swap(0), a.work.Swap(0)
-	indexed, snapshotWork := a.indexed.Swap(0), a.snapshotWork.Swap(0)
+	indexed, snapshotWork, knownMiss := a.indexed.Swap(0), a.snapshotWork.Swap(0), a.knownMiss.Swap(0)
 	if attempted+inherited+overBudget+expired+queueFull > 0 {
 		a.logger.Info("Process attribution", "attempted", attempted, "matched", matched, "from_index", indexed, "inherited", inherited,
-			"no_socket", noSocket, "not_local", notLocal, "deadline_hit", budgetHit, "over_budget", overBudget,
+			"no_socket", noSocket, "known_miss", knownMiss, "not_local", notLocal, "deadline_hit", budgetHit, "over_budget", overBudget,
 			"expired", expired, "queue_full", queueFull, "flows", flows, "snapshots", snapshots,
 			"snapshot_ms", time.Duration(snapshotWork).Milliseconds(), "lookup_ms", time.Duration(work).Milliseconds())
 	}
@@ -359,6 +370,9 @@ func (a *processAttributor) candidates(event database.NetworkEvent, queuedAt, no
 			list = append(list, c)
 		}
 	}
+	// Pod lookups are cheap (few processes, small tables) and tried first;
+	// within each kind the source, which opened the flow, comes first.
+	sort.SliceStable(list, func(i, j int) bool { return !list[i].host && list[j].host })
 	return list
 }
 
@@ -402,8 +416,12 @@ func (a *processAttributor) attribute(event *database.NetworkEvent, queuedAt, no
 		a.notLocal.Add(1)
 		return
 	}
-	// The source opened the flow, so it is tried first.
 	for _, c := range candidates {
+		miss := missKey(*event, c)
+		if miss != "" && now.Before(a.misses[miss]) {
+			a.knownMiss.Add(1)
+			continue
+		}
 		budget := &a.podWork
 		if c.host {
 			budget = &a.hostWork
@@ -419,6 +437,9 @@ func (a *processAttributor) attribute(event *database.NetworkEvent, queuedAt, no
 		budget.spend(spent)
 		a.work.Add(int64(spent))
 		if !ok {
+			if miss != "" && a.lastNoSocket && len(a.misses) < processMaxMisses {
+				a.misses[miss] = now.Add(processMissTTL)
+			}
 			continue
 		}
 		identity.Side, identity.used = c.side, now
@@ -442,11 +463,13 @@ func (a *processAttributor) lookup(event database.NetworkEvent, c candidate, dea
 	for i := 0; i < len(c.procs) && i < 3 && !opened; i++ {
 		inode, owner, opened = findSocket(filepath.Join(a.root, strconv.Itoa(c.procs[i].pid)), udp, c.side == "dst", c.ip, c.port, c.otherIP, c.otherPort, deadline)
 	}
+	a.lastNoSocket = false
 	if inode == "" {
 		if time.Now().After(deadline) {
 			a.budgetHit.Add(1)
 		} else {
 			a.noSocket.Add(1)
+			a.lastNoSocket = opened
 		}
 		return processIdentity{}, false
 	}
@@ -470,6 +493,21 @@ func (a *processAttributor) lookup(event database.NetworkEvent, c candidate, dea
 		return a.identify(event, c, proc), true
 	}
 	return processIdentity{}, false
+}
+
+// missKey names what a lookup that found no socket says about later flows:
+// nothing on the receiving side listens on that port, and for a UDP source,
+// nothing on the node owns its sockets to that remote endpoint (kernel
+// tunnels such as VXLAN). A TCP source's ephemeral port says nothing.
+func missKey(event database.NetworkEvent, c candidate) string {
+	udp := strings.HasPrefix(string(event.EventType), "UDP") || (event.EventType == database.EventDNS && event.Protocol != "TCP")
+	switch {
+	case c.side == "dst":
+		return fmt.Sprintf("dst|%t|%s|%d", udp, c.ip, c.port)
+	case udp:
+		return fmt.Sprintf("src|%s|%s|%d", c.ip, c.otherIP, c.otherPort)
+	}
+	return ""
 }
 
 // indexedOwner checks where an earlier scan saw the socket, with one link read.
@@ -588,6 +626,11 @@ func (a *processAttributor) refresh(now time.Time) {
 	for uid, until := range a.remote {
 		if now.After(until) {
 			delete(a.remote, uid)
+		}
+	}
+	for key, until := range a.misses {
+		if now.After(until) {
+			delete(a.misses, key)
 		}
 	}
 	a.snapshot = snapshot
