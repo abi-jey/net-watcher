@@ -207,6 +207,21 @@ func TestProcessAttributionInPodAndHostNamespaces(t *testing.T) {
 	if a.handle(&transit) || transit.ProcessSide != "" {
 		t.Fatalf("transit flow queued or attributed: %+v", transit)
 	}
+	// A second client of the listener is found through the socket index,
+	// without scanning descriptors again.
+	before := a.indexed.Load()
+	second := accepted
+	second.SrcPort++
+	if got := attributed(t, a, events, second); got.ProcessPID != 200 || got.ProcessSide != "dst" || a.indexed.Load() != before+1 {
+		t.Fatalf("second accepted connection: %+v, indexed %d -> %d", got, before, a.indexed.Load())
+	}
+	// A source port that equals a listener's port (as after NAT) is not the
+	// listener's connection.
+	sourcePort := database.NetworkEvent{EventType: database.EventTCPStart, SrcIP: "10.2.0.8", SrcPort: 8080, DstIP: "10.96.0.5", DstPort: 443}
+	podSide(&sourcePort, "src")
+	if got := attributed(t, a, events, sourcePort); got.ProcessSide != "" {
+		t.Fatalf("listener attributed as a client: %+v", got)
+	}
 	// A different connection on the same port is not matched to the client socket.
 	other := outgoing
 	other.DstPort = 8443

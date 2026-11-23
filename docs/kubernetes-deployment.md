@@ -254,6 +254,10 @@ securityContext:
   capabilities:
     drop: ["ALL"]
     add: ["NET_RAW", "SYS_PTRACE"]
+  # Only on nodes where the runtime applies an AppArmor profile (for example
+  # CRI-O 1.33's crio-default): such profiles deny reading other processes.
+  appArmorProfile:
+    type: Unconfined
 volumeMounts:
   - name: host-proc
     mountPath: /host/proc
@@ -269,6 +273,10 @@ volumeMounts:
 (their network namespace link, socket tables and file-descriptor links); the
 collector never attaches to, traces or signals a process, and needs no
 `hostPID`, eBPF or writable host mount. Command-line arguments are never read.
+Where the container runtime confines containers with an AppArmor profile, that
+profile also denies these reads, and the collector logs `Process attribution
+unavailable ... needs CAP_SYS_PTRACE` at start even with the capability; the
+`appArmorProfile: Unconfined` setting above lifts that for the collector only.
 
 How it works: every 15 seconds (and at most every 3 when an unknown pod shows
 up) the collector maps processes to pods through `/proc/<pid>/cgroup`, which

@@ -42,10 +42,15 @@ const (
 	processQueueAge       = 2 * time.Second // Older sockets have likely closed.
 	processFlowTTL        = 15 * time.Minute
 	processMaxFlows       = 100_000
+	processMaxSockets     = 100_000
 	processQueueSize      = 256
-	// processWorkPerSecond bounds /proc work, snapshots included, to about 3%
-	// of one core on average, with bursts of up to twice that.
-	processWorkPerSecond = 30 * time.Millisecond
+	processFullRescan     = time.Minute // Between rescans, only new PIDs are read in full.
+	// /proc work is bounded to about 3% of one core on average, with bursts of
+	// twice that: two thirds for pod lookups and snapshots, which are cheap
+	// and most useful, one third for host lookups, which may scan the
+	// descriptors of many processes. Neither can starve the other.
+	podWorkPerSecond  = 20 * time.Millisecond
+	hostWorkPerSecond = 10 * time.Millisecond
 )
 
 // ContainerLookup names a container by runtime ID.
@@ -83,12 +88,16 @@ type processJob struct {
 
 // workBudget is a token bucket of CPU time.
 type workBudget struct {
-	available time.Duration
-	last      time.Time
+	rate, available time.Duration
+	last            time.Time
+}
+
+func newWorkBudget(rate time.Duration, now time.Time) workBudget {
+	return workBudget{rate: rate, available: rate, last: now}
 }
 
 func (b *workBudget) ready(now time.Time) bool {
-	b.available = min(2*processWorkPerSecond, b.available+time.Duration(float64(processWorkPerSecond)*now.Sub(b.last).Seconds()))
+	b.available = min(2*b.rate, b.available+time.Duration(float64(b.rate)*now.Sub(b.last).Seconds()))
 	b.last = now
 	return b.available > 0
 }
@@ -109,9 +118,13 @@ type processAttributor struct {
 
 	// Owned by the worker goroutine.
 	snapshot *procSnapshot
+	known    map[int]knownProc    // Per-PID details kept between snapshots.
+	fullAt   time.Time            // Last full rescan.
+	sockets  map[string]socketRef // Socket inode -> where a scan last saw it.
 	remote   map[string]time.Time // Pod UID -> until when it is treated as remote.
 	recent   []int                // Host PIDs that recently owned sockets, newest first.
-	budget   workBudget
+	podWork  workBudget
+	hostWork workBudget
 
 	hostIPs atomic.Pointer[map[string]bool]
 
@@ -120,8 +133,18 @@ type processAttributor struct {
 
 	attempted, matched, inherited, notLocal atomic.Uint64
 	budgetHit, overBudget, expired          atomic.Uint64
-	queueFull, noSocket, snapshots          atomic.Uint64
-	work                                    atomic.Int64 // Nanoseconds spent reading /proc.
+	queueFull, noSocket, snapshots, indexed atomic.Uint64
+	work, snapshotWork                      atomic.Int64 // Nanoseconds spent reading /proc.
+}
+
+type knownProc struct {
+	netns string
+	entry procEntry
+}
+
+type socketRef struct {
+	pid int
+	fd  string
 }
 
 func newProcessAttributor(root string, containers ContainerLookup, logger *log.Logger, onEvent func(database.NetworkEvent)) (*processAttributor, error) {
@@ -139,7 +162,7 @@ func (a *processAttributor) start() error {
 	a.jobs = make(chan processJob, processQueueSize)
 	a.flows = map[string]processIdentity{}
 	a.remote = map[string]time.Time{}
-	a.budget = workBudget{available: processWorkPerSecond, last: time.Now()}
+	a.podWork, a.hostWork = newWorkBudget(podWorkPerSecond, time.Now()), newWorkBudget(hostWorkPerSecond, time.Now())
 	a.refresh(time.Now())
 	if a.snapshot.hostNetns == "" || len(a.snapshot.host) == 0 {
 		return fmt.Errorf("cannot read process namespaces under %s; process attribution needs CAP_SYS_PTRACE", a.root)
@@ -262,10 +285,12 @@ func (a *processAttributor) report() {
 	attempted, matched, inherited, notLocal := a.attempted.Swap(0), a.matched.Swap(0), a.inherited.Swap(0), a.notLocal.Swap(0)
 	budgetHit, overBudget, expired := a.budgetHit.Swap(0), a.overBudget.Swap(0), a.expired.Swap(0)
 	queueFull, noSocket, snapshots, work := a.queueFull.Swap(0), a.noSocket.Swap(0), a.snapshots.Swap(0), a.work.Swap(0)
+	indexed, snapshotWork := a.indexed.Swap(0), a.snapshotWork.Swap(0)
 	if attempted+inherited+overBudget+expired+queueFull > 0 {
-		a.logger.Info("Process attribution", "attempted", attempted, "matched", matched, "inherited", inherited,
+		a.logger.Info("Process attribution", "attempted", attempted, "matched", matched, "from_index", indexed, "inherited", inherited,
 			"no_socket", noSocket, "not_local", notLocal, "deadline_hit", budgetHit, "over_budget", overBudget,
-			"expired", expired, "queue_full", queueFull, "flows", flows, "snapshots", snapshots, "proc_ms", time.Duration(work).Milliseconds())
+			"expired", expired, "queue_full", queueFull, "flows", flows, "snapshots", snapshots,
+			"snapshot_ms", time.Duration(snapshotWork).Milliseconds(), "lookup_ms", time.Duration(work).Milliseconds())
 	}
 }
 
@@ -279,10 +304,8 @@ func (a *processAttributor) run() {
 			a.inherited.Add(1)
 		} else if now.Sub(queued.queuedAt) > processQueueAge {
 			a.expired.Add(1)
-		} else if !a.budget.ready(now) {
-			a.overBudget.Add(1)
 		} else {
-			if now.Sub(a.snapshot.at) > processSnapshotEvery {
+			if now.Sub(a.snapshot.at) > processSnapshotEvery && a.podWork.ready(now) {
 				a.refresh(now)
 			}
 			a.attribute(&event, queued.queuedAt, now)
@@ -315,7 +338,7 @@ func (a *processAttributor) candidates(event database.NetworkEvent, queuedAt, no
 				continue
 			}
 			procs := a.snapshot.byPod[side.uid]
-			if len(procs) == 0 && now.Sub(a.snapshot.at) > processSnapshotOnMiss {
+			if len(procs) == 0 && now.Sub(a.snapshot.at) > processSnapshotOnMiss && a.podWork.ready(now) {
 				a.refresh(now)
 				procs = a.snapshot.byPod[side.uid]
 			}
@@ -374,12 +397,6 @@ func (a *processAttributor) noteHostPID(pid int) {
 }
 
 func (a *processAttributor) attribute(event *database.NetworkEvent, queuedAt, now time.Time) {
-	started := time.Now()
-	defer func() {
-		spent := time.Since(started)
-		a.budget.spend(spent)
-		a.work.Add(int64(spent))
-	}()
 	candidates := a.candidates(*event, queuedAt, now)
 	if len(candidates) == 0 {
 		a.notLocal.Add(1)
@@ -387,8 +404,20 @@ func (a *processAttributor) attribute(event *database.NetworkEvent, queuedAt, no
 	}
 	// The source opened the flow, so it is tried first.
 	for _, c := range candidates {
+		budget := &a.podWork
+		if c.host {
+			budget = &a.hostWork
+		}
+		if !budget.ready(now) {
+			a.overBudget.Add(1)
+			continue
+		}
 		a.attempted.Add(1)
-		identity, ok := a.lookup(*event, c, time.Now().Add(processLookupDeadline))
+		started := time.Now()
+		identity, ok := a.lookup(*event, c, started.Add(processLookupDeadline))
+		spent := time.Since(started)
+		budget.spend(spent)
+		a.work.Add(int64(spent))
 		if !ok {
 			continue
 		}
@@ -411,7 +440,7 @@ func (a *processAttributor) lookup(event database.NetworkEvent, c candidate, dea
 	var owner uint32
 	opened := false
 	for i := 0; i < len(c.procs) && i < 3 && !opened; i++ {
-		inode, owner, opened = findSocket(filepath.Join(a.root, strconv.Itoa(c.procs[i].pid)), udp, c.ip, c.port, c.otherIP, c.otherPort, deadline)
+		inode, owner, opened = findSocket(filepath.Join(a.root, strconv.Itoa(c.procs[i].pid)), udp, c.side == "dst", c.ip, c.port, c.otherIP, c.otherPort, deadline)
 	}
 	if inode == "" {
 		if time.Now().After(deadline) {
@@ -422,6 +451,10 @@ func (a *processAttributor) lookup(event database.NetworkEvent, c candidate, dea
 		return processIdentity{}, false
 	}
 	target := "socket:[" + inode + "]"
+	if proc, ok := a.indexedOwner(target, c.procs); ok {
+		a.indexed.Add(1)
+		return a.identify(event, c, proc), true
+	}
 	followed := 0
 	for _, proc := range c.procs {
 		if time.Now().After(deadline) || followed >= processMaxFDLinks {
@@ -431,33 +464,58 @@ func (a *processAttributor) lookup(event database.NetworkEvent, c candidate, dea
 		if c.host && proc.uid != owner {
 			continue // The socket's owner uid narrows the host's many processes.
 		}
-		path := filepath.Join(a.root, strconv.Itoa(proc.pid))
-		if !holdsSocket(path, target, deadline, &followed) {
+		if !a.holdsSocket(proc.pid, target, deadline, &followed) {
 			continue
 		}
-		identity := processIdentity{PID: proc.pid}
-		if command, err := os.ReadFile(filepath.Join(path, "comm")); err == nil {
-			identity.Command = strings.TrimSpace(string(command))
-		}
-		if proc.containerID != "" && a.containers != nil {
-			if namespace, pod, name, ok := a.containers(proc.containerID); ok {
-				identity.Pod, identity.Container = namespace+"/"+pod, name
-			}
-		}
-		if identity.Pod == "" && !c.host {
-			if c.side == "src" {
-				identity.Pod = event.SrcNamespace + "/" + event.SrcName
-			} else {
-				identity.Pod = event.DstNamespace + "/" + event.DstName
-			}
-		}
-		return identity, true
+		return a.identify(event, c, proc), true
 	}
 	return processIdentity{}, false
 }
 
-func holdsSocket(path, target string, deadline time.Time, followed *int) bool {
-	fds, err := os.Open(filepath.Join(path, "fd"))
+// indexedOwner checks where an earlier scan saw the socket, with one link read.
+func (a *processAttributor) indexedOwner(target string, procs []procEntry) (procEntry, bool) {
+	ref, ok := a.sockets[target]
+	if !ok {
+		return procEntry{}, false
+	}
+	if link, err := os.Readlink(filepath.Join(a.root, strconv.Itoa(ref.pid), "fd", ref.fd)); err != nil || link != target {
+		delete(a.sockets, target)
+		return procEntry{}, false
+	}
+	for _, proc := range procs {
+		if proc.pid == ref.pid {
+			return proc, true
+		}
+	}
+	return procEntry{}, false
+}
+
+func (a *processAttributor) identify(event database.NetworkEvent, c candidate, proc procEntry) processIdentity {
+	path := filepath.Join(a.root, strconv.Itoa(proc.pid))
+	identity := processIdentity{PID: proc.pid}
+	if command, err := os.ReadFile(filepath.Join(path, "comm")); err == nil {
+		identity.Command = strings.TrimSpace(string(command))
+	}
+	if proc.containerID != "" && a.containers != nil {
+		if namespace, pod, name, ok := a.containers(proc.containerID); ok {
+			identity.Pod, identity.Container = namespace+"/"+pod, name
+		}
+	}
+	if identity.Pod == "" && !c.host {
+		if c.side == "src" {
+			identity.Pod = event.SrcNamespace + "/" + event.SrcName
+		} else {
+			identity.Pod = event.DstNamespace + "/" + event.DstName
+		}
+	}
+	return identity
+}
+
+// holdsSocket scans a process's descriptors for the socket, indexing every
+// socket it passes so later lookups of long-lived sockets need no scan.
+func (a *processAttributor) holdsSocket(pid int, target string, deadline time.Time, followed *int) bool {
+	directory := filepath.Join(a.root, strconv.Itoa(pid), "fd")
+	fds, err := os.Open(directory)
 	if err != nil {
 		return false
 	}
@@ -466,7 +524,14 @@ func holdsSocket(path, target string, deadline time.Time, followed *int) bool {
 		names, readErr := fds.Readdirnames(64)
 		for _, name := range names {
 			*followed++
-			if link, err := os.Readlink(filepath.Join(path, "fd", name)); err == nil && link == target {
+			link, err := os.Readlink(filepath.Join(directory, name))
+			if err != nil || !strings.HasPrefix(link, "socket:[") {
+				continue
+			}
+			if len(a.sockets) < processMaxSockets {
+				a.sockets[link] = socketRef{pid: pid, fd: name}
+			}
+			if link == target {
 				return true
 			}
 		}
@@ -502,17 +567,21 @@ func parseCgroup(content string) (podUID, containerID string) {
 	return "", ""
 }
 
-// refresh records every process's network namespace and pod. It reads a link,
-// an inode and one small file per process: a few milliseconds per thousand
-// processes, every 15 seconds and at most every 3 when a pod is missing.
+// refresh records every process's network namespace and pod. Each process's
+// namespace link is read every time; its owner and cgroup only when it is new
+// or changed namespace, and for all processes once a minute.
 func (a *processAttributor) refresh(now time.Time) {
 	started := time.Now()
 	defer func() {
 		spent := time.Since(started)
-		a.budget.spend(spent)
-		a.work.Add(int64(spent))
+		a.podWork.spend(spent)
+		a.snapshotWork.Add(int64(spent))
 		a.snapshots.Add(1)
 	}()
+	if a.known == nil || now.Sub(a.fullAt) > processFullRescan {
+		a.known, a.fullAt = map[int]knownProc{}, now
+		a.sockets = map[string]socketRef{}
+	}
 	snapshot := &procSnapshot{at: now, byPod: map[string][]procEntry{}, hostIPs: a.addresses()}
 	a.hostIPs.Store(&snapshot.hostIPs)
 	for uid, until := range a.remote {
@@ -529,6 +598,7 @@ func (a *processAttributor) refresh(now time.Time) {
 	if err != nil {
 		return
 	}
+	known := make(map[int]knownProc, len(a.known))
 	podNetns := map[string]string{}
 	for _, entry := range entries {
 		pid, err := strconv.Atoi(entry.Name())
@@ -540,15 +610,20 @@ func (a *processAttributor) refresh(now time.Time) {
 		if err != nil {
 			continue // Exited, or a kernel thread.
 		}
-		proc := procEntry{pid: pid}
-		if info, err := os.Stat(path); err == nil {
-			if owner, ok := info.Sys().(*syscall.Stat_t); ok {
-				proc.uid = owner.Uid
+		cached, ok := a.known[pid]
+		if !ok || cached.netns != netns {
+			cached = knownProc{netns: netns, entry: procEntry{pid: pid}}
+			if info, err := os.Stat(path); err == nil {
+				if owner, ok := info.Sys().(*syscall.Stat_t); ok {
+					cached.entry.uid = owner.Uid
+				}
+			}
+			if content, err := os.ReadFile(filepath.Join(path, "cgroup")); err == nil {
+				cached.entry.podUID, cached.entry.containerID = parseCgroup(string(content))
 			}
 		}
-		if content, err := os.ReadFile(filepath.Join(path, "cgroup")); err == nil {
-			proc.podUID, proc.containerID = parseCgroup(string(content))
-		}
+		known[pid] = cached
+		proc := cached.entry
 		if netns == snapshot.hostNetns {
 			snapshot.host = append(snapshot.host, proc)
 			continue
@@ -558,12 +633,13 @@ func (a *processAttributor) refresh(now time.Time) {
 		if proc.podUID == "" {
 			continue
 		}
-		if known, ok := podNetns[proc.podUID]; ok && known != netns {
+		if namespace, ok := podNetns[proc.podUID]; ok && namespace != netns {
 			continue
 		}
 		podNetns[proc.podUID] = netns
 		snapshot.byPod[proc.podUID] = append(snapshot.byPod[proc.podUID], proc)
 	}
+	a.known = known
 }
 
 func localAddresses() map[string]bool {
@@ -582,11 +658,12 @@ func localAddresses() map[string]bool {
 
 // findSocket returns the inode and owner uid of a flow's socket in the network
 // namespace of process directory procDir, and whether any table was readable.
-// An exact match wins; otherwise a TCP listener on the local port (the server
-// of a connection not yet accepted) or an unconnected UDP socket bound to it.
+// An exact match wins; otherwise, for the receiving side, a TCP listener on the
+// local port (the server of a connection not yet accepted), or an unconnected
+// UDP socket bound to it.
 // IPv4 flows are also looked up in the IPv6 tables, where dual-stack sockets
 // appear v4-mapped.
-func findSocket(procDir string, udp bool, localIP string, localPort uint16, remoteIP string, remotePort uint16, deadline time.Time) (string, uint32, bool) {
+func findSocket(procDir string, udp, server bool, localIP string, localPort uint16, remoteIP string, remotePort uint16, deadline time.Time) (string, uint32, bool) {
 	local, localErr := netip.ParseAddr(localIP)
 	remote, remoteErr := netip.ParseAddr(remoteIP)
 	if localErr != nil || remoteErr != nil {
@@ -634,7 +711,7 @@ func findSocket(procDir string, udp bool, localIP string, localPort uint16, remo
 				return fields[9], uint32(uid), true
 			}
 			boundHere := from == local || from.IsUnspecified()
-			listening := !udp && fields[3] == "0A"
+			listening := server && !udp && fields[3] == "0A"
 			unconnected := udp && to.IsUnspecified() && toPort == 0
 			if fallback == "" && boundHere && (listening || unconnected) {
 				fallback, fallbackUID = fields[9], uint32(uid)
