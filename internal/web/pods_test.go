@@ -48,7 +48,7 @@ func newPodFixtureWith(t *testing.T, summaries bool) podFixture {
 }
 
 func podEvent(at time.Time, srcIP, srcUID, srcName, dstIP, dstUID, dstName string) database.NetworkEvent {
-	event := database.NetworkEvent{Timestamp: at, EventType: database.EventTCPStart, SrcIP: srcIP, SrcPort: 40000, DstIP: dstIP, DstPort: 443, CollectorID: "node-a", Interface: "lxc1"}
+	event := database.NetworkEvent{Timestamp: at, EventType: database.EventTCPStart, SrcIP: srcIP, SrcPort: 40000, DstIP: dstIP, DstPort: 443, CollectorID: "node-a", Interface: "lxc1", ByteCount: int64(at.Second()*100 + at.Minute())}
 	if srcUID != "" {
 		event.SrcKind, event.SrcNamespace, event.SrcName, event.SrcUID, event.SrcWorkload, event.SrcAttribution = "pod", "demo", srcName, srcUID, "Deployment/api", "exact"
 	}
@@ -252,7 +252,7 @@ func TestPodListSummaryMatchesRawEvents(t *testing.T) {
 	}
 	for uid, want := range results[1] {
 		got := results[0][uid]
-		if got.Egress != want.Egress || got.Ingress != want.Ingress || got.Uncertain != want.Uncertain || !got.FirstSeen.Equal(want.FirstSeen) || !got.LastSeen.Equal(want.LastSeen) {
+		if got.Egress != want.Egress || got.Ingress != want.Ingress || got.EgressBytes != want.EgressBytes || got.IngressBytes != want.IngressBytes || got.Uncertain != want.Uncertain || !got.FirstSeen.Equal(want.FirstSeen) || !got.LastSeen.Equal(want.LastSeen) {
 			t.Fatalf("%s: summary %+v, raw %+v", uid, got, want)
 		}
 	}

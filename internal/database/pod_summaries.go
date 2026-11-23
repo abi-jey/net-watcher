@@ -29,9 +29,12 @@ type HourlyPod struct {
 	Name       string
 	Workload   string
 	EventCount int64
-	Uncertain  int64
-	FirstSeen  int64
-	LastSeen   int64
+	// ByteCount totals the connections on this side: bytes in both directions
+	// of each flow, recorded when the flow ends.
+	ByteCount int64
+	Uncertain int64
+	FirstSeen int64
+	LastSeen  int64
 }
 
 // PodSummaryStatus reports whether HourlyPod covers all retained pod events.
@@ -131,6 +134,7 @@ func aggregatePods(tx *gorm.DB, events []NetworkEvent, delta int64) error {
 				rows[k] = row
 			}
 			row.EventCount += delta
+			row.ByteCount += delta * event.ByteCount
 			if side.attribution == "ambiguous" || side.attribution == "stale" {
 				row.Uncertain += delta
 			}
@@ -157,6 +161,7 @@ func aggregatePods(tx *gorm.DB, events []NetworkEvent, delta int64) error {
 	})
 	updates := clause.Assignments(map[string]interface{}{
 		"event_count": gorm.Expr("event_count + excluded.event_count"),
+		"byte_count":  gorm.Expr("byte_count + excluded.byte_count"),
 		"uncertain":   gorm.Expr("uncertain + excluded.uncertain"),
 		"first_seen":  gorm.Expr("MIN(first_seen, excluded.first_seen)"),
 		"last_seen":   gorm.Expr("MAX(last_seen, excluded.last_seen)"),
@@ -166,6 +171,7 @@ func aggregatePods(tx *gorm.DB, events []NetworkEvent, delta int64) error {
 		// Removal must not widen bounds or relabel; only counts change.
 		updates = clause.Assignments(map[string]interface{}{
 			"event_count": gorm.Expr("event_count + excluded.event_count"),
+			"byte_count":  gorm.Expr("byte_count + excluded.byte_count"),
 			"uncertain":   gorm.Expr("uncertain + excluded.uncertain"),
 		})
 	}

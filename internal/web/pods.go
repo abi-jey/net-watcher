@@ -61,22 +61,24 @@ func timeWindow(r *http.Request, fallback time.Duration) (time.Time, time.Time, 
 
 // PodSummary is a pod observed during the window.
 type PodSummary struct {
-	Namespace   string    `json:"namespace"`
-	Name        string    `json:"name"`
-	UID         string    `json:"uid"`
-	Workload    string    `json:"workload"`
-	FirstSeen   time.Time `json:"firstSeen"`
-	LastSeen    time.Time `json:"lastSeen"`
-	Egress      int64     `json:"egress"`
-	Ingress     int64     `json:"ingress"`
-	Uncertain   int64     `json:"uncertain"`   // Events whose attribution was ambiguous or stale.
-	Replacement bool      `json:"replacement"` // Another pod with the same name was seen in the window.
+	Namespace    string    `json:"namespace"`
+	Name         string    `json:"name"`
+	UID          string    `json:"uid"`
+	Workload     string    `json:"workload"`
+	FirstSeen    time.Time `json:"firstSeen"`
+	LastSeen     time.Time `json:"lastSeen"`
+	Egress       int64     `json:"egress"`       // Events where the pod was the source.
+	Ingress      int64     `json:"ingress"`      // Events where the pod was the destination.
+	EgressBytes  int64     `json:"egressBytes"`  // Bytes (both directions) of connections the pod opened.
+	IngressBytes int64     `json:"ingressBytes"` // Bytes (both directions) of connections to the pod.
+	Uncertain    int64     `json:"uncertain"`    // Events whose attribution was ambiguous or stale.
+	Replacement  bool      `json:"replacement"`  // Another pod with the same name was seen in the window.
 }
 
 type podRow struct {
 	Namespace, Name, UID, Workload string
 	First, Last                    string
-	Events, Uncertain              int64
+	Events, Bytes, Uncertain       int64
 }
 
 // podRawMaxWindow bounds the fallback that aggregates raw events while the
@@ -142,8 +144,10 @@ func (s *Server) handlePods(w http.ResponseWriter, r *http.Request) {
 		}
 		if entry.side == "src" {
 			pod.Egress += row.Events
+			pod.EgressBytes += row.Bytes
 		} else {
 			pod.Ingress += row.Events
+			pod.IngressBytes += row.Bytes
 		}
 		pod.Uncertain += row.Uncertain
 	}
@@ -175,7 +179,7 @@ func (s *Server) handlePods(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) podRowsFromSummary(r *http.Request, from, to time.Time, namespace string) ([]sidePodRow, error) {
 	query := `SELECT side, uid, MAX(namespace) AS namespace, MAX(name) AS name, MAX(workload) AS workload,
-		MIN(first_seen) AS first, MAX(last_seen) AS last, SUM(event_count) AS events, SUM(uncertain) AS uncertain
+		MIN(first_seen) AS first, MAX(last_seen) AS last, SUM(event_count) AS events, SUM(byte_count) AS bytes, SUM(uncertain) AS uncertain
 		FROM hourly_pods WHERE hour >= ? AND hour < ?`
 	args := []interface{}{from.Unix(), to.Unix()}
 	if namespace != "" {
@@ -185,8 +189,8 @@ func (s *Server) podRowsFromSummary(r *http.Request, from, to time.Time, namespa
 	query += " GROUP BY side, uid LIMIT ?"
 	args = append(args, 2*podListMaxRows+1)
 	var raw []struct {
-		Side, UID, Namespace, Name, Workload string
-		First, Last, Events, Uncertain       int64
+		Side, UID, Namespace, Name, Workload  string
+		First, Last, Events, Bytes, Uncertain int64
 	}
 	if err := s.db.WithContext(r.Context()).Raw(query, args...).Scan(&raw).Error; err != nil {
 		return nil, err
@@ -195,7 +199,7 @@ func (s *Server) podRowsFromSummary(r *http.Request, from, to time.Time, namespa
 	for _, item := range raw {
 		rows = append(rows, sidePodRow{
 			side:  item.Side,
-			row:   podRow{Namespace: item.Namespace, Name: item.Name, UID: item.UID, Workload: item.Workload, Events: item.Events, Uncertain: item.Uncertain},
+			row:   podRow{Namespace: item.Namespace, Name: item.Name, UID: item.UID, Workload: item.Workload, Events: item.Events, Bytes: item.Bytes, Uncertain: item.Uncertain},
 			first: time.Unix(0, item.First).UTC(),
 			last:  time.Unix(0, item.Last).UTC(),
 		})
@@ -207,7 +211,7 @@ func (s *Server) podRowsFromEvents(r *http.Request, from, to time.Time, namespac
 	var rows []sidePodRow
 	for _, side := range []string{"src", "dst"} {
 		query := fmt.Sprintf(`SELECT %[1]s_namespace AS namespace, %[1]s_name AS name, %[1]s_uid AS uid, MAX(%[1]s_workload) AS workload,
-			MIN(timestamp) AS first, MAX(timestamp) AS last, COUNT(*) AS events,
+			MIN(timestamp) AS first, MAX(timestamp) AS last, COUNT(*) AS events, SUM(COALESCE(byte_count, 0)) AS bytes,
 			SUM(CASE WHEN %[1]s_attribution IN ('ambiguous', 'stale') THEN 1 ELSE 0 END) AS uncertain
 			FROM network_events WHERE %[1]s_kind = 'pod' AND timestamp >= ? AND timestamp < ?`, side)
 		args := []interface{}{from, to}

@@ -38,9 +38,25 @@ func New(dbPath string) (*DB, error) {
 	_, _ = sqlDB.Exec("PRAGMA synchronous=NORMAL")
 	_, _ = sqlDB.Exec("PRAGMA cache_size=2000")
 
+	// Pod summaries written before byte totals existed must be rebuilt, or
+	// their hours would report zero traffic.
+	rebuildPods := db.Migrator().HasTable(&HourlyPod{}) && !db.Migrator().HasColumn(&HourlyPod{}, "ByteCount")
 	if err := db.AutoMigrate(&NetworkEvent{}, &DNSResolution{}, &IngestedEvent{}, &IngestedResolution{}, &IngestCursor{}, &HourlyEvent{}, &HourlyHost{}, &AggregateState{}, &HourlyPod{}, &CollectorStatus{}); err != nil {
 		_ = sqlDB.Close()
 		return nil, err
+	}
+	if rebuildPods {
+		var enabled int64
+		if err := db.Model(&AggregateState{}).Where("id = ?", podSummaryState).Count(&enabled).Error; err != nil {
+			_ = sqlDB.Close()
+			return nil, err
+		}
+		if enabled > 0 {
+			if err := db.Transaction(resetPodSummaries); err != nil {
+				_ = sqlDB.Close()
+				return nil, err
+			}
+		}
 	}
 	// Superseded by idx_*_workload_time, which also serves the time range and
 	// order of workload queries instead of reading the workload's full history.
