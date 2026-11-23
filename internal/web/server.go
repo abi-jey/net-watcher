@@ -3,11 +3,9 @@ package web
 import (
 	"bufio"
 	"context"
-	"embed"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io/fs"
 	"net"
 	"net/http"
 	"net/netip"
@@ -21,9 +19,6 @@ import (
 	"github.com/charmbracelet/log"
 	"gorm.io/gorm"
 )
-
-//go:embed all:static
-var staticFiles embed.FS
 
 // Server represents the web server
 type Server struct {
@@ -72,18 +67,11 @@ func (s *Server) Start(ctx context.Context) error {
 	mux.HandleFunc("/api/pods", cacheGET(35*time.Second, s.handlePods))
 	mux.HandleFunc("/api/pod-connections", s.handlePodConnections)
 
-	// Serve static files (React app)
-	staticFS, err := fs.Sub(staticFiles, "static")
-	if err != nil {
-		return fmt.Errorf("failed to create static file system: %w", err)
-	}
-
-	// Serve the React app for all non-API routes
-	mux.Handle("/", http.FileServer(http.FS(staticFS)))
+	mux.Handle("/", uiHandler())
 
 	s.server = &http.Server{
 		Addr:    net.JoinHostPort(s.Host, strconv.Itoa(s.port)),
-		Handler: s.loggingMiddleware(corsMiddleware(mux)),
+		Handler: s.loggingMiddleware(securityHeaders(mux)),
 	}
 
 	s.logger.Info("Starting web server", "port", s.port, "url", fmt.Sprintf("http://localhost:%d", s.port))
@@ -99,22 +87,6 @@ func (s *Server) Start(ctx context.Context) error {
 		return err
 	}
 	return nil
-}
-
-// corsMiddleware adds CORS headers for development
-func corsMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
-
-		if r.Method == "OPTIONS" {
-			w.WriteHeader(http.StatusOK)
-			return
-		}
-
-		next.ServeHTTP(w, r)
-	})
 }
 
 // loggingMiddleware logs all incoming HTTP requests
@@ -306,7 +278,7 @@ func (s *Server) handleTopHosts(w http.ResponseWriter, r *http.Request) {
 
 	response := TopHostsResponse{
 		Aggregation: aggregation,
-		Hosts:       results,
+		Hosts:       append([]TopHostEntry{}, results...), // [] rather than null when empty
 		Total:       total,
 		Metric:      metric,
 		HostType:    hostType,
@@ -433,7 +405,7 @@ func (s *Server) handleTrafficTimeline(w http.ResponseWriter, r *http.Request) {
 
 	response := TrafficTimelineResponse{
 		Aggregation: aggregation,
-		Data:        data,
+		Data:        append([]TrafficDataPoint{}, data...),
 		StartTime:   startTime,
 		EndTime:     endTime,
 		BucketSize:  bucketSize,

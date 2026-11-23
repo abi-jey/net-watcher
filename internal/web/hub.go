@@ -15,9 +15,8 @@ import (
 var upgrader = websocket.Upgrader{
 	ReadBufferSize:  1024,
 	WriteBufferSize: 1024,
-	CheckOrigin: func(r *http.Request) bool {
-		return true // Allow all origins for development
-	},
+	// CheckOrigin is left nil: gorilla/websocket then accepts only same-origin
+	// browser connections, so other sites cannot stream audit events.
 }
 
 // Client represents a WebSocket client connection
