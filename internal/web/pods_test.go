@@ -1,6 +1,7 @@
 package web
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http/httptest"
@@ -20,6 +21,12 @@ type podFixture struct {
 }
 
 func newPodFixture(t *testing.T) podFixture {
+	return newPodFixtureWith(t, true)
+}
+
+// newPodFixtureWith creates a central database; summaries mirror the ingester,
+// which enables them at startup.
+func newPodFixtureWith(t *testing.T, summaries bool) podFixture {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "central.db")
 	writer, err := database.New(path)
@@ -27,6 +34,11 @@ func newPodFixture(t *testing.T) podFixture {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = writer.Close() })
+	if summaries {
+		if err := writer.EnableSummaries(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
 	reader, err := database.OpenReadOnly(path)
 	if err != nil {
 		t.Fatal(err)
@@ -53,6 +65,8 @@ func (f podFixture) get(t *testing.T, path string, params url.Values, target int
 	switch path {
 	case "/api/pods":
 		f.server.handlePods(recorder, request)
+	case "/api/events":
+		f.server.handleEvents(recorder, request)
 	default:
 		f.server.handlePodConnections(recorder, request)
 	}
@@ -193,5 +207,56 @@ func TestPodConnectionsIncludeDNSEvidenceGapsAndBounds(t *testing.T) {
 		if code := f.get(t, "/api/pod-connections", bad, nil); code != 400 {
 			t.Errorf("params %v: status %d, want 400", bad, code)
 		}
+	}
+}
+
+// The hourly summary and the raw fallback must report the same pods and
+// counts; without a summary, long windows are refused instead of scanning.
+func TestPodListSummaryMatchesRawEvents(t *testing.T) {
+	var results [2]map[string]PodSummary
+	for i, summaries := range []bool{true, false} {
+		f := newPodFixtureWith(t, summaries)
+		var events []database.NetworkEvent
+		for n := 0; n < 30; n++ {
+			at := f.now.Add(-time.Duration(n) * time.Minute) // Within the last 30 minutes.
+			events = append(events, podEvent(at, "10.0.0.7", "api-uid", "api-1", "10.0.0.9", "db-uid", "db-0"))
+			if n%3 == 0 {
+				ambiguous := podEvent(at, "10.0.0.8", "web-uid", "web-1", "198.51.100.1", "", "")
+				ambiguous.SrcAttribution = "ambiguous"
+				events = append(events, ambiguous)
+			}
+		}
+		if err := f.writer.InsertBatch(events); err != nil {
+			t.Fatal(err)
+		}
+		var response struct {
+			Granularity string
+			Pods        []PodSummary
+		}
+		params := url.Values{"from": {f.now.Add(-59 * time.Minute).Format(time.RFC3339)}, "to": {f.now.Add(time.Second).Format(time.RFC3339)}}
+		if code := f.get(t, "/api/pods", params, &response); code != 200 {
+			t.Fatalf("summaries=%v status %d", summaries, code)
+		}
+		results[i] = map[string]PodSummary{}
+		for _, pod := range response.Pods {
+			results[i][pod.UID] = pod
+		}
+		if !summaries {
+			if response.Granularity != "event" {
+				t.Fatalf("fallback granularity %q", response.Granularity)
+			}
+			if code := f.get(t, "/api/pods", url.Values{}, &response); code != 503 {
+				t.Fatalf("24h window without summary: status %d", code)
+			}
+		}
+	}
+	for uid, want := range results[1] {
+		got := results[0][uid]
+		if got.Egress != want.Egress || got.Ingress != want.Ingress || got.Uncertain != want.Uncertain || !got.FirstSeen.Equal(want.FirstSeen) || !got.LastSeen.Equal(want.LastSeen) {
+			t.Fatalf("%s: summary %+v, raw %+v", uid, got, want)
+		}
+	}
+	if len(results[0]) != 3 || results[0]["web-uid"].Uncertain != 10 || results[0]["db-uid"].Ingress != 30 {
+		t.Fatalf("unexpected pods %+v", results[0])
 	}
 }

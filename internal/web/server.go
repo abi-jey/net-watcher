@@ -66,7 +66,7 @@ func (s *Server) Start(ctx context.Context) error {
 	mux.HandleFunc("/api/top-hosts", cacheGET(65*time.Second, s.handleTopHosts))
 	mux.HandleFunc("/api/traffic-timeline", cacheGET(65*time.Second, s.handleTrafficTimeline))
 	mux.HandleFunc("/api/ws", s.hub.ServeWs)
-	mux.HandleFunc("/api/network-map", s.handleNetworkMap)
+	mux.HandleFunc("/api/network-map", cacheGET(15*time.Second, s.handleNetworkMap))
 	mux.HandleFunc("/api/dns-evidence", s.handleDNSEvidence)
 	mux.HandleFunc("/api/collectors", s.handleCollectors)
 	mux.HandleFunc("/api/pods", cacheGET(35*time.Second, s.handlePods))
@@ -161,15 +161,6 @@ func (lrw *loggingResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) 
 	return nil, nil, fmt.Errorf("ResponseWriter does not implement http.Hijacker")
 }
 
-// EventsResponse represents the paginated events response
-type EventsResponse struct {
-	Events     []database.NetworkEvent `json:"events"`
-	Total      int64                   `json:"total"`
-	Page       int                     `json:"page"`
-	PageSize   int                     `json:"pageSize"`
-	TotalPages int                     `json:"totalPages"`
-}
-
 // StatsResponse represents database statistics
 type StatsResponse struct {
 	Aggregation database.AggregationStatus `json:"aggregation"`
@@ -177,118 +168,6 @@ type StatsResponse struct {
 	EventCounts map[string]int64           `json:"eventCounts"`
 	LastEvent   *time.Time                 `json:"lastEvent,omitempty"`
 	FirstEvent  *time.Time                 `json:"firstEvent,omitempty"`
-}
-
-// handleEvents returns paginated and filtered events
-func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
-	query := r.URL.Query()
-
-	// Pagination
-	page, _ := strconv.Atoi(query.Get("page"))
-	if page < 1 {
-		page = 1
-	}
-	pageSize, _ := strconv.Atoi(query.Get("pageSize"))
-	if pageSize < 1 || pageSize > 100 {
-		pageSize = 20
-	}
-
-	// Filters
-	eventType := query.Get("eventType")
-	srcIP := query.Get("srcIP")
-	dstIP := query.Get("dstIP")
-	searchQuery := query.Get("q")
-	startDate := query.Get("startDate")
-	endDate := query.Get("endDate")
-
-	// Build query
-	dbQuery := s.db.WithContext(r.Context()).Model(&database.NetworkEvent{})
-
-	// Handle multi-select event types (comma-separated)
-	if eventType != "" {
-		types := strings.Split(eventType, ",")
-		if len(types) == 1 {
-			dbQuery = dbQuery.Where("event_type = ?", types[0])
-		} else {
-			dbQuery = dbQuery.Where("event_type IN ?", types)
-		}
-	}
-	if srcIP != "" {
-		dbQuery = dbQuery.Where("src_ip LIKE ?", "%"+srcIP+"%")
-	}
-	if dstIP != "" {
-		dbQuery = dbQuery.Where("dst_ip LIKE ?", "%"+dstIP+"%")
-	}
-	if searchQuery != "" {
-		search := "%" + searchQuery + "%"
-		dbQuery = dbQuery.Where(
-			"src_ip LIKE ? OR dst_ip LIKE ? OR hostname LIKE ? OR dns_query LIKE ? OR tls_sni LIKE ?",
-			search, search, search, search, search,
-		)
-	}
-	if startDate != "" {
-		if t, err := time.Parse("2006-01-02", startDate); err == nil {
-			dbQuery = dbQuery.Where("timestamp >= ?", t)
-		}
-	}
-	if endDate != "" {
-		if t, err := time.Parse("2006-01-02", endDate); err == nil {
-			dbQuery = dbQuery.Where("timestamp <= ?", t.Add(24*time.Hour))
-		}
-	}
-
-	// Get total count
-	var total int64
-	err := s.db.WithContext(r.Context()).Transaction(func(tx *gorm.DB) error {
-		if srcIP == "" && dstIP == "" && searchQuery == "" && startDate == "" && endDate == "" {
-			ready, err := database.SummariesReady(tx)
-			if err != nil {
-				return err
-			}
-			if ready {
-				counts := tx.Model(&database.HourlyEvent{})
-				if eventType != "" {
-					counts = counts.Where("event_type IN ?", strings.Split(eventType, ","))
-				}
-				return counts.Select("COALESCE(SUM(event_count), 0)").Scan(&total).Error
-			}
-		}
-		// Reuse the filtered statement on this snapshot rather than acquiring a
-		// second pooled connection while the count transaction is active.
-		filtered := tx.Model(&database.NetworkEvent{})
-		if where, ok := dbQuery.Statement.Clauses["WHERE"]; ok {
-			filtered = filtered.Clauses(where.Expression)
-		}
-		return filtered.Count(&total).Error
-	})
-	if err != nil {
-		http.Error(w, "could not count events", http.StatusServiceUnavailable)
-		return
-	}
-
-	// Get paginated results
-	var events []database.NetworkEvent
-	offset := (page - 1) * pageSize
-	if err := dbQuery.Order("timestamp DESC").Limit(pageSize).Offset(offset).Find(&events).Error; err != nil {
-		http.Error(w, "could not read events", http.StatusServiceUnavailable)
-		return
-	}
-
-	totalPages := int(total) / pageSize
-	if int(total)%pageSize > 0 {
-		totalPages++
-	}
-
-	response := EventsResponse{
-		Events:     events,
-		Total:      total,
-		Page:       page,
-		PageSize:   pageSize,
-		TotalPages: totalPages,
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(response)
 }
 
 // handleStats returns database statistics

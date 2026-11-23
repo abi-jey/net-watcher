@@ -146,26 +146,41 @@ func (h *Hub) pollLoop() {
 	}
 }
 
-// pollNewEvents queries the database for events newer than lastEventID
+// livePollLimit bounds each poll. The live view is a tail, not an audit
+// trail: when more events arrived than fit, the newest are sent and the gap is
+// announced, so the view never falls further behind the capture rate.
+const livePollLimit = 200
+
+// pollNewEvents sends the newest events after lastEventID.
 func (h *Hub) pollNewEvents() {
 	var events []database.NetworkEvent
-	result := h.db.Where("id > ?", h.lastEventID).Order("id ASC").Limit(100).Find(&events)
+	result := h.db.Where("id > ?", h.lastEventID).Order("id DESC").Limit(livePollLimit).Find(&events)
 	if result.Error != nil {
 		h.logger.Error("[WS] Failed to poll events", "error", result.Error)
 		return
 	}
-
 	if len(events) == 0 {
 		return
 	}
+	newest, oldest := events[0].ID, events[len(events)-1].ID
+	if h.lastEventID > 0 && oldest > h.lastEventID+1 && len(events) == livePollLimit {
+		h.publish(map[string]interface{}{"type": "skipped", "count": oldest - h.lastEventID - 1, "timestamp": time.Now().UnixMilli()})
+	}
+	for i := len(events) - 1; i >= 0; i-- {
+		h.PublishEvent(&events[i])
+	}
+	h.lastEventID = newest
+}
 
-	h.logger.Debug("[WS] Polled new events", "count", len(events), "from_id", h.lastEventID)
-
-	for _, event := range events {
-		h.PublishEvent(&event)
-		if event.ID > h.lastEventID {
-			h.lastEventID = event.ID
-		}
+func (h *Hub) publish(message map[string]interface{}) {
+	data, err := json.Marshal(message)
+	if err != nil {
+		return
+	}
+	select {
+	case h.broadcast <- data:
+	default:
+		h.logger.Warn("[WS] Broadcast channel full, dropping message")
 	}
 }
 

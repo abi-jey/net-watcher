@@ -61,12 +61,17 @@ func SummaryStatus(tx *gorm.DB) (AggregationStatus, error) {
 	return AggregationStatus{Enabled: true, Ready: !state.Paused && state.Cursor >= state.Target, Cursor: state.Cursor, Target: state.Target, Paused: state.Paused}, nil
 }
 
-const summaryColumns = "id, timestamp, event_type, src_ip, dst_ip, hostname, byte_count"
+const summaryColumns = "id, timestamp, event_type, src_ip, dst_ip, hostname, byte_count, " +
+	"src_kind, src_namespace, src_name, src_uid, src_workload, src_attribution, " +
+	"dst_kind, dst_namespace, dst_name, dst_uid, dst_workload, dst_attribution"
 
 // EnableSummaries snapshots the historical high-water mark without scanning or
 // rewriting events. Collector-only databases do not enable summary maintenance.
 func (db *DB) EnableSummaries(ctx context.Context) error {
 	return db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := enablePodSummaries(tx); err != nil {
+			return err
+		}
 		var state AggregateState
 		err := tx.First(&state, 1).Error
 		if err == nil && !state.Paused {
@@ -104,6 +109,9 @@ func SummariesReady(tx *gorm.DB) (bool, error) {
 func ApplyEventSummaries(tx *gorm.DB, events []NetworkEvent, delta int64) error {
 	if len(events) == 0 {
 		return nil
+	}
+	if err := applyPodSummaries(tx, events, delta); err != nil {
+		return err
 	}
 	var state AggregateState
 	err := tx.First(&state, 1).Error
@@ -255,6 +263,11 @@ func (db *DB) RunSummaryBackfill(ctx context.Context) {
 	for ctx.Err() == nil {
 		start := time.Now()
 		done, err := db.BackfillSummaries(ctx, 1000)
+		if err == nil {
+			var podsDone bool
+			podsDone, err = db.BackfillPodSummaries(ctx, 1000)
+			done = done && podsDone
+		}
 		if ctx.Err() != nil {
 			return
 		}

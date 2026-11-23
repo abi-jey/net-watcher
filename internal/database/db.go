@@ -38,7 +38,7 @@ func New(dbPath string) (*DB, error) {
 	_, _ = sqlDB.Exec("PRAGMA synchronous=NORMAL")
 	_, _ = sqlDB.Exec("PRAGMA cache_size=2000")
 
-	if err := db.AutoMigrate(&NetworkEvent{}, &DNSResolution{}, &IngestedEvent{}, &IngestedResolution{}, &IngestCursor{}, &HourlyEvent{}, &HourlyHost{}, &AggregateState{}, &CollectorStatus{}); err != nil {
+	if err := db.AutoMigrate(&NetworkEvent{}, &DNSResolution{}, &IngestedEvent{}, &IngestedResolution{}, &IngestCursor{}, &HourlyEvent{}, &HourlyHost{}, &AggregateState{}, &HourlyPod{}, &CollectorStatus{}); err != nil {
 		_ = sqlDB.Close()
 		return nil, err
 	}
@@ -123,12 +123,15 @@ type CompactStats struct {
 func (db *DB) Compact(olderThan time.Time, dedupeWindow time.Duration) (*CompactStats, error) {
 	// Compaction rewrites observations rather than merely expiring them. Readers
 	// fall back to raw data until the throttled worker rebuilds the summaries.
-	paused := db.Model(&AggregateState{}).Where("id = 1").Update("paused", true)
+	paused := db.Model(&AggregateState{}).Where("id IN ?", []uint{1, podSummaryState}).Update("paused", true)
 	if paused.Error != nil {
 		return nil, paused.Error
 	}
 	if paused.RowsAffected > 0 {
 		defer func() {
+			if err := db.Transaction(resetPodSummaries); err != nil {
+				log.Error("Could not reset pod summaries after compaction", "error", err)
+			}
 			if err := db.Transaction(resetSummaries); err != nil {
 				log.Error("Could not reset summaries after compaction", "error", err)
 			}
