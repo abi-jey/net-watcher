@@ -158,7 +158,7 @@ func (q *Queue) deadLetter(ctx context.Context, id int64, payload []byte, cause 
 	if err != nil {
 		return false, err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	if _, err := tx.ExecContext(ctx, "INSERT INTO dead_batches(payload, error, created_at, attempts) VALUES (?, ?, ?, ?)", payload, truncate(cause.Error(), 1024), q.now().Unix(), q.failures); err != nil {
 		return false, err
 	}
@@ -191,7 +191,7 @@ func (q *Queue) retryDeadLetters(ctx context.Context, receiver *Receiver) {
 			entries = append(entries, e)
 		}
 	}
-	rows.Close()
+	_ = rows.Close()
 	for _, e := range entries {
 		var batch Batch
 		err := json.Unmarshal(e.payload, &batch)

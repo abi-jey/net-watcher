@@ -15,7 +15,7 @@ func TestRecentlyExpiredEvidenceSurvivesMaintenance(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	now := time.Now().UTC()
 	recent := DNSResolution{ResponseTime: now.Add(-3 * time.Minute), ExpiresAt: now.Add(-2 * time.Minute), Name: "recent.test", IP: "203.0.113.1"}
 	old := DNSResolution{ResponseTime: now.Add(-time.Hour), ExpiresAt: now.Add(-EvidenceGrace - time.Minute), Name: "old.test", IP: "203.0.113.2"}
@@ -45,7 +45,7 @@ func TestEnforceCollectorLimitDiscardsOldestPendingAndRecordsGap(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	start := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
 	events := make([]NetworkEvent, 4000)
 	padding := strings.Repeat("x", 512)

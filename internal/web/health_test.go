@@ -38,7 +38,7 @@ func TestCollectorsEndpointReportsStatusAndGaps(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer writer.Close()
+	defer func() { _ = writer.Close() }()
 	now := time.Now().UTC().Truncate(time.Second)
 	if err := writer.Create(&database.CollectorStatus{CollectorID: "node-a", ReceivedAt: now, ReportedAt: now}).Error; err != nil {
 		t.Fatal(err)
@@ -57,7 +57,7 @@ func TestCollectorsEndpointReportsStatusAndGaps(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer reader.Close()
+	defer func() { _ = reader.Close() }()
 	server := &Server{db: reader, logger: log.Default()}
 	recorder := httptest.NewRecorder()
 	server.handleCollectors(recorder, httptest.NewRequest("GET", "/api/collectors", nil))
