@@ -87,13 +87,17 @@ func (db *DB) InsertEvent(event *NetworkEvent) error {
 	})
 }
 
+// eventInsertBatch keeps multi-row INSERTs under SQLite's 999 bind-variable
+// compatibility limit (network_events has about 60 columns).
+const eventInsertBatch = 15
+
 // InsertBatch inserts multiple events in batches
 func (db *DB) InsertBatch(events []NetworkEvent) error {
 	if len(events) == 0 {
 		return nil
 	}
 	return db.Transaction(func(tx *gorm.DB) error {
-		if err := tx.Session(&gorm.Session{SkipDefaultTransaction: true}).CreateInBatches(&events, 20).Error; err != nil {
+		if err := tx.Session(&gorm.Session{SkipDefaultTransaction: true}).CreateInBatches(&events, eventInsertBatch).Error; err != nil {
 			return err
 		}
 		return ApplyEventSummaries(tx, events, 1)

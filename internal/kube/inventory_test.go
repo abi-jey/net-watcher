@@ -79,8 +79,8 @@ func TestInventoryPodsServicesNodesAndCaptureSnapshots(t *testing.T) {
 		t.Fatal("historical snapshot changed")
 	}
 	index.Replace(list.Items, time.Now().Add(-2*time.Minute))
-	if index.Lookup("10.2.0.8", 8080, "TCP") != "" {
-		t.Fatal("stale inventory used for new observations")
+	if stale := lookup("10.2.0.8", 8080); stale.Confidence != ConfidenceStale {
+		t.Fatalf("stale inventory not labelled: %+v", stale)
 	}
 }
 

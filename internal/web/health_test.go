@@ -18,7 +18,9 @@ func TestAssessCollectorStates(t *testing.T) {
 		status database.CollectorStatus
 		want   string
 	}{
-		{"ok", database.CollectorStatus{ReceivedAt: now, ReportedAt: now, InventoryAgeSeconds: 5}, "ok"},
+		{"ok", database.CollectorStatus{ReceivedAt: now, ReportedAt: now, InventoryAgeSeconds: 5, PodWatch: true}, "ok"},
+		{"no watch", database.CollectorStatus{ReceivedAt: now, ReportedAt: now, InventoryAgeSeconds: 5}, "degraded"},
+		{"no kubernetes", database.CollectorStatus{ReceivedAt: now, ReportedAt: now, InventoryAgeSeconds: -1}, "ok"},
 		{"stale", database.CollectorStatus{ReceivedAt: now.Add(-10 * time.Minute), ConsecutiveFailures: 3}, "stale"},
 		{"failing", database.CollectorStatus{ReceivedAt: now, ReportedAt: now, ConsecutiveFailures: 2, LastError: "HTTP 503"}, "failing"},
 		{"backlog", database.CollectorStatus{ReceivedAt: now, ReportedAt: now, OldestPendingAt: now.Add(-time.Hour)}, "backlog"},
@@ -40,7 +42,7 @@ func TestCollectorsEndpointReportsStatusAndGaps(t *testing.T) {
 	}
 	defer writer.Close()
 	now := time.Now().UTC().Truncate(time.Second)
-	if err := writer.Create(&database.CollectorStatus{CollectorID: "node-a", ReceivedAt: now, ReportedAt: now}).Error; err != nil {
+	if err := writer.Create(&database.CollectorStatus{CollectorID: "node-a", ReceivedAt: now, ReportedAt: now, InventoryAgeSeconds: -1}).Error; err != nil {
 		t.Fatal(err)
 	}
 	gaps := []database.NetworkEvent{

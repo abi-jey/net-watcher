@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/abja/net-watcher/internal/database"
+	"github.com/abja/net-watcher/internal/kube"
 	"github.com/charmbracelet/log"
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
@@ -208,7 +209,7 @@ func TestDNSAnswerOwnershipIPv6AndLoops(t *testing.T) {
 func TestDNSPodIPReuseDoesNotInheritEvidence(t *testing.T) {
 	sm := testManager(t)
 	identity := `{"UID":"old-pod"}`
-	sm.contextLookup = func(string, uint16, string) string { return identity }
+	sm.contextLookup = func(string, uint16, string, time.Time) kube.Attribution { return kube.Attribution{Context: identity} }
 	at := time.Now().Add(-time.Second)
 	sm.TrackDNSPacket("veth0", "[10.2.0.8]:1000", "[10.2.0.53]:53", "UDP", dnsMessage(t, 1, false, "api.test", nil), at, false)
 	sm.TrackDNSPacket("veth0", "[10.2.0.53]:53", "[10.2.0.8]:1000", "UDP", dnsMessage(t, 1, true, "api.test", []layers.DNSResourceRecord{addressRecord("api.test", "203.0.113.20", 60)}), at.Add(time.Millisecond), false)

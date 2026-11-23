@@ -69,6 +69,8 @@ func (s *Server) Start(ctx context.Context) error {
 	mux.HandleFunc("/api/network-map", s.handleNetworkMap)
 	mux.HandleFunc("/api/dns-evidence", s.handleDNSEvidence)
 	mux.HandleFunc("/api/collectors", s.handleCollectors)
+	mux.HandleFunc("/api/pods", cacheGET(35*time.Second, s.handlePods))
+	mux.HandleFunc("/api/pod-connections", s.handlePodConnections)
 
 	// Serve static files (React app)
 	staticFS, err := fs.Sub(staticFiles, "static")

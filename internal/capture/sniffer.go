@@ -10,12 +10,12 @@ import (
 
 // ValidateInterface checks if interface exists and is up
 func ValidateInterface(name string) error {
-iface, err := net.InterfaceByName(name)
-if err != nil {
-return fmt.Errorf("interface %s not found", name)
-}
-if iface.Flags&net.FlagUp == 0 {
-return fmt.Errorf("interface %s is down", name)
-}
-return nil
+	iface, err := net.InterfaceByName(name)
+	if err != nil {
+		return fmt.Errorf("interface %s not found", name)
+	}
+	if iface.Flags&net.FlagUp == 0 {
+		return fmt.Errorf("interface %s is down", name)
+	}
+	return nil
 }

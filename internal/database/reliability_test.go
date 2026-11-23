@@ -58,6 +58,10 @@ func TestEnforceCollectorLimitDiscardsOldestPendingAndRecordsGap(t *testing.T) {
 	if err := db.RecordAcknowledgment("http://central", 0); err != nil {
 		t.Fatal(err)
 	}
+	// Measure the settled database: the WAL would otherwise inflate the size.
+	if err := db.checkpoint(); err != nil {
+		t.Fatal(err)
+	}
 	size, err := db.StorageBytes()
 	if err != nil {
 		t.Fatal(err)

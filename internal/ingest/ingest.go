@@ -26,8 +26,8 @@ const (
 	maxEvents     = 250
 	maxBatchBytes = 5 << 20
 	// Keep INSERTs within SQLite's 999-bind-variable compatibility limit:
-	// events have 41 columns, resolutions 20, and ingest keys 4.
-	eventInsertSize      = 20
+	// events have about 60 columns, resolutions 20, and ingest keys 4.
+	eventInsertSize      = 15
 	resolutionInsertSize = 40
 	keyInsertSize        = 200
 )
@@ -56,6 +56,7 @@ type Health struct {
 	MissingEvidence     int64     `json:"missingEvidence"`
 	CaptureDrops        int64     `json:"captureDrops"`
 	InventoryAgeSeconds int64     `json:"inventoryAgeSeconds"`
+	PodWatch            bool      `json:"podWatch"`
 }
 
 // LocalStats supplies capture-side counters to a Forwarder's health report.
@@ -63,6 +64,7 @@ type LocalStats struct {
 	DiscardedEvents     int64
 	CaptureDrops        int64
 	InventoryAgeSeconds int64
+	PodWatch            bool
 }
 
 // rejectHeader marks a 400 response as a permanent rejection of the batch
@@ -314,7 +316,7 @@ func (r *Receiver) storeHealth(tx *gorm.DB, batch Batch) error {
 		PendingEvents: h.PendingEvents, OldestPendingAt: h.OldestPendingAt, LastAcknowledgedAt: h.LastAcknowledgedAt,
 		ConsecutiveFailures: h.ConsecutiveFailures, LastError: truncate(h.LastError, 512), StorageBytes: h.StorageBytes,
 		StorageLimitBytes: h.StorageLimitBytes, DiscardedEvents: h.DiscardedEvents, MissingEvidence: h.MissingEvidence,
-		CaptureDrops: h.CaptureDrops, InventoryAgeSeconds: h.InventoryAgeSeconds,
+		CaptureDrops: h.CaptureDrops, InventoryAgeSeconds: h.InventoryAgeSeconds, PodWatch: h.PodWatch,
 	}
 	// Queued batches may drain out of order after a restart; never let an older
 	// report overwrite a newer one.
@@ -403,7 +405,7 @@ func (f *Forwarder) health() *Health {
 	h.StorageBytes, _ = f.DB.StorageBytes()
 	if f.Stats != nil {
 		stats := f.Stats()
-		h.DiscardedEvents, h.CaptureDrops, h.InventoryAgeSeconds = stats.DiscardedEvents, stats.CaptureDrops, stats.InventoryAgeSeconds
+		h.DiscardedEvents, h.CaptureDrops, h.InventoryAgeSeconds, h.PodWatch = stats.DiscardedEvents, stats.CaptureDrops, stats.InventoryAgeSeconds, stats.PodWatch
 	}
 	return h
 }

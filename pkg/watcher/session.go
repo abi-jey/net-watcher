@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/abja/net-watcher/internal/database"
+	"github.com/abja/net-watcher/internal/kube"
 	"github.com/charmbracelet/log"
 )
 
@@ -59,7 +60,7 @@ type SessionManager struct {
 	// Track recent rejected UDP to combine with ICMP unreachable
 	recentUDPRejects map[string]time.Time
 	dns              *dnsTracker
-	contextLookup    func(string, uint16, string) string
+	contextLookup    ContextLookup
 	processMux       sync.RWMutex
 	processLookup    *processAttributor
 	// Event batching
@@ -80,6 +81,9 @@ func (sm *SessionManager) retainLimit() int {
 	}
 	return maxRetainedEvents
 }
+
+// ContextLookup attributes an address to its Kubernetes identity at a time.
+type ContextLookup func(ip string, port uint16, protocol string, at time.Time) kube.Attribution
 
 // maxRetainedEvents bounds memory used for events awaiting a successful write.
 const maxRetainedEvents = 50000
@@ -367,9 +371,13 @@ func (sm *SessionManager) storeEvent(event database.NetworkEvent) {
 	if strings.HasPrefix(string(event.EventType), "UDP") {
 		protocol = "UDP"
 	}
-	if sm.contextLookup != nil {
-		event.SourceContext = sm.contextLookup(event.SrcIP, event.SrcPort, protocol)
-		event.DestinationContext = sm.contextLookup(event.DstIP, event.DstPort, protocol)
+	if sm.contextLookup != nil && event.EventType != database.EventGap {
+		// Attribute at capture time: the address may since belong to another pod.
+		src := sm.contextLookup(event.SrcIP, event.SrcPort, protocol, event.Timestamp)
+		dst := sm.contextLookup(event.DstIP, event.DstPort, protocol, event.Timestamp)
+		event.SourceContext, event.DestinationContext = src.Context, dst.Context
+		event.SrcKind, event.SrcNamespace, event.SrcName, event.SrcUID, event.SrcWorkload, event.SrcAttribution = src.Kind, src.Namespace, src.Name, src.UID, src.Workload, src.Confidence
+		event.DstKind, event.DstNamespace, event.DstName, event.DstUID, event.DstWorkload, event.DstAttribution = dst.Kind, dst.Namespace, dst.Name, dst.UID, dst.Workload, dst.Confidence
 	}
 	if event.EventType == database.EventTCPStart || event.EventType == database.EventUDPStart || event.EventType == database.EventTLSSNI {
 		matches := sm.dns.lookup(event.SrcIP, event.DstIP, event.Timestamp)
@@ -948,7 +956,7 @@ func (sm *SessionManager) lookupDNSCache(client, ip string) (string, time.Durati
 	entries := sm.dns.lookup(client, ip, time.Now())
 	identity := ""
 	if sm.contextLookup != nil {
-		identity = contextIdentity(sm.contextLookup(client, 0, ""))
+		identity = contextIdentity(sm.contextLookup(client, 0, "", time.Now()).Context)
 	}
 	for index := len(entries) - 1; index >= 0; index-- {
 		entry := entries[index]
