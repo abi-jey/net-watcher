@@ -82,8 +82,10 @@ type podRow struct {
 }
 
 // podRawMaxWindow bounds the fallback that aggregates raw events while the
-// hourly pod summary is still being built; longer windows wait for it.
-const podRawMaxWindow = time.Hour
+// hourly pod summary is still being built; longer windows wait for it. The
+// extra minute absorbs clock skew when a client sends only "from" and the
+// server's "now" ends the window.
+const podRawMaxWindow = time.Hour + time.Minute
 
 type sidePodRow struct {
 	side        string

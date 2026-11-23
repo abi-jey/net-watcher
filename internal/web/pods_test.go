@@ -233,7 +233,9 @@ func TestPodListSummaryMatchesRawEvents(t *testing.T) {
 			Granularity string
 			Pods        []PodSummary
 		}
-		params := url.Values{"from": {f.now.Add(-59 * time.Minute).Format(time.RFC3339)}, "to": {f.now.Add(time.Second).Format(time.RFC3339)}}
+		// The UI's "last hour" spans slightly more than an hour (from rounded
+		// down, to one second ahead); the raw fallback must still accept it.
+		params := url.Values{"from": {f.now.Add(-time.Hour).Format(time.RFC3339)}, "to": {f.now.Add(2 * time.Second).Format(time.RFC3339)}}
 		if code := f.get(t, "/api/pods", params, &response); code != 200 {
 			t.Fatalf("summaries=%v status %d", summaries, code)
 		}
