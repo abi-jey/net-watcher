@@ -313,7 +313,7 @@ func (f *Forwarder) send(ctx context.Context) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	response.Body.Close()
+	_ = response.Body.Close()
 	if response.StatusCode != http.StatusNoContent {
 		return false, fmt.Errorf("ingest endpoint returned HTTP %d", response.StatusCode)
 	}

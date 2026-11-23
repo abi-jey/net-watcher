@@ -1,0 +1,11 @@
+name: Security gate
+description: Fail when Go code reaches a known vulnerability (stdlib or modules)
+
+runs:
+  using: composite
+  steps:
+    - name: govulncheck
+      shell: bash
+      # Exits non-zero when a vulnerable symbol is reachable from this module's
+      # code, including the standard library of the Go toolchain in use.
+      run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...

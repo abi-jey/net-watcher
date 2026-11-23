@@ -1,0 +1,35 @@
+name: Build and scan image
+description: Build the container image and fail on fixable HIGH/CRITICAL vulnerabilities
+
+inputs:
+  version:
+    description: Version string baked into the binary
+    required: true
+  commit_sha:
+    description: Commit SHA
+    required: true
+  tag:
+    description: Local image tag to build
+    required: false
+    default: net-watcher:ci
+
+runs:
+  using: composite
+  steps:
+    - name: Build image
+      shell: bash
+      run: |
+        docker build --pull \
+          --build-arg VERSION="${{ inputs.version }}" \
+          --build-arg COMMIT_SHA="${{ inputs.commit_sha }}" \
+          -t "${{ inputs.tag }}" .
+
+    - name: Scan image
+      shell: bash
+      # Trivy runs from its official image (latest), not a third-party action.
+      # Scans OS packages and the Go binary's modules and standard library.
+      run: |
+        docker run --rm --pull always -v /var/run/docker.sock:/var/run/docker.sock \
+          aquasec/trivy:latest \
+          image --scanners vuln --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 --no-progress \
+          "${{ inputs.tag }}"

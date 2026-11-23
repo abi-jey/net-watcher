@@ -152,18 +152,18 @@ func (s *clusterSource) List(ctx context.Context) ([]Object, error) {
 			request.Header.Set("Authorization", "Bearer "+strings.TrimSpace(string(token)))
 			response, err := s.client.Do(request)
 			if err != nil {
-				return nil, fmt.Errorf("Kubernetes %s request failed", resource.kind)
+				return nil, fmt.Errorf("listing %s from the Kubernetes API failed", resource.kind)
 			}
 			if response.StatusCode != http.StatusOK {
-				response.Body.Close()
+				_ = response.Body.Close()
 				if resource.optional && (response.StatusCode == http.StatusForbidden || response.StatusCode == http.StatusNotFound) {
 					break
 				}
-				return nil, fmt.Errorf("Kubernetes %s: HTTP %d", resource.kind, response.StatusCode)
+				return nil, fmt.Errorf("listing %s from the Kubernetes API: HTTP %d", resource.kind, response.StatusCode)
 			}
 			var list List
 			err = json.NewDecoder(response.Body).Decode(&list)
-			response.Body.Close()
+			_ = response.Body.Close()
 			if err != nil {
 				return nil, fmt.Errorf("decode Kubernetes %s: %w", resource.kind, err)
 			}

@@ -180,7 +180,7 @@ func (a *processAttributor) lookup(event database.NetworkEvent, deadline time.Ti
 					continue
 				}
 				command, err := os.ReadFile(filepath.Join(path, "comm"))
-				fds.Close()
+				_ = fds.Close()
 				if err == nil {
 					return processIdentity{PID: pid, Command: strings.TrimSpace(string(command))}, true
 				}
@@ -190,7 +190,7 @@ func (a *processAttributor) lookup(event database.NetworkEvent, deadline time.Ti
 				break
 			}
 		}
-		fds.Close()
+		_ = fds.Close()
 	}
 	if time.Now().After(deadline) {
 		a.budgetHit.Add(1)
@@ -215,7 +215,7 @@ func findSocketInode(root, localIP string, localPort uint16, remoteIP string, re
 	if err != nil {
 		return "", 0
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() && time.Now().Before(deadline) {
 		fields := strings.Fields(scanner.Text())

@@ -13,82 +13,74 @@ jobs:
   build:
     name: Build Release Binaries
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        include:
-          - goos: linux
-            goarch: amd64
-            filename: net-watcher-linux-amd64
-          - goos: linux
-            goarch: arm64
-            filename: net-watcher-linux-arm64
     steps:
     - name: Checkout code
-      uses: actions/checkout@v4
+      uses: actions/checkout@v7
+
+    - uses: ./.github/actions/setup-go
+
+    - name: Test
+      run: go test -race ./...
+
+    - uses: ./.github/actions/security-gate
+
+    # cgo is required (SQLite, AF_PACKET); the build action cross-compiles
+    # arm64 with gcc-aarch64-linux-gnu. A CGO_ENABLED=0 build does not compile.
+    - name: Build binaries
+      uses: ./.github/actions/build
       with:
-        fetch-depth: 0  # Full history for changelog
+        version: ${{ github.ref_name }}
+        commit_sha: ${{ github.sha }}
+        build_time: ${{ github.event.head_commit.timestamp }}
 
-    - name: Set up Go
-      uses: actions/setup-go@v5
-      with:
-        go-version: '1.25'
-
-    - name: Cache Go modules
-      uses: actions/cache@v4
-      with:
-        path: |
-          ~/.cache/go-build
-          ~/go/pkg/mod
-        key: ${{ runner.os }}-go-1.25-${{ hashFiles('**/go.sum') }}
-        restore-keys: |
-          ${{ runner.os }}-go-1.25-
-
-    - name: Download dependencies
-      run: go mod download
-
-    - name: Build binary
-      env:
-        GOOS: ${{ matrix.goos }}
-        GOARCH: ${{ matrix.goarch }}
-        CGO_ENABLED: 0
-      run: |
-        # Set version info
-        VERSION=${GITHUB_REF#refs/tags/}
-        BUILD_TIME=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
-        COMMIT_SHA=$(git rev-parse HEAD)
-        
-        go build \
-          -ldflags="-s -w -X main.version=${VERSION} -X main.buildTime=${BUILD_TIME} -X main.commitSHA=${COMMIT_SHA}" \
-          -o ${{ matrix.filename }} .
-        
-        echo "Built ${{ matrix.filename }} for ${{ matrix.goos }}/${{ matrix.goarch }}"
-        
     - name: Generate checksums
+      working-directory: dist
       run: |
-        sha256sum ${{ matrix.filename }} > ${{ matrix.filename }}.sha256
-        sha512sum ${{ matrix.filename }} > ${{ matrix.filename }}.sha512
+        for binary in net-watcher-linux-amd64 net-watcher-linux-arm64; do
+          sha256sum "$binary" > "$binary.sha256"
+          sha512sum "$binary" > "$binary.sha512"
+        done
 
     - name: Upload build artifacts
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
-        name: ${{ matrix.filename }}
+        name: net-watcher-binaries
         path: |
-          ${{ matrix.filename }}
-          ${{ matrix.filename }}.sha256
-          ${{ matrix.filename }}.sha512
+          dist/net-watcher-linux-*
+
+  image:
+    name: Release image
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v7
+
+    - name: Build and scan
+      uses: ./.github/actions/image
+      with:
+        version: ${{ github.ref_name }}
+        commit_sha: ${{ github.sha }}
+
+    - name: Push to GHCR
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}
+        echo "$GH_TOKEN" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+        docker tag net-watcher:ci "$IMAGE:${GITHUB_REF_NAME}"
+        docker push "$IMAGE:${GITHUB_REF_NAME}"
 
   release:
     name: Create GitHub Release
     runs-on: ubuntu-latest
-    needs: build
+    needs: [build, image]
     steps:
     - name: Checkout code
-      uses: actions/checkout@v4
+      uses: actions/checkout@v7
       with:
         fetch-depth: 0
 
     - name: Download all artifacts
-      uses: actions/download-artifact@v4
+      uses: actions/download-artifact@v8
       with:
         path: release-artifacts
 
@@ -167,7 +159,7 @@ jobs:
         echo "EOF" >> $GITHUB_OUTPUT
 
     - name: Create Release
-      uses: softprops/action-gh-release@v2
+      uses: softprops/action-gh-release@v3
       with:
         tag_name: ${{ github.ref_name }}
         name: Net Watcher ${{ github.ref_name }}
