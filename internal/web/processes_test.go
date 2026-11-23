@@ -82,6 +82,10 @@ func TestProcessListSummaryMatchesRawEvents(t *testing.T) {
 	if pg.Accepted != 20 || pg.Opened != 0 || pg.AcceptedBytes != 30000 || pg.Pod != "demo/db-0" || pg.Container != "postgres" {
 		t.Fatalf("postgres row %+v", pg)
 	}
+	if summary.Coverage.Since == nil || raw.Coverage.Since == nil || !summary.Coverage.Since.Equal(*raw.Coverage.Since) {
+		t.Fatalf("coverage start: summary %v raw %v", summary.Coverage.Since, raw.Coverage.Since)
+	}
+	summary.Coverage.Since, raw.Coverage.Since = nil, nil
 	if summary.Coverage != raw.Coverage || summary.Coverage.FlowStarts != 65 || summary.Coverage.AttributedFlows != 45 {
 		t.Fatalf("coverage summary %+v raw %+v", summary.Coverage, raw.Coverage)
 	}

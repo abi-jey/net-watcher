@@ -63,7 +63,9 @@ export function Processes({ query }: { query: URLSearchParams }) {
           <Stat label="Connections opened" value={count(totals.opened)} hint={`${bytes(totals.openedBytes)} transferred`} />
           <Stat label="Connections accepted" value={count(totals.accepted)} hint={`${bytes(totals.acceptedBytes)} transferred`} />
           <Stat label="Coverage" value={percent(coverage?.attributedFlows ?? 0, coverage?.flowStarts ?? 0)}
-            hint={`${count(coverage?.attributedFlows ?? 0)} of ${count(coverage?.flowStarts ?? 0)} connections have a process`} />
+            hint={coverage?.since
+              ? `${count(coverage.attributedFlows)} of ${count(coverage.flowStarts)} connections since ${result.data.granularity === 'hour' ? time(coverage.since.slice(0, 13) + ':00:00Z') : time(coverage.since)}`
+              : 'no attributed connections in this window'} />
         </div>
       )}
       <details className="card explain">

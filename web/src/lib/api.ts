@@ -56,7 +56,8 @@ export interface ProcessSummary {
 }
 export interface ProcessesResponse {
   from: string; to: string; granularity: 'hour' | 'event'; truncated: boolean;
-  coverage: { flowStarts: number; attributedFlows: number }; processes: ProcessSummary[] | null;
+  /** since: first attributed connection in the window; absent with a namespace filter or no processes. */
+  coverage: { since?: string; flowStarts: number; attributedFlows: number }; processes: ProcessSummary[] | null;
 }
 export interface PodsResponse { from: string; to: string; granularity: 'hour' | 'event'; truncated: boolean; pods: PodSummary[] | null }
 // Go encodes empty slices as null; fields that may be null are typed so.

@@ -29,13 +29,30 @@ type ProcessSummary struct {
 	LastSeen      time.Time `json:"lastSeen"`
 }
 
-// ProcessCoverage compares attributed flow starts with all flow starts.
+// ProcessCoverage compares attributed flow starts with all flow starts since
+// the first attributed one in the window, so time before attribution was
+// enabled does not count. In hourly mode that start is rounded down to the
+// hour. Without a namespace filter only.
 type ProcessCoverage struct {
-	FlowStarts      int64 `json:"flowStarts"`
-	AttributedFlows int64 `json:"attributedFlows"`
+	Since           *time.Time `json:"since,omitempty"`
+	FlowStarts      int64      `json:"flowStarts"`
+	AttributedFlows int64      `json:"attributedFlows"`
 }
 
 const processListMaxRows = 2000
+
+var flowStartTypes = []database.EventType{database.EventTCPStart, database.EventUDPStart}
+
+func firstAttributed(rows []processRow) *time.Time {
+	var first *time.Time
+	for _, row := range rows {
+		at := time.Unix(0, row.First).UTC()
+		if first == nil || at.Before(*first) {
+			first = &at
+		}
+	}
+	return first
+}
 
 type processRow struct {
 	Collector, Side, Pod, Namespace, Container, Command string
@@ -73,9 +90,10 @@ func (s *Server) handleProcesses(w http.ResponseWriter, r *http.Request) {
 		query += " GROUP BY collector_id, side, pod, container, command LIMIT ?"
 		args = append(args, 2*processListMaxRows+1)
 		err = db.Raw(query, args...).Scan(&rows).Error
-		if err == nil {
+		if since := firstAttributed(rows); err == nil && since != nil && namespace == "" {
+			coverage.Since = since
 			err = db.Raw(`SELECT COALESCE(SUM(event_count), 0) FROM hourly_events WHERE hour >= ? AND hour < ? AND event_type IN ?`,
-				from.Unix(), to.Unix(), []database.EventType{database.EventTCPStart, database.EventUDPStart}).Scan(&coverage.FlowStarts).Error
+				since.Truncate(time.Hour).Unix(), to.Unix(), flowStartTypes).Scan(&coverage.FlowStarts).Error
 		}
 	case to.Sub(from) <= podRawMaxWindow:
 		granularity = "event"
@@ -101,8 +119,11 @@ func (s *Server) handleProcesses(w http.ResponseWriter, r *http.Request) {
 					First: parseSQLiteTime(item.FirstText).UnixNano(), Last: parseSQLiteTime(item.LastText).UnixNano(),
 					Events: item.Events, Connections: item.Connections, Bytes: item.Bytes})
 			}
-			err = db.Raw(`SELECT COUNT(*) FROM network_events WHERE timestamp >= ? AND timestamp < ? AND event_type IN ?`,
-				from, to, []database.EventType{database.EventTCPStart, database.EventUDPStart}).Scan(&coverage.FlowStarts).Error
+			if since := firstAttributed(rows); since != nil && namespace == "" {
+				coverage.Since = since
+				err = db.Raw(`SELECT COUNT(*) FROM network_events WHERE timestamp >= ? AND timestamp < ? AND event_type IN ?`,
+					*since, to, flowStartTypes).Scan(&coverage.FlowStarts).Error
+			}
 		}
 	default:
 		w.Header().Set("Retry-After", "60")

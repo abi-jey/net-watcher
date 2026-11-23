@@ -40,6 +40,7 @@ func TestParseCgroup(t *testing.T) {
 	for content, want := range map[string][2]string{
 		"0::/kubepods.slice/kubepods-burstable.slice/kubepods-burstable-pod" + systemdUID + ".slice/cri-containerd-" + testContainerID + ".scope\n":        {testPodUID, testContainerID},
 		"12:pids:/kubepods/besteffort/pod" + testPodUID + "/" + testContainerID + "\n11:cpu:/kubepods/besteffort/pod" + testPodUID + "/" + testContainerID: {testPodUID, testContainerID},
+		"0::/kubepods.slice/kubepods-besteffort.slice/kubepods-besteffort-pod" + systemdUID + ".slice/crio-" + testContainerID + ".scope/container\n":      {testPodUID, testContainerID},
 		"0::/kubepods.slice/kubepods-pod" + systemdUID + ".slice\n":                                                                                        {testPodUID, ""},
 		"0::/system.slice/containerd.service\n": {"", ""},
 	} {

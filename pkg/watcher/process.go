@@ -544,12 +544,13 @@ func (a *processAttributor) holdsSocket(pid int, target string, deadline time.Ti
 
 var (
 	cgroupPodUID      = regexp.MustCompile(`pod([0-9a-f]{8}[-_][0-9a-f]{4}[-_][0-9a-f]{4}[-_][0-9a-f]{4}[-_][0-9a-f]{12})`)
-	cgroupContainerID = regexp.MustCompile(`([0-9a-f]{64})(?:\.scope)?$`)
+	cgroupContainerID = regexp.MustCompile(`(?:^|[/-])([0-9a-f]{64})(?:\.scope)?(?:/|$)`)
 )
 
 // parseCgroup extracts the pod UID and container ID from /proc/<pid>/cgroup
-// for the systemd ("kubepods-pod<uid>.slice/cri-containerd-<id>.scope") and
-// cgroupfs ("/kubepods/pod<uid>/<id>") drivers.
+// for the systemd ("kubepods-pod<uid>.slice/cri-containerd-<id>.scope", or
+// "crio-<id>.scope/container" where the runtime nests the process) and cgroupfs
+// ("/kubepods/pod<uid>/<id>") drivers. The innermost ID is the container's.
 func parseCgroup(content string) (podUID, containerID string) {
 	for _, line := range strings.Split(content, "\n") {
 		parts := strings.SplitN(line, ":", 3)
@@ -558,8 +559,8 @@ func parseCgroup(content string) (podUID, containerID string) {
 		}
 		if match := cgroupPodUID.FindStringSubmatch(parts[2]); match != nil {
 			podUID = strings.ReplaceAll(match[1], "_", "-")
-			if id := cgroupContainerID.FindStringSubmatch(parts[2]); id != nil {
-				containerID = id[1]
+			if ids := cgroupContainerID.FindAllStringSubmatch(parts[2], -1); ids != nil {
+				containerID = ids[len(ids)-1][1]
 			}
 			return podUID, containerID
 		}
