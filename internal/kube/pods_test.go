@@ -210,3 +210,28 @@ func TestPodWatchAppliesEventsAndRelistsOnExpiry(t *testing.T) {
 	cancel()
 	<-done
 }
+
+// A watched pod can arrive before its ReplicaSet is listed; the workload must
+// still be the Deployment so workload views do not split.
+func TestWatchedPodResolvesDeploymentBeforeReplicaSetIsListed(t *testing.T) {
+	index := New(nil)
+	now := time.Now()
+	index.Replace(nil, now)
+	object := pod("p1", "probe-5f56699564-ljbkw", now.Add(-time.Second), "Running", "10.0.1.162")
+	object.Metadata.OwnerReferences = []Owner{{Kind: "ReplicaSet", Name: "probe-5f56699564", UID: "rs-unlisted"}}
+	object.Metadata.Labels = map[string]string{"pod-template-hash": "5f56699564"}
+	index.mu.Lock()
+	index.pods.apply(object, false, index.owners, now)
+	index.mu.Unlock()
+	if got := index.Attribute("10.0.1.162", 0, "", now); got.Workload != "Deployment/probe" {
+		t.Fatalf("workload = %q", got.Workload)
+	}
+	standalone := pod("p2", "batch-x", now.Add(-time.Second), "Running", "10.0.1.163")
+	standalone.Metadata.OwnerReferences = []Owner{{Kind: "ReplicaSet", Name: "batch", UID: "rs2"}}
+	index.mu.Lock()
+	index.pods.apply(standalone, false, index.owners, now)
+	index.mu.Unlock()
+	if got := index.Attribute("10.0.1.163", 0, "", now); got.Workload != "ReplicaSet/batch" {
+		t.Fatalf("unlabelled ReplicaSet guessed: %q", got.Workload)
+	}
+}

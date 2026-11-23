@@ -77,9 +77,28 @@ func podEndpoint(object Object, owners map[string]Owner, at time.Time) Endpoint 
 		endpoint.Owner = m.OwnerReferences[0]
 		if owner, ok := owners[endpoint.Owner.UID]; ok {
 			endpoint.Owner = owner
+		} else if owner, ok := deploymentFromReplicaSet(endpoint.Owner, m.Labels); ok {
+			endpoint.Owner = owner
 		}
 	}
 	return endpoint
+}
+
+// deploymentFromReplicaSet resolves a Deployment-managed ReplicaSet that has
+// not been listed yet (a watched pod can arrive before the next inventory
+// list). The Deployment controller names its ReplicaSets
+// "<deployment>-<pod-template-hash>" and labels their pods with that hash, so
+// the owner follows exactly when both agree. The Deployment UID stays unknown.
+func deploymentFromReplicaSet(owner Owner, labels map[string]string) (Owner, bool) {
+	hash := labels["pod-template-hash"]
+	if owner.Kind != "ReplicaSet" || hash == "" || !strings.HasSuffix(owner.Name, "-"+hash) {
+		return owner, false
+	}
+	name := strings.TrimSuffix(owner.Name, "-"+hash)
+	if name == "" {
+		return owner, false
+	}
+	return Owner{Kind: "Deployment", Name: name}, true
 }
 
 // terminal reports whether a pod no longer holds its addresses. Completed and
