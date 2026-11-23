@@ -130,8 +130,12 @@ type processAttributor struct {
 	recent   []int                // Host PIDs that recently owned sockets, newest first.
 	podWork  workBudget
 	hostWork workBudget
-	// lastNoSocket: the last lookup read the socket tables and found nothing.
-	lastNoSocket bool
+	// lastCacheable: the last lookup completed without a match (no socket, or
+	// no process that can be named), so the same endpoint will miss again.
+	lastCacheable bool
+	// resume: where a descriptor scan that ran out of time continues for the
+	// same socket, so a socket held deep in a busy host is found eventually.
+	resume map[string]int
 
 	hostIPs atomic.Pointer[map[string]bool]
 
@@ -176,6 +180,7 @@ func (a *processAttributor) start() error {
 	a.flows = map[string]processIdentity{}
 	a.remote = map[string]time.Time{}
 	a.misses = map[string]time.Time{}
+	a.resume = map[string]int{}
 	a.podWork, a.hostWork = newWorkBudget(podWorkPerSecond, time.Now()), newWorkBudget(hostWorkPerSecond, time.Now())
 	a.refresh(time.Now())
 	if a.snapshot.hostNetns == "" || len(a.snapshot.host) == 0 {
@@ -448,7 +453,7 @@ func (a *processAttributor) attribute(event *database.NetworkEvent, queuedAt, no
 		budget.spend(spent)
 		a.work.Add(int64(spent))
 		if !ok {
-			if miss != "" && a.lastNoSocket && len(a.misses) < processMaxMisses {
+			if miss != "" && a.lastCacheable && len(a.misses) < processMaxMisses {
 				a.misses[miss] = now.Add(processMissTTL)
 			}
 			continue
@@ -474,14 +479,14 @@ func (a *processAttributor) lookup(event database.NetworkEvent, c candidate, dea
 	for i := 0; i < len(c.procs) && i < 3 && !opened; i++ {
 		inode, owner, opened = findSocket(filepath.Join(a.root, strconv.Itoa(c.procs[i].pid)), udp, c.side == "dst", c.ip, c.port, c.otherIP, c.otherPort, deadline)
 	}
-	a.lastNoSocket = false
+	a.lastCacheable = false
 	if inode == "" {
 		if time.Now().After(deadline) {
 			a.budgetHit.Add(1)
 			a.example(event, c, "deadline reading socket tables")
 		} else {
 			a.noSocket.Add(1)
-			a.lastNoSocket = opened
+			a.lastCacheable = opened
 			a.example(event, c, fmt.Sprintf("no socket (tables readable: %t)", opened))
 		}
 		return processIdentity{}, false
@@ -493,10 +498,21 @@ func (a *processAttributor) lookup(event database.NetworkEvent, c candidate, dea
 	}
 	followed := 0
 	unreadable := map[int]bool{}
-	for _, proc := range c.procs {
+	start := a.resume[target]
+	if start >= len(c.procs) {
+		start = 0
+	}
+	if start > 0 {
+		unreadable = nil // Earlier processes were scanned by an earlier lookup; ownership cannot be inferred.
+	}
+	for i := start; i < len(c.procs); i++ {
+		proc := c.procs[i]
 		if time.Now().After(deadline) || followed >= processMaxFDLinks {
 			a.budgetHit.Add(1)
 			a.example(event, c, fmt.Sprintf("deadline scanning descriptors (%d links)", followed))
+			if len(a.resume) < processMaxMisses {
+				a.resume[target] = i
+			}
 			return processIdentity{}, false
 		}
 		if c.host && proc.uid != owner {
@@ -504,17 +520,22 @@ func (a *processAttributor) lookup(event database.NetworkEvent, c candidate, dea
 		}
 		found, readable := a.holdsSocket(proc.pid, target, deadline, &followed)
 		if found {
+			delete(a.resume, target)
 			return a.identify(event, c, proc), true
 		}
-		if !readable {
+		if !readable && unreadable != nil {
 			unreadable[proc.pid] = true
 		}
 	}
-	if identity, ok := a.identifyByOwner(event, c, owner, unreadable); ok {
-		a.byOwner.Add(1)
-		return identity, true
+	delete(a.resume, target)
+	if unreadable != nil {
+		if identity, ok := a.identifyByOwner(event, c, owner, unreadable); ok {
+			a.byOwner.Add(1)
+			return identity, true
+		}
 	}
 	a.noOwner.Add(1)
+	a.lastCacheable = true
 	a.example(event, c, fmt.Sprintf("socket %s (uid %d) held by none of %d processes (%d links read)", inode, owner, len(c.procs), followed))
 	return processIdentity{}, false
 }
@@ -704,6 +725,7 @@ func (a *processAttributor) refresh(now time.Time) {
 	if a.known == nil || now.Sub(a.fullAt) > processFullRescan {
 		a.known, a.fullAt = map[int]knownProc{}, now
 		a.sockets = map[string]socketRef{}
+		a.resume = map[string]int{}
 	}
 	snapshot := &procSnapshot{at: now, byPod: map[string][]procEntry{}, hostIPs: a.addresses()}
 	a.hostIPs.Store(&snapshot.hostIPs)
