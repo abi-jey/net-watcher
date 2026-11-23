@@ -16,20 +16,30 @@ func TestAssessCollectorStates(t *testing.T) {
 	cases := []struct {
 		name   string
 		status database.CollectorStatus
+		gaps   []GapSummary
 		want   string
 	}{
-		{"ok", database.CollectorStatus{ReceivedAt: now, ReportedAt: now, InventoryAgeSeconds: 5, PodWatch: true}, "ok"},
-		{"no watch", database.CollectorStatus{ReceivedAt: now, ReportedAt: now, InventoryAgeSeconds: 5}, "degraded"},
-		{"no kubernetes", database.CollectorStatus{ReceivedAt: now, ReportedAt: now, InventoryAgeSeconds: -1}, "ok"},
-		{"stale", database.CollectorStatus{ReceivedAt: now.Add(-10 * time.Minute), ConsecutiveFailures: 3}, "stale"},
-		{"failing", database.CollectorStatus{ReceivedAt: now, ReportedAt: now, ConsecutiveFailures: 2, LastError: "HTTP 503"}, "failing"},
-		{"backlog", database.CollectorStatus{ReceivedAt: now, ReportedAt: now, OldestPendingAt: now.Add(-time.Hour)}, "backlog"},
-		{"degraded", database.CollectorStatus{ReceivedAt: now, ReportedAt: now, CaptureDrops: 10}, "degraded"},
-		{"inventory", database.CollectorStatus{ReceivedAt: now, ReportedAt: now, InventoryAgeSeconds: 600}, "degraded"},
+		{"ok", database.CollectorStatus{ReceivedAt: now, ReportedAt: now, InventoryAgeSeconds: 5, PodWatch: true}, nil, "ok"},
+		{"no watch", database.CollectorStatus{ReceivedAt: now, ReportedAt: now, InventoryAgeSeconds: 5}, nil, "degraded"},
+		{"no kubernetes", database.CollectorStatus{ReceivedAt: now, ReportedAt: now, InventoryAgeSeconds: -1}, nil, "ok"},
+		{"stale", database.CollectorStatus{ReceivedAt: now.Add(-10 * time.Minute), ConsecutiveFailures: 3}, nil, "stale"},
+		{"failing", database.CollectorStatus{ReceivedAt: now, ReportedAt: now, ConsecutiveFailures: 2, LastError: "HTTP 503"}, nil, "failing"},
+		{"backlog", database.CollectorStatus{ReceivedAt: now, ReportedAt: now, OldestPendingAt: now.Add(-time.Hour)}, nil, "backlog"},
+		// Loss counts since start without recent gap records are informational.
+		{"old loss", database.CollectorStatus{ReceivedAt: now, ReportedAt: now, InventoryAgeSeconds: -1, CaptureDrops: 10}, nil, "ok"},
+		{"recent loss", database.CollectorStatus{ReceivedAt: now, ReportedAt: now, InventoryAgeSeconds: -1, CaptureDrops: 10}, []GapSummary{{Reason: database.GapCaptureDrops, Events: 2, Lost: 10, Last: now.Add(-10 * time.Minute)}}, "degraded"},
+		{"loss hours ago", database.CollectorStatus{ReceivedAt: now, ReportedAt: now, InventoryAgeSeconds: -1, CaptureDrops: 10}, []GapSummary{{Reason: database.GapCaptureDrops, Events: 2, Lost: 10, Last: now.Add(-3 * time.Hour)}}, "ok"},
+		{"inventory", database.CollectorStatus{ReceivedAt: now, ReportedAt: now, InventoryAgeSeconds: 600}, nil, "degraded"},
 	}
 	for _, c := range cases {
-		if got := assessCollector(c.status, now); got.State != c.want {
+		got := assessCollector(c.status, c.gaps, now)
+		if got.State != c.want {
 			t.Errorf("%s: state %q, want %q (%v)", c.name, got.State, c.want, got.Problems)
+		}
+		for _, issue := range got.Issues {
+			if issue.Title == "" || issue.Detail == "" || (issue.Severity != "info" && issue.Severity != "warning" && issue.Severity != "critical") {
+				t.Errorf("%s: incomplete issue %+v", c.name, issue)
+			}
 		}
 	}
 }
@@ -70,7 +80,10 @@ func TestCollectorsEndpointReportsStatusAndGaps(t *testing.T) {
 	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
 		t.Fatal(err)
 	}
-	if len(response.Collectors) != 1 || response.Collectors[0].State != "ok" {
+	// The gap ended 9 minutes ago: recent loss degrades the collector and is
+	// explained as an issue.
+	if len(response.Collectors) != 1 || response.Collectors[0].State != "degraded" ||
+		len(response.Collectors[0].Issues) != 1 || response.Collectors[0].Issues[0].Code != "loss:capture-drops" || response.Collectors[0].Issues[0].Severity != "warning" {
 		t.Fatalf("collectors = %+v", response.Collectors)
 	}
 	if len(response.Gaps) != 1 {
