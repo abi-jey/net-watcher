@@ -12,7 +12,7 @@ export interface NetworkEvent {
   ICMPDesc: string; Protocol: string;
   SrcKind: string; SrcNamespace: string; SrcName: string; SrcUID: string; SrcWorkload: string; SrcAttribution: string;
   DstKind: string; DstNamespace: string; DstName: string; DstUID: string; DstWorkload: string; DstAttribution: string;
-  ProcessCommand: string; EventCount: number; CollectorID: string;
+  ProcessPID: number; ProcessCommand: string; EventCount: number; CollectorID: string;
 }
 
 export interface EventsResponse {
@@ -36,14 +36,17 @@ export interface CollectorHealth {
   PendingEvents: number; OldestPendingAt: string; LastAcknowledgedAt: string;
   ConsecutiveFailures: number; LastError: string; StorageBytes: number; StorageLimitBytes: number;
   DiscardedEvents: number; MissingEvidence: number; CaptureDrops: number; InventoryAgeSeconds: number; PodWatch: boolean;
-  state: 'ok' | 'degraded' | 'backlog' | 'failing' | 'stale' | string; problems: string[] | null;
+  state: CollectorState; problems: string[] | null; issues: CollectorIssue[] | null;
 }
+export type CollectorState = 'ok' | 'degraded' | 'backlog' | 'failing' | 'stale' | string;
+/** One explained problem. Only critical and warning issues change the state. */
+export interface CollectorIssue { code: string; severity: 'critical' | 'warning' | 'info' | string; title: string; detail: string; action?: string }
 export interface GapSummary { collectorId: string; reason: string; events: number; lost: number; first: string; last: string }
 export interface HealthResponse { generatedAt: string; collectors: CollectorHealth[] | null; gaps: GapSummary[] | null; windowHours: number }
 
 export interface PodSummary {
   namespace: string; name: string; uid: string; workload: string; firstSeen: string; lastSeen: string;
-  egress: number; ingress: number; uncertain: number; replacement: boolean;
+  egress: number; ingress: number; egressBytes: number; ingressBytes: number; uncertain: number; replacement: boolean;
 }
 export interface PodsResponse { from: string; to: string; granularity: 'hour' | 'event'; truncated: boolean; pods: PodSummary[] | null }
 // Go encodes empty slices as null; fields that may be null are typed so.

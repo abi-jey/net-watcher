@@ -40,7 +40,8 @@ type EventsResponse struct {
 
 // handleEvents pages through events in a bounded time window (default 24 h,
 // at most 7 days) with keyset pagination. Filters: eventType (comma list),
-// srcIP, dstIP and q (substrings), from, to, limit and cursor.
+// srcIP, dstIP and q (substring of addresses, names, Kubernetes identity or
+// process), from, to, limit and cursor.
 func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	query := r.URL.Query()
 	from, to, err := timeWindow(r, eventsDefaultWindow)
@@ -79,7 +80,13 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		}
 		if value := query.Get("q"); value != "" {
 			like := "%" + value + "%"
-			db = db.Where("(src_ip LIKE ? OR dst_ip LIKE ? OR hostname LIKE ? OR dns_query LIKE ? OR tls_sni LIKE ?)", like, like, like, like, like)
+			columns := []string{"src_ip", "dst_ip", "hostname", "dns_query", "tls_sni", "src_name", "dst_name", "src_namespace", "dst_namespace", "src_workload", "dst_workload", "process_command"}
+			clauses := make([]string, len(columns))
+			args := make([]interface{}, len(columns))
+			for i, column := range columns {
+				clauses[i], args[i] = column+" LIKE ?", like
+			}
+			db = db.Where("("+strings.Join(clauses, " OR ")+")", args...)
 		}
 		return db
 	}

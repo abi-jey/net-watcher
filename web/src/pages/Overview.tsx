@@ -3,7 +3,7 @@ import { url, type HealthResponse, type StatsResponse, type TimelineResponse, ty
 import { useResource } from '../lib/hooks.ts';
 import { windowRange } from '../lib/window.ts';
 import { age, bytes, count } from '../lib/format.ts';
-import { Badge, Banner, Card, Empty, ErrorBanner, Segmented, Spinner, Stat, UpdatedAt, stateTone } from '../components/ui.tsx';
+import { Banner, Card, Empty, ErrorBanner, Segmented, Spinner, Stat, StateBadge, UpdatedAt, stateHelp, stateTone } from '../components/ui.tsx';
 import { HostBars, TimelineChart } from '../components/charts.tsx';
 
 export function Overview() {
@@ -32,8 +32,11 @@ export function Overview() {
       </div>
       <ErrorBanner error={stats.error ?? health.error} retry={() => { stats.refresh(); health.refresh(); }} />
       {attention.length > 0 && (
-        <Banner tone="warn" action={<a className="button" href="#/collectors">Details</a>}>
-          {attention.map(collector => <div key={collector.CollectorID}><strong>{collector.CollectorID}</strong> is {collector.state}{collector.problems?.length ? `: ${collector.problems.join('; ')}` : ''}</div>)}
+        <Banner tone={attention.some(collector => stateTone(collector.state) === 'danger') ? 'danger' : 'warn'} action={<a className="button" href="#/collectors">Details</a>}>
+          {attention.map(collector => {
+            const reasons = (collector.issues ?? []).filter(issue => issue.severity !== 'info').map(issue => issue.title);
+            return <div key={collector.CollectorID}><strong>{collector.CollectorID}</strong> is {collector.state} ({stateHelp[collector.state]?.summary.toLowerCase() ?? 'needs attention'}){reasons.length ? `: ${reasons.join('; ')}` : ''}.</div>;
+          })}
         </Banner>
       )}
       {warming && <Banner>Hourly summaries are being built ({count(stats.data!.aggregation.cursor)} of {count(stats.data!.aggregation.target)} events). Totals and charts are exact but slower until then.</Banner>}
@@ -71,10 +74,13 @@ export function Overview() {
         </Card>
         <Card title="Collectors">
           {collectors.length ? collectors.map(collector => (
-            <div key={collector.CollectorID} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '4px 0' }}>
-              <Badge tone={stateTone(collector.state)}>{collector.state}</Badge>
-              <span className="cell-main">{collector.CollectorID}</span>
-              <span className="muted small" style={{ marginLeft: 'auto' }}>reported {age(collector.ReportedAt)}</span>
+            <div key={collector.CollectorID} className="collector-line">
+              <StateBadge state={collector.state} />
+              <div className="grow">
+                <div className="cell-main">{collector.CollectorID}</div>
+                <div className="cell-sub">{(collector.issues ?? []).find(issue => issue.severity !== 'info')?.title ?? stateHelp[collector.state]?.summary}</div>
+              </div>
+              <span className="muted small">reported {age(collector.ReportedAt)}</span>
             </div>
           )) : health.loading ? <Spinner /> : <Empty>No collectors have reported. In standalone mode this list is empty.</Empty>}
         </Card>

@@ -64,6 +64,36 @@ export function UpdatedAt({ at, loading }: { at: number | undefined; loading: bo
 const stateTones: Record<string, Tone> = { ok: 'ok', degraded: 'warn', backlog: 'warn', failing: 'danger', stale: 'danger' };
 export function stateTone(state: string): Tone { return stateTones[state] ?? 'muted'; }
 
+/** What each collector state means for the completeness of the record. */
+export const stateHelp: Record<string, { summary: string; meaning: string }> = {
+  ok: { summary: 'Capturing and delivering normally', meaning: 'Reports arrive every 30 seconds, nothing is waiting to be forwarded, and no loss was recorded in the last hour.' },
+  degraded: { summary: 'Running, but the record has holes', meaning: 'Capture and delivery work, but something reduces completeness or attribution: packets dropped in the last hour, stale Kubernetes inventory, a disconnected pod watch, or nearly full local storage. Every loss is stored as a gap record so you can see exactly which periods are incomplete.' },
+  backlog: { summary: 'Behind on forwarding', meaning: 'Events are captured and safely spooled on the node, but the oldest has waited more than 5 minutes to reach the ingester. The central view is incomplete for that period until they arrive; nothing is lost yet.' },
+  failing: { summary: 'Cannot forward events', meaning: 'The last delivery attempts to the ingester failed. Events stay in the local spool and are sent in order once delivery recovers; they are discarded only if the spool reaches its size limit.' },
+  stale: { summary: 'Not reporting', meaning: 'No report for more than 2 minutes: the collector, its node or its network path may be down. What it captures meanwhile is unknown until it reports again.' },
+};
+
+export function StateBadge({ state }: { state: string }) {
+  const help = stateHelp[state];
+  return <Badge tone={stateTone(state)} title={help ? `${help.summary}. ${help.meaning}` : undefined}>{state}</Badge>;
+}
+
+const severityTones: Record<string, 'danger' | 'warn' | 'info'> = { critical: 'danger', warning: 'warn', info: 'info' };
+export function IssueList({ issues, compact = false }: { issues: { code: string; severity: string; title: string; detail: string; action?: string }[]; compact?: boolean }) {
+  if (!issues.length) return null;
+  return (
+    <ul className="issues">
+      {issues.map(issue => (
+        <li key={issue.code} className={`issue ${severityTones[issue.severity] ?? 'info'}`}>
+          <div className="issue-title"><Badge tone={severityTones[issue.severity] ?? 'info'}>{issue.severity}</Badge>{issue.title}</div>
+          {!compact && <p>{issue.detail}</p>}
+          {!compact && issue.action && <p className="issue-action"><strong>What to do:</strong> {issue.action}</p>}
+        </li>
+      ))}
+    </ul>
+  );
+}
+
 const attributionTones: Record<string, Tone> = { exact: 'ok', ambiguous: 'warn', stale: 'warn', node: 'info', service: 'info', legacy: 'muted', none: 'muted' };
 const attributionHelp: Record<string, string> = {
   exact: 'One pod held this address at capture time and the inventory was current.',

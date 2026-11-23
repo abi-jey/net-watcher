@@ -2,6 +2,7 @@ import { lazy, Suspense } from 'react';
 import { useResource, useRoute } from './lib/hooks.ts';
 import type { HealthResponse } from './lib/api.ts';
 import { Spinner } from './components/ui.tsx';
+import { Icon } from './components/icons.tsx';
 import { Overview } from './pages/Overview.tsx';
 
 const Events = lazy(() => import('./pages/Events.tsx').then(module => ({ default: module.Events })));
@@ -11,11 +12,11 @@ const Collectors = lazy(() => import('./pages/Collectors.tsx').then(module => ({
 const NetworkMap = lazy(() => import('./pages/NetworkMap.tsx').then(module => ({ default: module.NetworkMap })));
 
 const nav = [
-  { id: '', label: 'Overview' },
-  { id: 'events', label: 'Events' },
-  { id: 'pods', label: 'Pods' },
-  { id: 'map', label: 'Network map' },
-  { id: 'collectors', label: 'Collectors' },
+  { id: '', label: 'Overview', icon: 'overview' },
+  { id: 'events', label: 'Events', icon: 'events' },
+  { id: 'pods', label: 'Pods', icon: 'pods' },
+  { id: 'map', label: 'Network map', icon: 'map' },
+  { id: 'collectors', label: 'Collectors', icon: 'collectors' },
 ];
 
 export function App() {
@@ -23,7 +24,11 @@ export function App() {
   const [section = '', ...rest] = route.path;
   // One light poll drives the health dot in the sidebar.
   const health = useResource<HealthResponse>('/api/collectors', 60_000);
-  const unhealthy = (health.data?.collectors ?? []).filter(collector => collector.state !== 'ok').length ?? 0;
+  const unhealthy = (health.data?.collectors ?? []).filter(collector => collector.state !== 'ok');
+  const severe = unhealthy.some(collector => collector.state === 'failing' || collector.state === 'stale');
+  const healthTitle = unhealthy.length
+    ? unhealthy.map(collector => `${collector.CollectorID}: ${collector.state}`).join(', ') + ' (see Collectors)'
+    : 'All collectors healthy';
   const version = useResource<{ version: string }>('/api/version');
 
   let page;
@@ -38,11 +43,11 @@ export function App() {
   return (
     <div className="shell">
       <nav className="sidebar" aria-label="Sections">
-        <div className="brand"><img src="./favicon.svg" alt="" />Net Watcher</div>
+        <div className="brand"><img src="./favicon.svg" alt="" /><span>Net Watcher<small>network audit</small></span></div>
         {nav.map(item => (
           <a key={item.id} href={`#/${item.id}`} className={`nav-link ${section === item.id ? 'active' : ''}`} aria-current={section === item.id ? 'page' : undefined}>
-            {item.label}
-            {item.id === 'collectors' && health.data && <span className={`dot ${unhealthy ? 'warn' : 'ok'}`} title={unhealthy ? `${unhealthy} collector(s) need attention` : 'All collectors healthy'} />}
+            <Icon name={item.icon} />{item.label}
+            {item.id === 'collectors' && health.data && <span className={`dot ${severe ? 'danger' : unhealthy.length ? 'warn' : 'ok'}`} title={healthTitle} role="img" aria-label={healthTitle} />}
           </a>
         ))}
         <div className="sidebar-foot">{version.data?.version ? `v${version.data.version.replace(/^v/, '')}` : ''}</div>
