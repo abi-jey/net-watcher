@@ -356,9 +356,10 @@ func (sm *SessionManager) Stop() {
 	sm.flushEvents()
 }
 
-// EnableProcessAttribution enables bounded host-side TLS attribution.
-func (sm *SessionManager) EnableProcessAttribution(root string) error {
-	lookup, err := newProcessAttributor(root, sm.logger, sm.storeEvent)
+// EnableProcessAttribution attributes flows on this node to the processes
+// owning their sockets, reading the host procfs mounted at root.
+func (sm *SessionManager) EnableProcessAttribution(root string, containers ContainerLookup) error {
+	lookup, err := newProcessAttributor(root, containers, sm.logger, sm.appendEvent)
 	if err != nil {
 		return err
 	}
@@ -374,15 +375,9 @@ func (sm *SessionManager) currentProcessLookup() *processAttributor {
 	return sm.processLookup
 }
 
+// queueEvent enriches an event with pod and DNS context, attributes its
+// process when that is known or can be looked up, and buffers it.
 func (sm *SessionManager) queueEvent(event database.NetworkEvent) {
-	if lookup := sm.currentProcessLookup(); lookup != nil && event.EventType == database.EventTLSSNI && lookup.enqueue(event) {
-		return
-	}
-	sm.storeEvent(event)
-}
-
-// storeEvent enriches an event and flushes when the database batch is full.
-func (sm *SessionManager) storeEvent(event database.NetworkEvent) {
 	if sm.db == nil {
 		return
 	}
@@ -416,7 +411,14 @@ func (sm *SessionManager) storeEvent(event database.NetworkEvent) {
 		encoded, _ := json.Marshal(ids)
 		event.DNSResolutionIDs = string(encoded)
 	}
+	if lookup := sm.currentProcessLookup(); lookup != nil && lookup.handle(&event) {
+		return // The attributor appends it after the lookup.
+	}
+	sm.appendEvent(event)
+}
 
+// appendEvent buffers an event and signals a flush when the batch is full.
+func (sm *SessionManager) appendEvent(event database.NetworkEvent) {
 	sm.eventBufferMux.Lock()
 	sm.eventBuffer = append(sm.eventBuffer, event)
 	shouldFlush := len(sm.eventBuffer) >= sm.batchSize

@@ -99,7 +99,7 @@ func main() {
 		kubernetes := startCmd.Bool("kubernetes", false, "Enable read-only Kubernetes inventory")
 		kubeContext := startCmd.String("kube-context", "", "Explicit kubectl context for inventory")
 		ownedCIDRs := startCmd.String("owned-cidrs", "", "Comma-separated operator-owned CIDRs for network map classification")
-		processAttribution := startCmd.Bool("process-attribution", false, "Best-effort host TLS process attribution from read-only procfs")
+		processAttribution := startCmd.Bool("process-attribution", false, "Attribute flows on this node to processes and containers from read-only host procfs (needs CAP_SYS_PTRACE)")
 		processProcRoot := startCmd.String("process-proc-root", "/host/proc", "Read-only host procfs mount for process attribution")
 		includeVirtual := startCmd.Bool("include-virtual", false, "Include bridge/veth interfaces")
 		ingestURL := startCmd.String("ingest-url", "", "Authenticated central ingestion base URL for this collector")
@@ -316,7 +316,11 @@ func main() {
 		w.SetContextLookup(inventory.Attribute)
 		activeWatcher.Store(w)
 		if *processAttribution {
-			if err := w.EnableProcessAttribution(*processProcRoot); err != nil {
+			containers := func(id string) (string, string, string, bool) {
+				ref, ok := inventory.Container(id)
+				return ref.Namespace, ref.Pod, ref.Name, ok
+			}
+			if err := w.EnableProcessAttribution(*processProcRoot, containers); err != nil {
 				log.Warn("Process attribution unavailable; continuing packet capture", "error", err)
 			}
 		}
