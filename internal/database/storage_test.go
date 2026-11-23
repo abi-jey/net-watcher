@@ -13,7 +13,7 @@ func TestPruneToSizeRemovesOldestAndPreservesReferencedEvidence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	at := time.Now().UTC().Add(-2 * time.Hour)
 	referenced := DNSResolution{ResponseTime: at, ExpiresAt: at.Add(time.Hour), Name: "kept.test", IP: "203.0.113.1"}
@@ -109,7 +109,7 @@ func TestCollectorReclaimKeepsPendingEventsAndEvidence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	at := time.Now().UTC().Add(-2 * time.Hour)
 	referenced := DNSResolution{ResponseTime: at, ExpiresAt: at.Add(time.Minute), Name: "pending.test", IP: "203.0.113.1"}
 	orphan := DNSResolution{ResponseTime: at, ExpiresAt: at.Add(time.Minute), Name: "orphan.test", IP: "203.0.113.2"}
