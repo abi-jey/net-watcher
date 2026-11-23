@@ -39,12 +39,12 @@ export function Overview() {
           })}
         </Banner>
       )}
-      {warming && <Banner>Hourly summaries are being built ({count(stats.data!.aggregation.cursor)} of {count(stats.data!.aggregation.target)} events). Totals and charts are exact but slower until then.</Banner>}
+      {warming && <Banner>Hourly summaries are being built ({count(Math.max(0, stats.data!.aggregation.target - stats.data!.aggregation.cursor))} events left). Totals and charts are exact but slower until then.</Banner>}
       <div className="grid stats">
         <Stat label="Events retained" value={stats.data ? count(stats.data.totalEvents) : '—'} hint={stats.data?.firstEvent ? `since ${new Date(stats.data.firstEvent).toLocaleString()}` : undefined} href="#/events" />
         <Stat label="Last event" value={stats.data ? age(stats.data.lastEvent) : '—'} hint="Most recent observation stored" />
         <Stat label="Collectors" value={health.data ? (collectors.length ? `${collectors.length - attention.length}/${collectors.length}` : 'none') : '—'} hint={!collectors.length ? 'standalone capture' : attention.length ? `${attention.length} need attention` : 'all healthy'} href="#/collectors" />
-        <Stat label="Known loss (24 h)" value={health.data ? count(lost) : '—'} hint={gaps.length ? `${gaps.length} gap record(s)` : 'no gaps recorded'} href="#/collectors" />
+        <Stat label="Known loss (24 h)" value={health.data ? count(lost) : '—'} hint={gaps.length ? `${count(gaps.reduce((total, gap) => total + gap.events, 0))} gap records · packets and events` : 'no gaps recorded'} href="#/collectors" />
       </div>
       <Card title="Activity, last 24 hours" actions={<Segmented label="Chart metric" value={metric} onChange={setMetric} options={[{ value: 'eventCount', label: 'Events' }, { value: 'bytes', label: 'Bytes' }]} />}>
         {timeline.data?.data?.length ? <TimelineChart points={timeline.data.data} metric={metric} /> : timeline.loading ? <Spinner /> : <Empty>No activity in this window.</Empty>}

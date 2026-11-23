@@ -86,6 +86,7 @@ input, select {
   border-radius: var(--radius-sm); padding: 6px 10px; min-height: 32px; min-width: 0;
 }
 input::placeholder { color: var(--text-muted); }
+input[type="checkbox"], input[type="radio"] { min-height: 0; padding: 0; width: 15px; height: 15px; }
 label.field { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--text-muted); }
 .segmented { display: inline-flex; border: 1px solid var(--control-border); border-radius: var(--radius-sm); overflow: hidden; }
 .segmented button { border: 0; border-radius: 0; min-height: 30px; background: transparent; }
@@ -210,7 +211,7 @@ button.small { min-height: 26px; padding: 2px 8px; font-size: 12px; }
 .event-list ol { list-style: none; margin: 0; padding: 0; }
 .ev-head, .ev-row {
   display: grid; align-items: start; column-gap: 14px;
-  grid-template-columns: 84px 96px minmax(0, 1.1fr) 16px minmax(0, 1.1fr) minmax(0, 1fr);
+  grid-template-columns: 84px 92px minmax(0, 1fr) 16px minmax(0, 1fr) minmax(200px, 0.8fr);
   grid-template-areas: "time type src arrow dst detail";
 }
 .ev-head { position: sticky; top: 0; z-index: 2; padding: 10px 16px; background: var(--bg-card); border-bottom: 1px solid var(--border); font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-muted); }
@@ -231,9 +232,9 @@ button.small { min-height: 26px; padding: 2px 8px; font-size: 12px; }
 .ep-name { color: var(--text-h); font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 a.ep-name:hover { color: var(--accent-work); }
 .ep-name.mono { font-weight: 400; }
-.ep-sub { display: flex; flex-wrap: wrap; gap: 2px 8px; font-size: 12px; color: var(--text-muted); min-width: 0; }
+.ep-sub { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 8px; font-size: 12px; color: var(--text-muted); min-width: 0; }
 .ep-sub > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
-.ep-sub > span + span::before { content: '·'; margin-right: 8px; color: var(--border); }
+.ep-sub .ns { color: var(--text-secondary); border: 1px solid var(--border-light); border-radius: 4px; padding: 0 5px; line-height: 16px; font-size: 11px; }
 .tag { flex: none; font-size: 10px; font-weight: 700; letter-spacing: 0.5px; text-transform: uppercase; padding: 0 5px; border-radius: 4px; line-height: 16px; border: 1px solid currentColor; opacity: 0.95; }
 .tag.k8s { color: var(--accent-work); }
 .tag.k8s.node { color: var(--text-secondary); }
@@ -281,3 +282,6 @@ dl.states { margin: 0; display: flex; flex-direction: column; gap: 10px; }
 /* ── Pods ──────────────────────────────────────────────────────────────── */
 .ns-group th:first-child { text-transform: none; letter-spacing: 0; font-size: 13px; }
 .ns-title { color: var(--text-h); }
+table.fixed { table-layout: fixed; }
+table.fixed td { overflow: hidden; text-overflow: ellipsis; }
+table.fixed td .cell-main, table.fixed td a { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: block; }

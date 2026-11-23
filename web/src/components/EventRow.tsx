@@ -1,6 +1,6 @@
 import type { NetworkEvent } from '../lib/api.ts';
 import { bytes, dateTime, endpoint, isSet, time } from '../lib/format.ts';
-import { eventLabel, family, interfaceRole, ipScope, scopeLabel } from '../lib/network.ts';
+import { eventLabel, family, interfaceRole, ipScope, scopeLabel, scopeTag } from '../lib/network.ts';
 import { href } from '../lib/hooks.ts';
 import { Attribution } from './ui.tsx';
 import { Icon } from './icons.tsx';
@@ -24,13 +24,13 @@ function Endpoint({ side, name }: { side: Side; name?: string }) {
       <div className="ep">
         <div className="ep-main">
           <span className={`tag k8s ${side.kind}`} title={`Kubernetes ${side.kind}`}>{side.kind}</span>
-          {side.kind === 'pod' && side.uid ? <a href={href(['pods', 'uid', side.uid])} onClick={event => event.stopPropagation()} className="ep-name">{label}</a> : <span className="ep-name">{label}</span>}
+          {side.kind === 'pod' && side.uid ? <a href={href(['pods', 'uid', side.uid])} onClick={event => event.stopPropagation()} className="ep-name" title={`${label}: open pod`}>{label}</a> : <span className="ep-name" title={label}>{label}</span>}
           {side.attribution && side.attribution !== 'exact' && side.kind === 'pod' && <Attribution value={side.attribution} />}
         </div>
         <div className="ep-sub">
-          {side.namespace && <span>{side.namespace}</span>}
-          {side.workload && <span>{side.workload.replace(/^[^/]+\//, '')}</span>}
           <span className="mono">{address}</span>
+          {side.namespace && <span className="ns" title="Namespace">{side.namespace}</span>}
+          {side.workload && <span title={side.workload}>{side.workload.replace(/^[^/]+\//, '')}</span>}
         </div>
       </div>
     );
@@ -39,8 +39,8 @@ function Endpoint({ side, name }: { side: Side; name?: string }) {
   return (
     <div className="ep">
       <div className="ep-main">
-        <span className={`tag scope ${scope}`} title={side.attribution === 'node' ? 'Node or host-network address' : undefined}>{scopeLabel(scope)}</span>
-        <span className={name ? 'ep-name' : 'ep-name mono'}>{name || address}</span>
+        <span className={`tag scope ${scope}`} title={scopeLabel(scope)}>{scopeTag(scope)}</span>
+        <span className={name ? 'ep-name' : 'ep-name mono'} title={name || address}>{name || address}</span>
       </div>
       {name && <div className="ep-sub"><span className="mono">{address}</span></div>}
     </div>

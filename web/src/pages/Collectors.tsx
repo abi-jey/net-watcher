@@ -34,7 +34,7 @@ export function Collectors() {
           const issues = issuesOf(collector);
           return (
             <Card key={collector.CollectorID} className={`collector ${collector.state}`} title={<div className="toolbar"><h2>{collector.CollectorID}</h2><StateBadge state={collector.state} /></div>} actions={<span className="muted small">{collector.Version}</span>}>
-              {help && <p className="state-summary"><strong>{help.summary}.</strong> {collector.state !== 'ok' && help.meaning}</p>}
+              {help && <p className="state-summary">{help.summary}{collector.state !== 'ok' && issues.length === 0 ? `. ${help.meaning}` : '.'}</p>}
               <IssueList issues={issues} />
               <dl className="kv">
                 <dt>Last report</dt><dd title={dateTime(collector.ReportedAt)}>{age(collector.ReportedAt)}</dd>
@@ -58,7 +58,7 @@ export function Collectors() {
       </div>
       <Card title={`Recorded gaps (last ${health.data?.windowHours ?? 24} h)`}>
         <p className="muted small" style={{ marginTop: 0 }}>Every loss of observations is stored as a GAP event with its time span, so an audit can tell which periods are incomplete. Loss within the last hour marks a collector degraded; older loss is shown here for reference.</p>
-        {gaps.length ? (
+        {!health.data ? <Spinner /> : gaps.length ? (
           <div className="table-wrap">
             <table>
               <thead><tr><th>Collector</th><th>Reason</th><th className="num">Bursts</th><th className="num">Lost</th><th>Period</th></tr></thead>

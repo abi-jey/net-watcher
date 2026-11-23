@@ -41,7 +41,7 @@ export function Pods({ query }: { query: URLSearchParams }) {
       </div>
       {warming ? (
         <Banner tone="warn" action={window !== '1h' && <button onClick={() => setQuery(['pods'], { w: '1h', f: filter })}>Show last hour</button>}>
-          The pod summary is still being built ({count(warming.aggregation.cursor)} of {count(warming.aggregation.target)}). Windows longer than an hour become available when it finishes.
+          The pod summary is still being built ({count(Math.max(0, warming.aggregation.target - warming.aggregation.cursor))} events left). Windows longer than an hour become available when it finishes.
         </Banner>
       ) : <ErrorBanner error={pods.error} retry={pods.refresh} />}
       {pods.data && totals.pods > 0 && (
@@ -60,9 +60,10 @@ export function Pods({ query }: { query: URLSearchParams }) {
       {pods.data && !groups.length && <Empty>No pods {filter ? 'match this filter' : 'were attributed in this window'}. Traffic captured before pod attribution was enabled appears only in Events.</Empty>}
       {groups.map(([namespace, items]) => (
         <section key={namespace} className="table-wrap ns-group">
-          <table>
+          <table className="fixed">
+            <colgroup><col style={{ width: '31%' }} /><col style={{ width: '21%' }} /><col style={{ width: '11%' }} /><col style={{ width: '11%' }} /><col style={{ width: '15%' }} /><col style={{ width: '11%' }} /></colgroup>
             <thead><tr>
-              <th style={{ width: '30%' }}><span className="ns-title">{namespace}</span> <span className="muted">· {items.length} pod{items.length === 1 ? '' : 's'}</span></th>
+              <th><span className="ns-title">{namespace}</span> <span className="muted">· {items.length} pod{items.length === 1 ? '' : 's'}</span></th>
               <th>Workload</th>
               <th className="num" title="Connections this pod opened: events where it was the source, and the bytes of those connections in both directions.">Egress</th>
               <th className="num" title="Connections opened to this pod: events where it was the destination, and the bytes of those connections in both directions.">Ingress</th>
@@ -75,11 +76,11 @@ export function Pods({ query }: { query: URLSearchParams }) {
                   <td>{pod.workload ? <a href={href(['pods', 'workload', pod.namespace, pod.workload], { w: window })} onClick={event => event.stopPropagation()}>{pod.workload}</a> : <span className="muted">—</span>}</td>
                   <td className="num"><div className="cell-main">{bytes(pod.egressBytes)}</div><div className="cell-sub">{count(pod.egress)} events</div></td>
                   <td className="num"><div className="cell-main">{bytes(pod.ingressBytes)}</div><div className="cell-sub">{count(pod.ingress)} events</div></td>
-                  <td className="nowrap small">{time(pod.firstSeen)} – {time(pod.lastSeen)}</td>
-                  <td className="toolbar">
+                  <td className="small">{time(pod.firstSeen)} –<br />{time(pod.lastSeen)}</td>
+                  <td><div className="toolbar">
                     {pod.replacement && <Badge tone="info" title="Another pod with the same name was seen in this window (restart or recreation). Each instance is listed separately by UID.">replaced</Badge>}
                     {pod.uncertain > 0 && <Badge tone="warn" title="Events whose attribution was ambiguous (address reuse) or based on stale inventory.">{count(pod.uncertain)} uncertain</Badge>}
-                  </td>
+                  </div></td>
                 </tr>
               ))}
             </tbody>

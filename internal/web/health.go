@@ -134,14 +134,14 @@ func assessCollector(status database.CollectorStatus, gaps []GapSummary, now tim
 			explanation.unit, explanation.title, explanation.detail = "events", "%s observations were lost ("+gap.Reason+")", "The collector recorded a gap of this kind."
 		}
 		severity := "info"
-		when := "in the last 24 hours, most recently at " + gap.Last.UTC().Format(time.RFC3339) + "."
+		when := "Last at " + gap.Last.UTC().Format("15:04:05 MST") + ", " + agoText(now.Sub(gap.Last)) + "."
 		if now.Sub(gap.Last) <= lossRecentWindow {
 			severity = "warning"
 		}
 		recorded = true
 		add(CollectorIssue{Code: "loss:" + gap.Reason, Severity: severity,
 			Title:  fmt.Sprintf(explanation.title, humanCount(gap.Lost)) + fmt.Sprintf(" in %d bursts", gap.Events),
-			Detail: explanation.detail + " This happened " + when,
+			Detail: explanation.detail + " " + when,
 			Action: explanation.action})
 	}
 	if !recorded && (status.DiscardedEvents > 0 || status.CaptureDrops > 0) {
@@ -158,6 +158,17 @@ func assessCollector(status database.CollectorStatus, gaps []GapSummary, now tim
 		}
 	}
 	return health
+}
+
+func agoText(elapsed time.Duration) string {
+	switch {
+	case elapsed < time.Minute:
+		return "less than a minute ago"
+	case elapsed < 2*time.Hour:
+		return fmt.Sprintf("%d minutes ago", int(elapsed.Minutes()))
+	default:
+		return fmt.Sprintf("%d hours ago", int(elapsed.Hours()))
+	}
 }
 
 func humanCount(value int64) string {

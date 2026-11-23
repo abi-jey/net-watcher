@@ -9,6 +9,9 @@ const scopeLabels: Record<Scope, string> = {
   multicast: 'multicast', public: 'internet', unspecified: 'unspecified', unknown: 'unknown',
 };
 export const scopeLabel = (scope: Scope) => scopeLabels[scope];
+const scopeTags: Partial<Record<Scope, string>> = { private: 'private', public: 'internet', tailscale: 'tailscale' };
+/** Short form for tags next to an address. */
+export const scopeTag = (scope: Scope) => scopeTags[scope] ?? scopeLabels[scope];
 
 function ipv4(ip: string): number[] | undefined {
   const parts = ip.split('.').map(Number);

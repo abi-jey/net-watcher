@@ -151,7 +151,7 @@ export function Events({ query }: { query: URLSearchParams }) {
         <div className="table-foot">
           <span className="muted small" aria-live="polite">
             {events.length.toLocaleString()} shown
-            {page && (page.complete && !page.nextCursor ? ' · whole window searched' : ` · searched back to ${dateTime(page.searchedFrom)}`)}
+            {page && (page.complete && !page.nextCursor ? ' · whole window searched' : ` · back to ${dateTime(page.searchedFrom)}`)}
           </span>
           {loading && events.length > 0 && <span className="muted small"><Spinner /> Loading older events…</span>}
           {page?.nextCursor && !paused && !loading && !canAutoLoad && <button onClick={() => void load(page.nextCursor)}>Load older</button>}
