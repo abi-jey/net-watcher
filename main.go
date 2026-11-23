@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -92,6 +93,7 @@ func main() {
 		webHost := startCmd.String("web-host", "", "Web bind address")
 		dbPath := startCmd.String("db", "netwatcher.db", "SQLite database path")
 		maxDBSizeGB := startCmd.Int64("max-db-size-gb", 10, "Maximum central/standalone SQLite size in GiB")
+		maxCollectorGB := startCmd.Int64("max-collector-db-size-gb", 5, "Maximum collector SQLite size in GiB; oldest unforwarded events beyond it are replaced by a GAP event")
 		storageCheckInterval := startCmd.Duration("storage-check-interval", 10*time.Minute, "Storage maintenance interval")
 		capture := startCmd.Bool("capture", true, "Capture packets; disable to view stored data")
 		kubernetes := startCmd.Bool("kubernetes", false, "Enable read-only Kubernetes inventory")
@@ -112,6 +114,10 @@ func main() {
 		}
 		if *maxDBSizeGB <= 0 || *maxDBSizeGB > (1<<63-1)/(1<<30) {
 			log.Error("--max-db-size-gb must be a positive number of GiB")
+			os.Exit(1)
+		}
+		if *maxCollectorGB <= 0 || *maxCollectorGB > (1<<63-1)/(1<<30) {
+			log.Error("--max-collector-db-size-gb must be a positive number of GiB")
 			os.Exit(1)
 		}
 		if *storageCheckInterval < 10*time.Minute {
@@ -194,7 +200,13 @@ func main() {
 			go func() { defer close(backfillDone); db.RunSummaryBackfill(ctx) }()
 			defer func() { cancel(); <-backfillDone }()
 		}
-		go maintainStorage(ctx, db, *ingestURL, *maxDBSizeGB*(1<<30), *storageCheckInterval)
+		storageLimit := *maxDBSizeGB * (1 << 30)
+		if *ingestURL != "" {
+			storageLimit = *maxCollectorGB * (1 << 30)
+		}
+		go maintainStorage(ctx, db, *ingestURL, storageLimit, *storageCheckInterval)
+		var activeWatcher atomic.Pointer[watcher.Watcher]
+		inventory := kube.New(nil)
 
 		// Handle shutdown signals
 		sigChan := make(chan os.Signal, 1)
@@ -204,10 +216,6 @@ func main() {
 			log.Info("Shutting down...")
 			cancel()
 		}()
-		if *ingestURL != "" {
-			forwarder := &ingest.Forwarder{DB: db, URL: *ingestURL, Token: *ingestToken, CollectorID: *collectorID, Logger: logger}
-			go forwarder.Run(ctx)
-		}
 		if *ingestPort > 0 {
 			// A central commit must survive power loss before its durable queue
 			// entry is deleted; NORMAL synchronization cannot guarantee that handoff.
@@ -238,7 +246,6 @@ func main() {
 				}
 			}()
 		}
-		inventory := kube.New(nil)
 		if *kubernetes {
 			var source kube.Source
 			if *kubeContext != "" {
@@ -257,6 +264,22 @@ func main() {
 			}
 			stop()
 			go inventory.Run(ctx)
+		}
+		// Start after inventory setup: the health callback reads the final index.
+		if *ingestURL != "" {
+			forwarder := &ingest.Forwarder{DB: db, URL: *ingestURL, Token: *ingestToken, CollectorID: *collectorID, Logger: logger,
+				Version: version, StorageLimit: storageLimit, Stats: func() ingest.LocalStats {
+					stats := ingest.LocalStats{InventoryAgeSeconds: -1}
+					if w := activeWatcher.Load(); w != nil {
+						captured := w.Stats()
+						stats.DiscardedEvents, stats.CaptureDrops = captured.DiscardedEvents, captured.CaptureDrops
+					}
+					if status := inventory.Status(); status.Enabled && !status.LastSync.IsZero() {
+						stats.InventoryAgeSeconds = int64(time.Since(status.LastSync).Seconds())
+					}
+					return stats
+				}}
+			go forwarder.Run(ctx)
 		}
 
 		// Start web server if enabled
@@ -289,6 +312,7 @@ func main() {
 			return
 		}
 		w.SetContextLookup(inventory.Lookup)
+		activeWatcher.Store(w)
 		if *processAttribution {
 			if err := w.EnableProcessAttribution(*processProcRoot); err != nil {
 				log.Warn("Process attribution unavailable; continuing packet capture", "error", err)
@@ -328,6 +352,12 @@ func maintainStorage(ctx context.Context, db *database.DB, ingestURL string, max
 				log.Error("Could not reclaim collector storage", "error", err)
 			} else if removed > 0 {
 				log.Info("Discarded acknowledged collector events", "removed", removed)
+			}
+			discarded, err := db.EnforceCollectorLimit(ingestURL, maxBytes)
+			if err != nil {
+				log.Error("Could not enforce collector size limit", "error", err)
+			} else if discarded > 0 {
+				log.Warn("Collector over size limit; discarded oldest unforwarded events and recorded a GAP", "discarded", discarded, "limit_bytes", maxBytes)
 			}
 		} else {
 			removed, err := db.PruneToSize(maxBytes)

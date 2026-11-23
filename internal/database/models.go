@@ -16,6 +16,9 @@ const (
 	EventTLSSNI   EventType = "TLS_SNI"
 	EventICMP     EventType = "ICMP"
 	EventTimeout  EventType = "TIMEOUT"
+	// EventGap records observations that were knowingly lost or withheld, so an
+	// audit can distinguish "nothing happened" from "nothing was recorded".
+	EventGap EventType = "GAP"
 
 	// Compacted event types
 	EventTCP           EventType = "TCP"    // Merged TCP_START + TCP_END
@@ -51,6 +54,9 @@ type NetworkEvent struct {
 	DNSQueryTime     time.Time
 	DNSRecords       string // JSON answer records including owner names and TTLs.
 	DNSResolutionIDs string // JSON IDs of client-scoped, TTL-valid evidence at capture time.
+	// DNSEvidenceMissing counts referenced resolutions that were unavailable when
+	// the event was forwarded; the remaining references stay verifiable.
+	DNSEvidenceMissing int
 
 	// TLS specific
 	TLSSNI string `gorm:"index"`
@@ -80,6 +86,43 @@ type NetworkEvent struct {
 	OriginalIDs string // Comma-separated original event IDs (for audit)
 	EventCount  int64  // Count of events (for hourly summaries)
 	CollectorID string `gorm:"index"` // Empty for standalone/local observations.
+}
+
+// Gap reasons describe why observations are absent for an interval.
+const (
+	GapCaptureDrops     = "capture-drops"         // Kernel ring dropped packets before decoding.
+	GapWriteFailure     = "write-buffer-overflow" // Local writes failed long enough to overflow the retry buffer.
+	GapCollectorLimit   = "collector-size-limit"  // Pending events were discarded to respect the collector size limit.
+	GapRejectedByIngest = "rejected-by-ingester"  // The ingester permanently rejected a single event.
+)
+
+// NewGapEvent describes a span of lost observations. EventCount holds the number
+// of lost events or packets, Reason the cause and Timestamp/EndTime the span.
+func NewGapEvent(reason string, count int64, from, to time.Time, iface string) NetworkEvent {
+	if to.Before(from) {
+		from, to = to, from
+	}
+	return NetworkEvent{Timestamp: from, EndTime: to, EventType: EventGap, Reason: reason, EventCount: count, Interface: iface}
+}
+
+// CollectorStatus is the latest health report from a collector, kept centrally so
+// a silent collector is visible instead of indistinguishable from a quiet one.
+type CollectorStatus struct {
+	CollectorID         string `gorm:"primaryKey"`
+	Version             string
+	ReportedAt          time.Time
+	ReceivedAt          time.Time `gorm:"index"`
+	PendingEvents       int64
+	OldestPendingAt     time.Time
+	LastAcknowledgedAt  time.Time
+	ConsecutiveFailures int64
+	LastError           string
+	StorageBytes        int64
+	StorageLimitBytes   int64
+	DiscardedEvents     int64 // Cumulative events knowingly lost by this collector process.
+	MissingEvidence     int64 // Cumulative DNS references forwarded as missing.
+	CaptureDrops        int64 // Cumulative kernel packet drops.
+	InventoryAgeSeconds int64 // -1 when Kubernetes attribution is disabled.
 }
 
 // DNSResolution is immutable historical evidence from an observed query/response pair.

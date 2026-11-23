@@ -27,6 +27,9 @@ type Watcher struct {
 }
 
 // SetContextLookup installs optional inventory enrichment before capture starts.
+// Stats reports capture loss counters for health reporting for struct: [Watcher].
+func (w *Watcher) Stats() Stats { return w.sessionManager.Stats() }
+
 func (w *Watcher) SetContextLookup(lookup func(string, uint16, string) string) {
 	w.sessionManager.contextLookup = lookup
 }
@@ -197,6 +200,7 @@ func (w *Watcher) monitorDrops(ctx context.Context, handle *afpacket.TPacket, if
 	defer ticker.Stop()
 
 	var lastDrops, lastTotal uint64
+	lastCheck := time.Now()
 
 	for {
 		select {
@@ -216,7 +220,9 @@ func (w *Watcher) monitorDrops(ctx context.Context, handle *afpacket.TPacket, if
 			newDrops := drops - lastDrops
 			newPackets := total - lastTotal
 
+			now := time.Now()
 			if newDrops > 0 {
+				w.sessionManager.RecordCaptureDrops(ifaceName, int64(newDrops), lastCheck, now)
 				dropRate := float64(0)
 				if newPackets > 0 {
 					dropRate = float64(newDrops) / float64(newPackets+newDrops) * 100
@@ -237,6 +243,7 @@ func (w *Watcher) monitorDrops(ctx context.Context, handle *afpacket.TPacket, if
 
 			lastDrops = drops
 			lastTotal = total
+			lastCheck = now
 		}
 	}
 }

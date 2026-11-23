@@ -12,11 +12,13 @@ import (
 	"math"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/abja/net-watcher/internal/database"
 	"github.com/charmbracelet/log"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 const (
@@ -30,18 +32,69 @@ const (
 	keyInsertSize        = 200
 )
 
-// Batch is an authenticated, idempotent request from one collector.
+// Batch is an authenticated, idempotent request from one collector. A batch
+// without events is a heartbeat that only carries Health.
 type Batch struct {
 	CollectorID string                   `json:"collectorId"`
 	Events      []database.NetworkEvent  `json:"events"`
 	Resolutions []database.DNSResolution `json:"resolutions"`
+	Health      *Health                  `json:"health,omitempty"`
 }
+
+// Health is a collector's self-reported state, sent with every request.
+type Health struct {
+	Version             string    `json:"version"`
+	ReportedAt          time.Time `json:"reportedAt"`
+	PendingEvents       int64     `json:"pendingEvents"`
+	OldestPendingAt     time.Time `json:"oldestPendingAt"`
+	LastAcknowledgedAt  time.Time `json:"lastAcknowledgedAt"`
+	ConsecutiveFailures int64     `json:"consecutiveFailures"`
+	LastError           string    `json:"lastError"`
+	StorageBytes        int64     `json:"storageBytes"`
+	StorageLimitBytes   int64     `json:"storageLimitBytes"`
+	DiscardedEvents     int64     `json:"discardedEvents"`
+	MissingEvidence     int64     `json:"missingEvidence"`
+	CaptureDrops        int64     `json:"captureDrops"`
+	InventoryAgeSeconds int64     `json:"inventoryAgeSeconds"`
+}
+
+// LocalStats supplies capture-side counters to a Forwarder's health report.
+type LocalStats struct {
+	DiscardedEvents     int64
+	CaptureDrops        int64
+	InventoryAgeSeconds int64
+}
+
+// rejectHeader marks a 400 response as a permanent rejection of the batch
+// content, as opposed to a proxy or version mismatch that may be transient.
+const rejectHeader = "X-Net-Watcher-Reject"
 
 // Receiver accepts collector batches into a central database.
 type Receiver struct {
 	DB    *database.DB
 	Token string
 	Queue *Queue
+
+	receivedMu sync.Mutex
+	received   map[string]time.Time
+}
+
+func (r *Receiver) markReceived(collector string, at time.Time) {
+	r.receivedMu.Lock()
+	defer r.receivedMu.Unlock()
+	if r.received == nil {
+		r.received = make(map[string]time.Time)
+	}
+	r.received[collector] = at
+}
+
+func (r *Receiver) receivedAt(collector string) time.Time {
+	r.receivedMu.Lock()
+	defer r.receivedMu.Unlock()
+	if at, ok := r.received[collector]; ok {
+		return at
+	}
+	return time.Now().UTC()
 }
 
 // Handler returns the authenticated ingestion handler.
@@ -79,9 +132,19 @@ func (r *Receiver) handleBatch(w http.ResponseWriter, request *http.Request) {
 	var batch Batch
 	decoder := json.NewDecoder(http.MaxBytesReader(w, request.Body, maxBatchBytes))
 	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&batch); err != nil || !validBatch(batch) {
+	if err := decoder.Decode(&batch); err != nil {
 		http.Error(w, "invalid ingest batch", http.StatusBadRequest)
 		return
+	}
+	if !validBatch(batch) {
+		w.Header().Set(rejectHeader, "content")
+		http.Error(w, "invalid ingest batch", http.StatusBadRequest)
+		return
+	}
+	if batch.Health != nil {
+		// Server time, so a collector with a skewed clock still looks fresh or stale correctly.
+		batch.Health.ReportedAt = batch.Health.ReportedAt.UTC()
+		r.markReceived(batch.CollectorID, time.Now().UTC())
 	}
 	if r.Queue != nil {
 		if err := r.Queue.enqueue(request.Context(), batch); err != nil {
@@ -234,20 +297,69 @@ func (r *Receiver) store(ctx context.Context, batch Batch) error {
 				return err
 			}
 		}
-		return database.ApplyEventSummaries(tx, newEvents, 1)
+		if err := database.ApplyEventSummaries(tx, newEvents, 1); err != nil {
+			return err
+		}
+		return r.storeHealth(tx, batch)
 	})
+}
+
+func (r *Receiver) storeHealth(tx *gorm.DB, batch Batch) error {
+	h := batch.Health
+	if h == nil {
+		return nil
+	}
+	status := database.CollectorStatus{
+		CollectorID: batch.CollectorID, Version: h.Version, ReportedAt: h.ReportedAt, ReceivedAt: r.receivedAt(batch.CollectorID),
+		PendingEvents: h.PendingEvents, OldestPendingAt: h.OldestPendingAt, LastAcknowledgedAt: h.LastAcknowledgedAt,
+		ConsecutiveFailures: h.ConsecutiveFailures, LastError: truncate(h.LastError, 512), StorageBytes: h.StorageBytes,
+		StorageLimitBytes: h.StorageLimitBytes, DiscardedEvents: h.DiscardedEvents, MissingEvidence: h.MissingEvidence,
+		CaptureDrops: h.CaptureDrops, InventoryAgeSeconds: h.InventoryAgeSeconds,
+	}
+	// Queued batches may drain out of order after a restart; never let an older
+	// report overwrite a newer one.
+	return tx.Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "collector_id"}},
+		Where:     clause.Where{Exprs: []clause.Expression{clause.Expr{SQL: "excluded.reported_at >= collector_statuses.reported_at"}}},
+		UpdateAll: true,
+	}).Create(&status).Error
+}
+
+func truncate(value string, limit int) string {
+	if len(value) <= limit {
+		return value
+	}
+	return value[:limit]
 }
 
 // Forwarder uploads locally persisted events. A cursor advances only after the
 // receiver acknowledges the whole batch, so restarts and retries are safe.
+//
+// Delivery never blocks permanently on one event: references to DNS evidence
+// that no longer exists are forwarded as missing, and an event the ingester
+// explicitly rejects on its own is skipped and recorded as a GAP.
 type Forwarder struct {
 	DB          *database.DB
 	URL         string
 	Token       string
 	CollectorID string
-	Logger      *log.Logger
-	client      *http.Client
+	Version     string
+	// StorageLimit is reported in health; enforcement happens in maintenance.
+	StorageLimit int64
+	Stats        func() LocalStats
+	Logger       *log.Logger
+	client       *http.Client
+
+	limit               int
+	consecutiveFailures int64
+	lastError           string
+	lastAcknowledged    time.Time
+	lastHeartbeat       time.Time
+	missingEvidence     int64
 }
+
+// heartbeatInterval keeps the central view of an idle collector fresh.
+const heartbeatInterval = 30 * time.Second
 
 func (f *Forwarder) Run(ctx context.Context) {
 	if f.client == nil {
@@ -256,7 +368,9 @@ func (f *Forwarder) Run(ctx context.Context) {
 	for {
 		sent, err := f.send(ctx)
 		if err != nil {
-			f.Logger.Warn("Ingest delivery failed; will retry", "error", err)
+			f.consecutiveFailures++
+			f.lastError = err.Error()
+			f.Logger.Warn("Ingest delivery failed; will retry", "error", err, "consecutive_failures", f.consecutiveFailures)
 		}
 		if sent && err == nil {
 			// Acknowledged batches can be drained without an artificial backlog delay.
@@ -272,6 +386,28 @@ func (f *Forwarder) Run(ctx context.Context) {
 	}
 }
 
+func (f *Forwarder) health() *Health {
+	h := &Health{Version: f.Version, ReportedAt: time.Now().UTC(), LastAcknowledgedAt: f.lastAcknowledged,
+		ConsecutiveFailures: f.consecutiveFailures, LastError: f.lastError, StorageLimitBytes: f.StorageLimit,
+		MissingEvidence: f.missingEvidence, InventoryAgeSeconds: -1}
+	var cursor database.IngestCursor
+	_ = f.DB.Where("endpoint = ?", f.URL).First(&cursor).Error
+	var next database.NetworkEvent
+	if err := f.DB.Select("id, timestamp").Where("id > ?", cursor.EventID).Order("id ASC").Limit(1).Find(&next).Error; err == nil && next.ID != 0 {
+		h.OldestPendingAt = next.Timestamp
+		var last uint
+		// IDs are allocated sequentially, so this approximates the backlog without a full count.
+		_ = f.DB.Raw("SELECT COALESCE(MAX(id), 0) FROM network_events").Scan(&last).Error
+		h.PendingEvents = int64(last) - int64(cursor.EventID)
+	}
+	h.StorageBytes, _ = f.DB.StorageBytes()
+	if f.Stats != nil {
+		stats := f.Stats()
+		h.DiscardedEvents, h.CaptureDrops, h.InventoryAgeSeconds = stats.DiscardedEvents, stats.CaptureDrops, stats.InventoryAgeSeconds
+	}
+	return h
+}
+
 func (f *Forwarder) send(ctx context.Context) (bool, error) {
 	if f.URL == "" || f.Token == "" || f.CollectorID == "" {
 		return false, nil
@@ -279,19 +415,34 @@ func (f *Forwarder) send(ctx context.Context) (bool, error) {
 	if f.client == nil {
 		f.client = &http.Client{Timeout: 15 * time.Second}
 	}
+	if f.limit <= 0 || f.limit > maxEvents {
+		f.limit = maxEvents
+	}
 	var cursor database.IngestCursor
 	if err := f.DB.Where("endpoint = ?", f.URL).First(&cursor).Error; err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 		return false, err
 	}
 	var events []database.NetworkEvent
-	if err := f.DB.Where("id > ?", cursor.EventID).Order("id ASC").Limit(maxEvents).Find(&events).Error; err != nil || len(events) == 0 {
+	if err := f.DB.Where("id > ?", cursor.EventID).Order("id ASC").Limit(f.limit).Find(&events).Error; err != nil {
+		return false, err
+	}
+	if len(events) == 0 {
+		if time.Since(f.lastHeartbeat) < heartbeatInterval {
+			return false, nil
+		}
+		_, err := f.post(ctx, Batch{CollectorID: f.CollectorID, Events: []database.NetworkEvent{}, Resolutions: []database.DNSResolution{}, Health: f.health()})
+		if err == nil {
+			f.lastHeartbeat = time.Now()
+			f.consecutiveFailures, f.lastError = 0, ""
+		}
 		return false, err
 	}
 	var body []byte
+	var missing int64
 	for {
 		var resolutionCount int
 		var err error
-		body, resolutionCount, err = f.marshalBatch(events)
+		body, resolutionCount, missing, err = f.marshalBatch(events)
 		if err != nil {
 			return false, err
 		}
@@ -299,10 +450,61 @@ func (f *Forwarder) send(ctx context.Context) (bool, error) {
 			break
 		}
 		if len(events) == 1 {
-			return false, fmt.Errorf("event %d and its DNS evidence exceed ingestion batch limits", events[0].ID)
+			return f.skip(events[0], "event and its DNS evidence exceed ingestion batch limits")
 		}
 		events = events[:len(events)/2]
 	}
+	rejected, err := f.postBody(ctx, body)
+	if rejected {
+		// Narrow down to the offending event instead of retrying the same batch forever.
+		if len(events) == 1 {
+			return f.skip(events[0], err.Error())
+		}
+		f.limit = max(1, len(events)/2)
+		return true, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if err := f.DB.RecordAcknowledgment(f.URL, events[len(events)-1].ID); err != nil {
+		return false, err
+	}
+	f.missingEvidence += missing
+	f.lastAcknowledged, f.lastHeartbeat = time.Now().UTC(), time.Now()
+	f.consecutiveFailures, f.lastError = 0, ""
+	f.limit = min(maxEvents, f.limit*2)
+	return true, nil
+}
+
+// skip permanently passes over one event the ingester cannot accept, replacing
+// it with a GAP event so the omission is itself forwarded and auditable.
+func (f *Forwarder) skip(event database.NetworkEvent, reason string) (bool, error) {
+	f.Logger.Error("Skipping event rejected by ingester", "event_id", event.ID, "type", event.EventType, "reason", reason)
+	gap := database.NewGapEvent(database.GapRejectedByIngest, 1, event.Timestamp, event.Timestamp, event.Interface)
+	if err := f.DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Create(&gap).Error; err != nil {
+			return err
+		}
+		return (&database.DB{DB: tx}).RecordAcknowledgment(f.URL, event.ID)
+	}); err != nil {
+		return false, err
+	}
+	f.limit = maxEvents
+	return true, nil
+}
+
+func (f *Forwarder) post(ctx context.Context, batch Batch) (bool, error) {
+	body, err := json.Marshal(batch)
+	if err != nil {
+		return false, err
+	}
+	return f.postBody(ctx, body)
+}
+
+// postBody returns rejected=true only when the ingester explicitly marks the
+// content as permanently invalid. Other failures, including a 400 from an older
+// ingester or a proxy, are retried without skipping data.
+func (f *Forwarder) postBody(ctx context.Context, body []byte) (bool, error) {
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(f.URL, "/")+batchPath, bytes.NewReader(body))
 	if err != nil {
 		return false, err
@@ -314,27 +516,34 @@ func (f *Forwarder) send(ctx context.Context) (bool, error) {
 		return false, err
 	}
 	response.Body.Close()
-	if response.StatusCode != http.StatusNoContent {
-		return false, fmt.Errorf("ingest endpoint returned HTTP %d", response.StatusCode)
+	if response.StatusCode == http.StatusNoContent {
+		return false, nil
 	}
-	if err := f.DB.RecordAcknowledgment(f.URL, events[len(events)-1].ID); err != nil {
-		return false, err
-	}
-	return true, nil
+	err = fmt.Errorf("ingest endpoint returned HTTP %d", response.StatusCode)
+	return response.StatusCode == http.StatusBadRequest && response.Header.Get(rejectHeader) != "", err
 }
 
-func (f *Forwarder) marshalBatch(events []database.NetworkEvent) ([]byte, int, error) {
+// marshalBatch bundles the DNS evidence referenced by events. References to
+// evidence that no longer exists locally are removed from the forwarded event
+// and counted in DNSEvidenceMissing instead of blocking delivery.
+func (f *Forwarder) marshalBatch(events []database.NetworkEvent) ([]byte, int, int64, error) {
 	resolutionIDs := make(map[uint]bool)
-	for _, event := range events {
+	references := make([][]uint, len(events))
+	for index, event := range events {
 		var ids []uint
 		if event.DNSResolutionIDs != "" && json.Unmarshal([]byte(event.DNSResolutionIDs), &ids) != nil {
-			return nil, 0, fmt.Errorf("decode local DNS evidence for event %d", event.ID)
+			// Undecodable references cannot be verified; forward the event without them.
+			events[index].DNSResolutionIDs = ""
+			events[index].DNSEvidenceMissing++
+			continue
 		}
+		references[index] = ids
 		for _, id := range ids {
 			resolutionIDs[id] = true
 		}
 	}
 	resolutions := make([]database.DNSResolution, 0, len(resolutionIDs))
+	found := make(map[uint]bool, len(resolutionIDs))
 	if len(resolutionIDs) > 0 {
 		ids := make([]uint, 0, len(resolutionIDs))
 		for id := range resolutionIDs {
@@ -343,17 +552,36 @@ func (f *Forwarder) marshalBatch(events []database.NetworkEvent) ([]byte, int, e
 		for start := 0; start < len(ids); start += 500 {
 			var rows []database.DNSResolution
 			if err := f.DB.Where("id IN ?", ids[start:min(start+500, len(ids))]).Find(&rows).Error; err != nil {
-				return nil, 0, err
+				return nil, 0, 0, err
+			}
+			for _, row := range rows {
+				found[row.ID] = true
 			}
 			resolutions = append(resolutions, rows...)
 		}
-		if len(resolutions) != len(resolutionIDs) {
-			return nil, 0, fmt.Errorf("%d of %d referenced DNS resolutions are unavailable", len(resolutionIDs)-len(resolutions), len(resolutionIDs))
+	}
+	var missing int64
+	if len(found) != len(resolutionIDs) {
+		for index, ids := range references {
+			kept := ids[:0:0]
+			for _, id := range ids {
+				if found[id] {
+					kept = append(kept, id)
+				} else {
+					events[index].DNSEvidenceMissing++
+					missing++
+				}
+			}
+			if len(kept) != len(ids) {
+				encoded, _ := json.Marshal(kept)
+				events[index].DNSResolutionIDs = string(encoded)
+			}
 		}
+		f.Logger.Warn("Forwarding events with missing DNS evidence", "missing_references", missing)
 	}
-	body, err := json.Marshal(Batch{CollectorID: f.CollectorID, Events: events, Resolutions: resolutions})
+	body, err := json.Marshal(Batch{CollectorID: f.CollectorID, Events: events, Resolutions: resolutions, Health: f.health()})
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, 0, err
 	}
-	return body, len(resolutions), nil
+	return body, len(resolutions), missing, nil
 }
