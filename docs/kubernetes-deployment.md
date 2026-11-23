@@ -285,6 +285,14 @@ up in the socket table of that pod's network namespace (or the host's), then
 finds which of that pod's processes holds the socket. For the receiving side
 of a connection not yet accepted, the listening socket identifies the server.
 Later events of the same connection (TLS, end, timeout) reuse the result.
+A process running as another (non-root) user keeps `/proc/<pid>/fd` private to
+that user, which `CAP_SYS_PTRACE` does not override. For such sockets the
+socket table's owner uid is matched against the pod's processes: if every
+process of that uid in the namespace has the same container and command, those
+are recorded with PID 0 ("PID not readable"); otherwise the connection stays
+unattributed. Adding `CAP_DAC_READ_SEARCH` would make those descriptors
+readable and record exact PIDs, at the cost of letting the collector read any
+file it can reach through `/host/proc`.
 All `/proc` reads happen on one background worker within a CPU-time budget of
 about 3% of one core, so packet capture never waits for it; lookups beyond the
 budget are skipped and counted. The collector logs counters every 30 seconds

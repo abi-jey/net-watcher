@@ -106,14 +106,17 @@ export function EventRow({ event, expanded, onToggle }: { event: NetworkEvent; e
 function processTitle(event: NetworkEvent): string {
   const role = event.ProcessSide === 'dst' ? 'accepted this connection (owns the destination socket)' : 'opened this connection (owns the source socket)';
   const where = event.ProcessPod ? ` in pod ${event.ProcessPod}${event.ProcessContainer ? `, container ${event.ProcessContainer}` : ''}` : ' on the node (outside any pod)';
-  return `Process that ${role}${where}${event.ProcessPID ? `; host PID ${event.ProcessPID}` : ''}`;
+  return `Process that ${role}${where}${event.ProcessPID ? `; host PID ${event.ProcessPID}` : '; identified by its socket owner, PID not readable'}`;
 }
 
 function ProcessFacts({ event }: { event: NetworkEvent }) {
   return <>
     <dt>Process</dt>
     <dd>
-      <span className="mono">{event.ProcessCommand || 'unknown'}</span>{event.ProcessPID ? <span className="muted"> · host PID {event.ProcessPID}</span> : null}
+      <span className="mono">{event.ProcessCommand || 'unknown'}</span>
+      {event.ProcessPID
+        ? <span className="muted"> · host PID {event.ProcessPID}</span>
+        : <span className="muted" title="The process runs as another user, so its descriptors are private; its socket's owner identifies one container and command."> · PID not readable</span>}
       <div className="muted small">{event.ProcessSide === 'dst' ? 'accepted' : 'opened'} this connection{event.ProcessContainer ? ` · container ${event.ProcessContainer}` : ''}{event.ProcessPod ? '' : ' · node process outside any pod'}</div>
     </dd>
   </>;

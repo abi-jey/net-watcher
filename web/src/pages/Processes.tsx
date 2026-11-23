@@ -83,6 +83,10 @@ export function Processes({ query }: { query: URLSearchParams }) {
           <li>the collector's lookup budget (about 3% of one CPU) was spent during a burst,</li>
           <li>the traffic was captured before process attribution was enabled.</li>
         </ul>
+        <p className="muted small">
+          Processes running as a non-root user keep their descriptors private. For those, the socket's owner is matched against the pod's processes:
+          when all processes of that user in the pod share one container and command, they are named without a PID; otherwise the connection stays unattributed.
+        </p>
         <p className="muted small">The kernel's command name (up to 15 characters) is recorded, never command-line arguments. A process is identified by node, pod, container and command, so restarts with new PIDs stay one row.</p>
       </details>
       {result.data?.granularity === 'hour' && <p className="muted small">Totals cover whole hours from {dateTime(result.data.from)} to {dateTime(result.data.to)}.</p>}

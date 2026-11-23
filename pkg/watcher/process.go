@@ -3,6 +3,7 @@ package watcher
 import (
 	"bufio"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net"
 	"net/netip"
@@ -145,7 +146,7 @@ type processAttributor struct {
 	attempted, matched, inherited, notLocal atomic.Uint64
 	budgetHit, overBudget, expired          atomic.Uint64
 	queueFull, noSocket, snapshots, indexed atomic.Uint64
-	knownMiss, noOwner                      atomic.Uint64
+	knownMiss, noOwner, byOwner             atomic.Uint64
 	work, snapshotWork                      atomic.Int64 // Nanoseconds spent reading /proc.
 }
 
@@ -302,12 +303,13 @@ func (a *processAttributor) report() {
 	budgetHit, overBudget, expired := a.budgetHit.Swap(0), a.overBudget.Swap(0), a.expired.Swap(0)
 	queueFull, noSocket, snapshots, work := a.queueFull.Swap(0), a.noSocket.Swap(0), a.snapshots.Swap(0), a.work.Swap(0)
 	indexed, snapshotWork, knownMiss, noOwner := a.indexed.Swap(0), a.snapshotWork.Swap(0), a.knownMiss.Swap(0), a.noOwner.Swap(0)
+	byOwner := a.byOwner.Swap(0)
 	a.exampleMu.Lock()
 	examples := a.examples
 	a.examples = nil
 	a.exampleMu.Unlock()
 	if attempted+inherited+overBudget+expired+queueFull > 0 {
-		a.logger.Info("Process attribution", "attempted", attempted, "matched", matched, "from_index", indexed, "inherited", inherited,
+		a.logger.Info("Process attribution", "attempted", attempted, "matched", matched, "from_index", indexed, "by_owner", byOwner, "inherited", inherited,
 			"no_socket", noSocket, "no_owner", noOwner, "known_miss", knownMiss, "not_local", notLocal, "deadline_hit", budgetHit, "over_budget", overBudget,
 			"expired", expired, "queue_full", queueFull, "flows", flows, "snapshots", snapshots,
 			"snapshot_ms", time.Duration(snapshotWork).Milliseconds(), "lookup_ms", time.Duration(work).Milliseconds(), "misses", strings.Join(examples, "; "))
@@ -490,6 +492,7 @@ func (a *processAttributor) lookup(event database.NetworkEvent, c candidate, dea
 		return a.identify(event, c, proc), true
 	}
 	followed := 0
+	unreadable := map[int]bool{}
 	for _, proc := range c.procs {
 		if time.Now().After(deadline) || followed >= processMaxFDLinks {
 			a.budgetHit.Add(1)
@@ -499,10 +502,17 @@ func (a *processAttributor) lookup(event database.NetworkEvent, c candidate, dea
 		if c.host && proc.uid != owner {
 			continue // The socket's owner uid narrows the host's many processes.
 		}
-		if !a.holdsSocket(proc.pid, target, deadline, &followed) {
-			continue
+		found, readable := a.holdsSocket(proc.pid, target, deadline, &followed)
+		if found {
+			return a.identify(event, c, proc), true
 		}
-		return a.identify(event, c, proc), true
+		if !readable {
+			unreadable[proc.pid] = true
+		}
+	}
+	if identity, ok := a.identifyByOwner(event, c, owner, unreadable); ok {
+		a.byOwner.Add(1)
+		return identity, true
 	}
 	a.noOwner.Add(1)
 	a.example(event, c, fmt.Sprintf("socket %s (uid %d) held by none of %d processes (%d links read)", inode, owner, len(c.procs), followed))
@@ -555,6 +565,44 @@ func (a *processAttributor) indexedOwner(target string, procs []procEntry) (proc
 	return procEntry{}, false
 }
 
+// identifyByOwner names the process when its descriptors cannot be read: a
+// process running as another user keeps /proc/<pid>/fd private to that user,
+// which CAP_SYS_PTRACE does not override. The socket table records the
+// socket's owner uid; if every process of that uid in the namespace (none of
+// whose descriptors could be read) has the same container and command, those
+// are certain and only the PID is not, so it is left zero.
+func (a *processAttributor) identifyByOwner(event database.NetworkEvent, c candidate, owner uint32, unreadable map[int]bool) (processIdentity, bool) {
+	var first *procEntry
+	var command string
+	matches := 0
+	for i := range c.procs {
+		proc := &c.procs[i]
+		if proc.uid != owner {
+			continue
+		}
+		if !unreadable[proc.pid] || matches >= 32 {
+			return processIdentity{}, false
+		}
+		comm, err := os.ReadFile(filepath.Join(a.root, strconv.Itoa(proc.pid), "comm"))
+		if err != nil {
+			continue // Exited.
+		}
+		name := strings.TrimSpace(string(comm))
+		if first == nil {
+			first, command = proc, name
+		} else if proc.containerID != first.containerID || name != command {
+			return processIdentity{}, false
+		}
+		matches++
+	}
+	if first == nil {
+		return processIdentity{}, false
+	}
+	identity := a.identify(event, c, *first)
+	identity.PID, identity.Command = 0, command
+	return identity, true
+}
+
 func (a *processAttributor) identify(event database.NetworkEvent, c candidate, proc procEntry) processIdentity {
 	path := filepath.Join(a.root, strconv.Itoa(proc.pid))
 	identity := processIdentity{PID: proc.pid}
@@ -577,19 +625,28 @@ func (a *processAttributor) identify(event database.NetworkEvent, c candidate, p
 }
 
 // holdsSocket scans a process's descriptors for the socket, indexing every
-// socket it passes so later lookups of long-lived sockets need no scan.
-func (a *processAttributor) holdsSocket(pid int, target string, deadline time.Time, followed *int) bool {
+// socket it passes so later lookups of long-lived sockets need no scan. It
+// also reports whether the descriptors were readable at all.
+func (a *processAttributor) holdsSocket(pid int, target string, deadline time.Time, followed *int) (found, readable bool) {
 	directory := filepath.Join(a.root, strconv.Itoa(pid), "fd")
 	fds, err := os.Open(directory)
 	if err != nil {
-		return false
+		return false, false
 	}
 	defer fds.Close()
+	// Links that cannot be read (as opposed to descriptors closed meanwhile)
+	// make the process as unreadable as a private directory.
+	links, denied := 0, 0
+	readable = true
 	for time.Now().Before(deadline) && *followed < processMaxFDLinks {
 		names, readErr := fds.Readdirnames(64)
 		for _, name := range names {
 			*followed++
+			links++
 			link, err := os.Readlink(filepath.Join(directory, name))
+			if errors.Is(err, os.ErrPermission) {
+				denied++
+			}
 			if err != nil || !strings.HasPrefix(link, "socket:[") {
 				continue
 			}
@@ -597,14 +654,14 @@ func (a *processAttributor) holdsSocket(pid int, target string, deadline time.Ti
 				a.sockets[link] = socketRef{pid: pid, fd: name}
 			}
 			if link == target {
-				return true
+				return true, true
 			}
 		}
 		if readErr != nil || len(names) == 0 {
-			return false
+			break
 		}
 	}
-	return false
+	return false, !(links > 0 && denied == links)
 }
 
 var (

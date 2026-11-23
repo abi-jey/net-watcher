@@ -267,3 +267,49 @@ func TestProcessAttributionRequiresNamespaceAccess(t *testing.T) {
 		t.Fatal("started without a readable host procfs")
 	}
 }
+
+// Processes running as another user keep their descriptors private even from
+// CAP_SYS_PTRACE. The socket's owner then names container and command when
+// every process of that owner in the pod agrees; the PID stays unknown.
+func TestProcessIdentifiedBySocketOwnerWhenDescriptorsArePrivate(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("root reads private descriptor directories")
+	}
+	for name, commands := range map[string][2]string{"same command": {"gunicorn", "gunicorn"}, "different commands": {"gunicorn", "celery"}} {
+		t.Run(name, func(t *testing.T) {
+			root := t.TempDir()
+			tables := map[string]string{"tcp": socketRow("10.2.0.8", 40000, "10.96.0.1", 443, "01", "800")}
+			cgroup := "0::/kubepods.slice/kubepods-pod" + strings.ReplaceAll(testPodUID, "-", "_") + ".slice/crio-" + testContainerID + ".scope/container\n"
+			writeFakeProc(t, root, []fakeProcess{
+				{pid: 1, netns: "net:[1]", cgroup: "0::/init.scope\n", comm: "systemd"},
+				{pid: 400, netns: "net:[4]", cgroup: cgroup, comm: commands[0], sockets: []string{"800"}, tables: tables},
+				{pid: 401, netns: "net:[4]", cgroup: cgroup, comm: commands[1], tables: tables},
+			})
+			for _, pid := range []string{"400", "401"} {
+				directory := filepath.Join(root, pid, "fd")
+				if err := os.Chmod(directory, 0); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = os.Chmod(directory, 0o700) })
+			}
+			events := make(chan database.NetworkEvent, 4)
+			a := &processAttributor{root: root, addresses: func() map[string]bool { return map[string]bool{} },
+				containers: func(string) (string, string, string, bool) { return "demo", "api-1", "api", true },
+				onEvent:    func(event database.NetworkEvent) { events <- event }, logger: log.Default()}
+			if err := a.start(); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(a.stop)
+			event := database.NetworkEvent{EventType: database.EventTCPStart, SrcIP: "10.2.0.8", SrcPort: 40000, DstIP: "10.96.0.1", DstPort: 443}
+			podSide(&event, "src")
+			got := attributed(t, a, events, event)
+			if commands[0] == commands[1] {
+				if got.ProcessPID != 0 || got.ProcessCommand != "gunicorn" || got.ProcessContainer != "api" || got.ProcessSide != "src" || a.byOwner.Load() != 1 {
+					t.Fatalf("not identified by owner: %+v", got)
+				}
+			} else if got.ProcessSide != "" {
+				t.Fatalf("ambiguous owner attributed: %+v", got)
+			}
+		})
+	}
+}
