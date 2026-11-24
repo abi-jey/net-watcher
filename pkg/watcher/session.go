@@ -365,9 +365,10 @@ func (sm *SessionManager) Stop() {
 }
 
 // EnableProcessAttribution attributes flows on this node to the processes
-// owning their sockets, reading the host procfs mounted at root.
-func (sm *SessionManager) EnableProcessAttribution(root string, containers ContainerLookup) error {
-	lookup, err := newProcessAttributor(root, containers, sm.logger, sm.appendEvent)
+// owning their sockets, reading the host procfs mounted at root, within
+// budget of CPU time per second (DefaultProcessBudget when zero).
+func (sm *SessionManager) EnableProcessAttribution(root string, containers ContainerLookup, budget time.Duration) error {
+	lookup, err := newProcessAttributor(root, containers, budget, sm.logger, sm.appendEvent)
 	if err != nil {
 		return err
 	}

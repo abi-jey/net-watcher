@@ -35,9 +35,10 @@ func (w *Watcher) SetContextLookup(lookup ContextLookup) {
 	w.sessionManager.contextLookup = lookup
 }
 
-// EnableProcessAttribution uses a read-only host proc mount for local TLS flows.
-func (w *Watcher) EnableProcessAttribution(root string, containers ContainerLookup) error {
-	return w.sessionManager.EnableProcessAttribution(root, containers)
+// EnableProcessAttribution attributes flows on this node to processes through
+// a read-only host proc mount, within budget of CPU time per second.
+func (w *Watcher) EnableProcessAttribution(root string, containers ContainerLookup, budget time.Duration) error {
+	return w.sessionManager.EnableProcessAttribution(root, containers, budget)
 }
 
 // New creates a new Watcher instance

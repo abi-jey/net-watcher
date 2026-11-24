@@ -2,6 +2,7 @@ package watcher
 
 import (
 	"fmt"
+	"net"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -263,7 +264,7 @@ func TestProcessAttributionNeverBlocksPackets(t *testing.T) {
 }
 
 func TestProcessAttributionRequiresNamespaceAccess(t *testing.T) {
-	if _, err := newProcessAttributor(t.TempDir(), nil, log.Default(), func(database.NetworkEvent) {}); err == nil {
+	if _, err := newProcessAttributor(t.TempDir(), nil, 0, log.Default(), func(database.NetworkEvent) {}); err == nil {
 		t.Fatal("started without a readable host procfs")
 	}
 }
@@ -354,5 +355,71 @@ func TestSocketTableReadServesLookupsQueuedBeforeIt(t *testing.T) {
 	sidecar.queuedAt = time.Now()
 	if inode, _, _ := a.findSocket(sidecar, procDir, false, deadline); inode != "702" || a.tableReads.Load() != 5 {
 		t.Fatalf("tcp6 not read first: %q after %d reads", inode, a.tableReads.Load())
+	}
+}
+
+func TestHostSocketsAreQueriedFromTheKernel(t *testing.T) {
+	self, err := os.Readlink(selfNetnsPath)
+	if err != nil {
+		t.Skipf("own network namespace: %v", err)
+	}
+	if diag, err := openSockDiag(); err != nil {
+		t.Skipf("sock_diag unavailable: %v", err)
+	} else {
+		diag.close()
+	}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = listener.Close() }()
+	client, err := net.Dial("tcp", listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = client.Close() }()
+	server, err := listener.Accept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = server.Close() }()
+
+	// The host namespace is this test's own, and its socket tables are empty:
+	// only a kernel query can find the connection.
+	root := t.TempDir()
+	writeFakeProc(t, root, []fakeProcess{
+		{pid: 1, netns: self, cgroup: "0::/init.scope\n", comm: "systemd"},
+		{pid: 400, netns: self, cgroup: "0::/system.slice/fetch.service\n", comm: "fetch",
+			sockets: []string{fmt.Sprint(socketInode(t, client.(*net.TCPConn)))}},
+		{pid: 401, netns: self, cgroup: "0::/system.slice/web.service\n", comm: "web",
+			sockets: []string{fmt.Sprint(socketInode(t, listener.(*net.TCPListener)))}},
+	})
+	events := make(chan database.NetworkEvent, 4)
+	a := &processAttributor{root: root, logger: log.Default(),
+		addresses:  func() map[string]bool { return map[string]bool{"127.0.0.1": true} },
+		containers: func(string) (string, string, string, bool) { return "", "", "", false },
+		onEvent:    func(event database.NetworkEvent) { events <- event }}
+	if err := a.start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(a.stop)
+	if a.diag == nil {
+		t.Fatal("kernel socket queries not used in the collector's own namespace")
+	}
+
+	clientAddr, serverAddr := client.LocalAddr().(*net.TCPAddr), client.RemoteAddr().(*net.TCPAddr)
+	connection := database.NetworkEvent{EventType: database.EventTCPStart, SrcIP: "127.0.0.1", SrcPort: uint16(clientAddr.Port), DstIP: "127.0.0.1", DstPort: uint16(serverAddr.Port)}
+	if got := attributed(t, a, events, connection); got.ProcessPID != 400 || got.ProcessCommand != "fetch" || got.ProcessSide != "src" {
+		t.Fatalf("host client: pid=%d command=%q side=%q", got.ProcessPID, got.ProcessCommand, got.ProcessSide)
+	}
+	// A connection from a port nothing holds (forwarded traffic after NAT)
+	// reaches the server's listener on the receiving side only.
+	forwarded := connection
+	forwarded.SrcPort = 9
+	if got := attributed(t, a, events, forwarded); got.ProcessPID != 401 || got.ProcessSide != "dst" {
+		t.Fatalf("forwarded connection: pid=%d side=%q", got.ProcessPID, got.ProcessSide)
+	}
+	if a.tableReads.Load() != 0 || a.diagLookups.Load() < 3 {
+		t.Fatalf("tables read %d, kernel queries %d", a.tableReads.Load(), a.diagLookups.Load())
 	}
 }
