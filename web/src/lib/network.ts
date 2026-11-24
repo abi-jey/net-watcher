@@ -76,9 +76,9 @@ export function interfaceRole(name: string): InterfaceRole {
 
 /** Interface roles the events filter offers, in display order. */
 export const interfaceRoles: { id: string; label: string }[] = [
-  { id: 'pod', label: 'pod links' }, { id: 'uplink', label: 'uplinks' }, { id: 'wifi', label: 'Wi-Fi' },
+  { id: 'pod', label: 'pod link' }, { id: 'uplink', label: 'uplink' }, { id: 'wifi', label: 'Wi-Fi' },
   { id: 'tailscale', label: 'Tailscale' }, { id: 'overlay', label: 'overlay' }, { id: 'cluster-host', label: 'cluster host' },
-  { id: 'bridge', label: 'bridges' }, { id: 'wireguard', label: 'WireGuard' }, { id: 'tunnel', label: 'tunnels' }, { id: 'loopback', label: 'loopback' },
+  { id: 'bridge', label: 'bridge' }, { id: 'wireguard', label: 'WireGuard' }, { id: 'tunnel', label: 'tunnel' }, { id: 'loopback', label: 'loopback' },
 ];
 
 export interface RouteInfo { label: string; help: string }
