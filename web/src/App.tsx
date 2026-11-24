@@ -53,7 +53,7 @@ export function App() {
             {item.id === 'collectors' && health.data && <span className={`dot ${severe ? 'danger' : unhealthy.length ? 'warn' : 'ok'}`} title={healthTitle} role="img" aria-label={healthTitle} />}
           </a>
         ))}
-        <div className="sidebar-foot">{version.data?.version ? (version.data.version === 'dev' ? 'development build' : `v${version.data.version.replace(/^v/, '')}`) : ''}</div>
+        <div className="sidebar-foot">{version.data?.version ? (version.data.version === 'dev' ? 'development build' : /^v?\d/.test(version.data.version) ? `v${version.data.version.replace(/^v/, '')}` : version.data.version) : ''}</div>
       </nav>
       <main className="main">
         <PageBoundary key={section}><Suspense fallback={<Spinner />}>{page}</Suspense></PageBoundary>

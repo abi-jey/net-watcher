@@ -7,7 +7,9 @@
  */
 export interface PacerOptions { minRate: number; maxRate: number; spread: number; runningBacklog: number; pausedBacklog: number }
 
-export const pacerDefaults: PacerOptions = { minRate: 2, maxRate: 12, spread: 1.5, runningBacklog: 36, pausedBacklog: 300 };
+// Collectors forward in bursts a few seconds apart; five seconds of rows at
+// the top rate bridge the quiet between them.
+export const pacerDefaults: PacerOptions = { minRate: 2, maxRate: 12, spread: 1.5, runningBacklog: 60, pausedBacklog: 300 };
 
 export class Pacer<T> {
   private queue: T[] = [];

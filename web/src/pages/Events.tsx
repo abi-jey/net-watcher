@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { getJSON, url, type EventsResponse, type HealthResponse, type NetworkEvent } from '../lib/api.ts';
+import { ApiError, getJSON, url, type EventsResponse, type HealthResponse, type NetworkEvent } from '../lib/api.ts';
 import { setQuery, useResource } from '../lib/hooks.ts';
 import { windowRange } from '../lib/window.ts';
 import { dateTime } from '../lib/format.ts';
@@ -146,6 +146,10 @@ export function Events({ query }: { query: URLSearchParams }) {
   const nodes = useMemo(() => (collectors.data?.collectors ?? []).map(collector => collector.CollectorID).filter(Boolean), [collectors.data]);
   const suggestions = useMemo(() => suggestionsFrom(events, nodes), [events, nodes]);
   const filtered = search.text.trim() !== '';
+  // The server checks values the browser does not (ports, prefixes, units):
+  // its objection belongs beside the filter, and retrying cannot help.
+  const filterError = error instanceof ApiError && error.status === 400 && error.message.startsWith('filter: ')
+    ? error.message.replace(/^filter: /, '').replace(/ \(at \d+\)$/, '') : undefined;
 
   return (
     <>
@@ -156,8 +160,8 @@ export function Events({ query }: { query: URLSearchParams }) {
           <label className="switch"><input type="checkbox" checked={live} onChange={event => setLive(event.target.checked)} /><span>Live tail</span></label>
         </div>
       </div>
-      <FilterBar text={search.text} window={search.window} onApply={apply} suggestions={suggestions} busy={loading} />
-      <ErrorBanner error={error} retry={() => void load(page?.nextCursor && events.length ? page.nextCursor : undefined)} />
+      <FilterBar text={search.text} window={search.window} onApply={apply} suggestions={suggestions} busy={loading} serverError={filterError} />
+      <ErrorBanner error={filterError ? undefined : error} retry={() => void load(page?.nextCursor && events.length ? page.nextCursor : undefined)} />
       <div className="event-list card flush" onMouseEnter={() => liveTail.setHover(true)} onMouseLeave={() => liveTail.setHover(false)}>
         <div ref={liveTail.top} />
         <div className="ev-sticky">

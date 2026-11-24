@@ -216,7 +216,9 @@ button.link.small { font-size: 12px; }
 .syntax-help code { background: var(--bg-hover); border-radius: 3px; padding: 0 4px; }
 .fields-list { display: flex; flex-wrap: wrap; gap: 4px; }
 .fields-list span { cursor: help; }
-.examples { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 3px; }
+.examples { margin: 0; padding: 0; list-style: none; display: grid; grid-template-columns: max-content 1fr; gap: 3px 16px; }
+.examples li { display: contents; }
+button.link.mono { font-family: var(--mono); font-size: 12.5px; }
 
 .conditions { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; min-height: 28px; }
 .condition-group { display: inline-flex; flex-wrap: wrap; gap: 4px; align-items: center; }
@@ -259,7 +261,7 @@ button.add-condition { min-height: 28px; padding: 0 10px; font-size: 12.5px; bor
 .event-list ol { list-style: none; margin: 0; padding: 0; }
 .ev-head, .ev-row {
   display: grid; align-items: center; column-gap: 10px;
-  grid-template-columns: 62px 78px minmax(0, 1fr) 14px minmax(0, 1fr) minmax(220px, 1fr);
+  grid-template-columns: 62px 78px minmax(0, 1.3fr) 14px minmax(0, 1.3fr) minmax(200px, 1fr);
   grid-template-areas: "time type src arrow dst detail";
 }
 .ev-sticky { position: sticky; top: 0; z-index: 2; background: var(--bg-card); border-bottom: 1px solid var(--border); }
@@ -277,10 +279,10 @@ button.add-condition { min-height: 28px; padding: 0 10px; font-size: 12.5px; bor
 .type { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; font-weight: 600; white-space: nowrap; color: var(--text-h); padding: 0 6px 0 5px; border-radius: 5px; line-height: 18px; background: color-mix(in srgb, var(--family) 14%, transparent); max-width: 100%; }
 .type::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: var(--family); flex: none; }
 .ep { display: flex; align-items: center; gap: 5px; min-width: 0; white-space: nowrap; overflow: hidden; }
-.ep-name { flex: 0 1 auto; color: var(--text-h); font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 2ch; }
+.ep-name { flex: 0 1 auto; color: var(--text-h); font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 6ch; }
 a.ep-name:hover { color: var(--accent-work); }
-.ep .ns { flex: 0 2 auto; min-width: 3ch; max-width: 16ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-secondary); border: 1px solid var(--border-light); border-radius: 4px; padding: 0 4px; line-height: 16px; font-size: 11px; }
-.ep-addr { flex: 0 3 auto; min-width: 4ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-muted); font-size: 12px; }
+.ep .ns { flex: 0 0 auto; max-width: 14ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-secondary); border: 1px solid var(--border-light); border-radius: 4px; padding: 0 4px; line-height: 16px; font-size: 11px; }
+.ep-addr { flex: 0 2 auto; min-width: 5ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-muted); font-size: 12px; }
 .tag { flex: none; font-size: 9.5px; font-weight: 700; letter-spacing: 0.4px; text-transform: uppercase; padding: 0 4px; border-radius: 4px; line-height: 15px; border: 1px solid currentColor; opacity: 0.95; }
 .tag.k8s { color: var(--accent-work); }
 .tag.k8s.node { color: var(--text-secondary); }

@@ -12,7 +12,7 @@ export type Suggestions = Record<string, string[]>;
 
 const examples: [string, string][] = [
   ['src.kind != pod and dst.kind = node', 'not from a pod, to a node'],
-  ['ns = (default, monitoring) and port != 53', 'two namespaces, without DNS'],
+  ['ns = (kube-system, monitoring) and port != 53', 'two namespaces, without DNS'],
   ['domain = google.com or domain ~ facebook', 'one domain and its subdomains, or any name containing a word'],
   ['ip = 100.64.0.0/10 and not iface.type = tailscale', 'tailnet addresses seen outside the Tailscale interface'],
   ['process = curl or (process.side = none and dst.port = 443)', 'curl, or HTTPS no process was found for'],
@@ -24,8 +24,10 @@ const examples: [string, string][] = [
  * conditions to add, negate, join with "or" and remove, and event type
  * toggles. Every change produces new expression text.
  */
-export function FilterBar({ text, window, onApply, suggestions, busy }: {
+export function FilterBar({ text, window, onApply, suggestions, busy, serverError }: {
   text: string; window: string; onApply: (text: string, window: string) => void; suggestions: Suggestions; busy: boolean;
+  /** The server's objection to the applied filter, such as a value that is not a port. */
+  serverError?: string;
 }) {
   const [draft, setDraft] = useState(text);
   const [draftWindow, setDraftWindow] = useState(window);
@@ -77,6 +79,7 @@ export function FilterBar({ text, window, onApply, suggestions, busy }: {
           <span className="mono">{draft.slice(0, parsed.error.pos)}<mark>{draft.slice(parsed.error.pos, parsed.error.pos + 1) || ' '}</mark></span> {parsed.error.message}
         </p>
       )}
+      {!parsed.error && serverError && draft === text && <p className="filter-error" role="alert">{serverError}</p>}
       {help && <SyntaxHelp onExample={example => { setDraft(example); onApply(example, draftWindow); }} />}
 
       <div className="conditions" aria-label="Conditions; all must hold">

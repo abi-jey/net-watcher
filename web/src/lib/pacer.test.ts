@@ -40,7 +40,7 @@ test('a flood shows at most the readable rate, keeps current and counts the rest
   const shown = run(pacer, 100, 0, arrivals);
   const total = shown.reduce((a, b) => a + b, 0);
   assert.ok(total <= 12 * 10 + 2, `about 12 a second: ${total}`);
-  assert.ok(pacer.dropped >= 500 - total - 36, `dropped ${pacer.dropped}`);
+  assert.ok(pacer.dropped >= 500 - total - 60, `dropped ${pacer.dropped}`);
   assert.ok(pacer.rate(10_000) >= 40, `rate ${pacer.rate(10_000)}`);
 });
 
