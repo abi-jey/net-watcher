@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type MouseEvent, type ReactNode } from 'react';
 import type { NetworkEvent } from '../lib/api.ts';
 import { bytes, dateTime, endpoint, isSet } from '../lib/format.ts';
-import { deviceName, eventLabel, family, interfaceRole, ipScope, routeInfo, scopeLabel, scopeTag } from '../lib/network.ts';
+import { deviceName, eventLabel, family, interfaceRole, ipScope, rcodeName, routeInfo, scopeLabel, scopeTag } from '../lib/network.ts';
 import { describe, is, negate, type Compare } from '../lib/filter.ts';
 import { href } from '../lib/hooks.ts';
 import { Attribution } from './ui.tsx';
@@ -107,14 +107,17 @@ function Endpoint({ side, which, name, event, onFilter }: { side: Side; which: '
   );
 }
 
-function Details({ event }: { event: NetworkEvent }) {
+function Details({ event, onFilter }: { event: NetworkEvent; onFilter: OnFilter }) {
   switch (event.EventType) {
     case 'GAP':
       return <span className="detail-main">{event.EventCount.toLocaleString()} lost · {event.Reason}</span>;
     case 'DNS': {
-      const failed = event.DNSResponseCode && event.DNSResponseCode !== 'NOERROR';
-      const answer = failed ? event.DNSResponseCode : event.DNSAnswers;
-      return <span className="detail-main" title={answer || undefined}>{event.DNSType === 'RESPONSE' ? '' : 'query '}<strong>{event.DNSQuery}</strong>{answer ? <span className={failed ? 'warn-text' : 'muted'}> → {answer}</span> : null}</span>;
+      const code = rcodeName(event.DNSResponseCode);
+      const failed = code !== '' && code !== 'NOERROR';
+      return <>
+        {code && <Tag className={`ctx rcode ${failed ? 'failed' : ''}`} title={`DNS response code ${code}${code !== event.DNSResponseCode.trim() ? ` (${event.DNSResponseCode.trim()})` : ''}`} condition={is('rcode', code)} onFilter={onFilter}>{code}</Tag>}
+        <span className="detail-main" title={event.DNSAnswers || undefined}>{event.DNSType === 'RESPONSE' ? '' : 'query '}<strong>{event.DNSQuery}</strong>{!failed && event.DNSAnswers ? <span className="muted"> → {event.DNSAnswers}</span> : null}</span>
+      </>;
     }
     case 'TLS_SNI':
       return <span className="detail-main">SNI <strong>{event.TLSSNI}</strong></span>;
@@ -158,7 +161,7 @@ export function EventRow({ event, expanded, onToggle, onFilter, fresh }: { event
         <span className="ev-arrow" aria-label="to"><Icon name="arrow" size={14} /></span>
         <span className="ev-dst"><Endpoint side={dst} which="dst" name={dst.kind ? undefined : remoteName(event)} event={event} onFilter={onFilter} /></span>
         <span className="ev-detail">
-          <Details event={event} />
+          <Details event={event} onFilter={onFilter} />
           {route && <Tag className="ctx route" title={`${route.help}${event.TailnetPeer ? ` Device: ${event.TailnetPeerName || event.TailnetPeer}.` : ''}`} condition={is('route', event.Route)} onFilter={onFilter}>{route.label}{peer ? <span className="muted"> · {peer}</span> : null}</Tag>}
           {event.ProcessCommand && <Tag className="ctx process" title={processTitle(event)} condition={is('process', event.ProcessCommand)} onFilter={onFilter}>
             <Icon name="process" size={12} />{event.ProcessCommand}{event.ProcessContainer && event.ProcessContainer !== event.ProcessCommand ? <span className="muted"> · {event.ProcessContainer}</span> : null}

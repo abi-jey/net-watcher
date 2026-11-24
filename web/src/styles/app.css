@@ -275,14 +275,16 @@ button.add-condition { min-height: 28px; padding: 0 10px; font-size: 12.5px; bor
 .ev-src { grid-area: src; min-width: 0; }
 .ev-dst { grid-area: dst; min-width: 0; }
 .ev-arrow { grid-area: arrow; color: var(--text-muted); display: flex; }
-.ev-detail { grid-area: detail; min-width: 0; display: flex; align-items: center; gap: 5px; white-space: nowrap; overflow: hidden; }
+/* Tags that do not fit wrap onto a hidden second line: whole tags drop out
+   instead of showing slivers. The expanded row lists everything. */
+.ev-detail { grid-area: detail; min-width: 0; display: flex; flex-wrap: wrap; align-items: center; align-content: flex-start; gap: 4px 5px; white-space: nowrap; height: 20px; overflow: hidden; }
 .type { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; font-weight: 600; white-space: nowrap; color: var(--text-h); padding: 0 6px 0 5px; border-radius: 5px; line-height: 18px; background: color-mix(in srgb, var(--family) 14%, transparent); max-width: 100%; }
 .type::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: var(--family); flex: none; }
 .ep { display: flex; align-items: center; gap: 5px; min-width: 0; white-space: nowrap; overflow: hidden; }
-.ep-name { flex: 0 1 auto; color: var(--text-h); font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 6ch; }
+.ep-name { flex: 0 1 auto; color: var(--text-h); font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 a.ep-name:hover { color: var(--accent-work); }
 .ep .ns { flex: 0 0 auto; max-width: 14ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-secondary); border: 1px solid var(--border-light); border-radius: 4px; padding: 0 4px; line-height: 16px; font-size: 11px; }
-.ep-addr { flex: 0 2 auto; min-width: 5ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-muted); font-size: 12px; }
+.ep-addr { flex: 0 3 auto; min-width: 5ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-muted); font-size: 12px; }
 .tag { flex: none; font-size: 9.5px; font-weight: 700; letter-spacing: 0.4px; text-transform: uppercase; padding: 0 4px; border-radius: 4px; line-height: 15px; border: 1px solid currentColor; opacity: 0.95; }
 .tag.k8s { color: var(--accent-work); }
 .tag.k8s.node { color: var(--text-secondary); }
@@ -291,12 +293,15 @@ a.ep-name:hover { color: var(--accent-work); }
 .tag.scope.public { color: var(--editorial); }
 .tag.scope.tailscale { color: var(--info); }
 .tag.scope.multicast, .tag.scope.unknown { color: var(--warn); }
-.detail-main { flex: 0 1 auto; min-width: 4ch; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* At most 70% of the column, so a long name truncates on the first line and
+   leaves room for tags instead of wrapping out of sight. */
+.detail-main { flex: 0 1 auto; max-width: 70%; min-width: 4ch; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .detail-main strong { color: var(--text-h); font-weight: 600; }
-.ctx { flex: 0 2 auto; min-width: 0; overflow: hidden; display: inline-flex; align-items: center; gap: 4px; font-size: 11px; color: var(--text-muted); background: var(--bg-hover); border-radius: 4px; padding: 0 5px; line-height: 18px; white-space: nowrap; }
-.ctx.process { flex-shrink: 1; color: var(--text-h); background: color-mix(in srgb, var(--green) 16%, transparent); }
-.ctx.node { flex-shrink: 4; }
+.ctx { flex: none; max-width: 26ch; overflow: hidden; display: inline-flex; align-items: center; gap: 4px; font-size: 11px; color: var(--text-muted); background: var(--bg-hover); border-radius: 4px; padding: 0 5px; line-height: 18px; white-space: nowrap; }
+.ctx.process { color: var(--text-h); background: color-mix(in srgb, var(--green) 16%, transparent); }
 .ctx.route { color: var(--info); background: var(--info-bg); }
+.ctx.rcode { font-family: var(--mono); font-size: 10.5px; }
+.ctx.rcode.failed, button.ctx.rcode.failed { color: var(--warn); background: var(--warn-bg); }
 .ev.fresh .ev-row { animation: arrive 1.8s var(--ease-out); }
 @keyframes arrive {
   from { opacity: 0; background: color-mix(in srgb, var(--family) 28%, transparent); }
@@ -343,11 +348,12 @@ button.filterable:focus-visible { outline: 2px solid var(--accent-work); outline
 .live-controls { display: flex; gap: 8px; align-items: center; }
 .live-controls button { display: inline-flex; align-items: center; gap: 5px; }
 .live-status { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 5px 12px 5px 15px; font-size: 12.5px; color: var(--text-secondary); background: color-mix(in srgb, var(--green) 8%, var(--bg-card)); border-bottom: 1px solid var(--border-light); }
-.live-status.held { background: var(--surface-notice); color: var(--text-notice); }
+.live-status.held, .live-status.down { background: var(--surface-notice); color: var(--text-notice); }
 .live-status b { color: var(--text-h); }
 .live-status button { margin-left: auto; }
 .live-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--green); flex: none; animation: pulse 1.6s ease-in-out infinite; }
 .live-status.held .live-dot { background: var(--warn); animation: none; }
+.live-status.down .live-dot { background: var(--red); animation: none; }
 
 /* ── Collectors ────────────────────────────────────────────────────────── */
 .collector.degraded, .collector.backlog { border-top: 3px solid var(--warn); }

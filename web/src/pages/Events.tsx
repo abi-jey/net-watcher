@@ -198,6 +198,11 @@ export function Events({ query }: { query: URLSearchParams }) {
 
 interface LiveTail {
   held: boolean;
+  /** The server connection: lost connections are retried with backoff. */
+  connection: 'connecting' | 'open' | 'retrying';
+  /** Whether a connection dropped since the tail started; events stored in
+   *  the meantime are only found by searching. */
+  interrupted: boolean;
   /** Why rows are not being added: the reader's attention, or the button. */
   reason: string;
   pending: number;
@@ -225,6 +230,8 @@ function useLiveTail(enabled: boolean, text: string, rowOpen: boolean, setEvents
   const [scrolled, setScrolled] = useState(false);
   const [manual, setManual] = useState(false);
   const [stats, setStats] = useState({ pending: 0, dropped: 0, skipped: 0, rate: 0 });
+  const [connection, setConnection] = useState<LiveTail['connection']>('connecting');
+  const [interrupted, setInterrupted] = useState(false);
   const reason = manual ? 'paused' : rowOpen ? 'a row is open' : scrolled ? 'the list is scrolled down' : hover ? 'the pointer is over the list' : '';
   const held = reason !== '';
   const holding = useRef(held);
@@ -252,9 +259,33 @@ function useLiveTail(enabled: boolean, text: string, rowOpen: boolean, setEvents
     if (!enabled) return;
     pacer.current = new Pacer<NetworkEvent>();
     fresh.current = new Set();
+    setInterrupted(false);
     let skipped = 0;
-    const socket = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}${location.pathname.replace(/[^/]*$/, '')}api/ws${text ? `?f=${encodeURIComponent(text)}` : ''}`);
-    socket.onmessage = message => {
+    let socket: WebSocket | undefined;
+    let retry: ReturnType<typeof setTimeout> | undefined;
+    let failures = 0;
+    let stopped = false;
+    const address = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}${location.pathname.replace(/[^/]*$/, '')}api/ws${text ? `?f=${encodeURIComponent(text)}` : ''}`;
+    const connect = () => {
+      setConnection(failures ? 'retrying' : 'connecting');
+      const current = new WebSocket(address);
+      socket = current;
+      current.onopen = () => {
+        if (failures) setInterrupted(true);
+        failures = 0;
+        setConnection('open');
+      };
+      // A restarted server or a dropped network closes the socket; retry
+      // with backoff (1 s doubling to 30 s) for as long as the tail is on.
+      current.onclose = () => {
+        if (stopped) return;
+        failures++;
+        setConnection('retrying');
+        retry = setTimeout(connect, Math.min(30_000, 1000 * 2 ** (failures - 1)));
+      };
+      current.onmessage = onMessage;
+    };
+    const onMessage = (message: MessageEvent) => {
       // Messages queued together share a frame, one per line.
       const arrived: NetworkEvent[] = [];
       for (const line of String(message.data).split('\n')) {
@@ -266,18 +297,19 @@ function useLiveTail(enabled: boolean, text: string, rowOpen: boolean, setEvents
       arrived.sort((a, b) => a.Timestamp.localeCompare(b.Timestamp) || a.ID - b.ID);
       pacer.current.push(arrived, performance.now(), holding.current);
     };
+    connect();
     const timer = setInterval(() => {
       const now = performance.now();
       add(pacer.current.take(now, holding.current));
       const next = { pending: pacer.current.pending, dropped: pacer.current.dropped, skipped, rate: Math.round(pacer.current.rate(now) * 10) / 10 };
       setStats(previous => (previous.pending === next.pending && previous.dropped === next.dropped && previous.skipped === next.skipped && previous.rate === next.rate ? previous : next));
     }, 100);
-    return () => { socket.close(); clearInterval(timer); };
+    return () => { stopped = true; socket?.close(); clearTimeout(retry); clearInterval(timer); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [enabled, text]);
 
   return {
-    held, reason, ...stats, fresh: fresh.current, top, setHover,
+    held, connection, interrupted, reason, ...stats, fresh: fresh.current, top, setHover,
     toggleHold: () => setManual(value => !value),
     showNow: () => {
       add(pacer.current.flush());
@@ -289,10 +321,13 @@ function useLiveTail(enabled: boolean, text: string, rowOpen: boolean, setEvents
 
 function LiveStatus({ tail }: { tail: LiveTail }) {
   const fast = tail.rate > 12;
+  const down = tail.connection !== 'open';
   return (
-    <div className={`live-status ${tail.held ? 'held' : ''}`} role="status">
+    <div className={`live-status ${down ? 'down' : tail.held ? 'held' : ''}`} role="status">
       <span className="live-dot" aria-hidden="true" />
-      {tail.held
+      {down
+        ? <span>{tail.connection === 'connecting' ? 'Connecting to the live stream…' : 'Live stream disconnected; reconnecting…'}</span>
+        : tail.held
         ? <span>Holding new rows while {tail.reason}{tail.pending > 0 && <> · <b>{tail.pending}</b> waiting</>}</span>
         : <span>Live · {tail.rate > 0 ? `${tail.rate.toLocaleString()} matching events/s` : 'waiting for matching events'}{fast && ' · showing about 12/s, newest kept'}</span>}
       {(tail.dropped > 0 || tail.skipped > 0) && (
@@ -300,6 +335,7 @@ function LiveStatus({ tail }: { tail: LiveTail }) {
           · {(tail.dropped + tail.skipped).toLocaleString()} not shown live; add conditions or search to see all
         </span>
       )}
+      {tail.interrupted && <span className="muted" title="Events stored while the live stream was disconnected are not added here; turn off live tail to search them.">· reconnected after a break; search for events in between</span>}
       {tail.held && tail.pending > 0 && <button type="button" className="small" onClick={tail.showNow}>Show now</button>}
     </div>
   );

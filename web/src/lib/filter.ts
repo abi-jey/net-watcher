@@ -53,7 +53,9 @@ export const fields: Field[] = [
   { name: 'duration', label: 'duration', group: 'Event', kind: 'number', help: 'Duration: 250ms, 2s, 5m.' },
   { name: 'ipv', label: 'IP version', group: 'Event', kind: 'number', help: '4 or 6.' },
   { name: 'domain', label: 'domain', group: 'Event', kind: 'domain', help: 'Host name, DNS query or TLS SNI; "is" includes subdomains.' },
-  { name: 'rcode', label: 'DNS result', group: 'Event', kind: 'string', help: 'DNS response code, such as NXDOMAIN.' },
+  { name: 'rcode', label: 'DNS result', group: 'Event', kind: 'enum', help: 'DNS response code of a DNS response; none on queries.', values: [
+    { id: 'NOERROR', label: 'NOERROR (answered)' }, { id: 'NXDOMAIN', label: 'NXDOMAIN (no such name)' }, { id: 'SERVFAIL', label: 'SERVFAIL (server failure)' },
+    { id: 'REFUSED', label: 'REFUSED' }, { id: 'FORMERR', label: 'FORMERR (malformed query)' }, { id: 'NOTIMP', label: 'NOTIMP (not implemented)' }, { id: 'none', label: 'none (queries)' }] },
   ...sided('ip', 'address', 'ip', 'Address, or prefix such as 10.0.0.0/8,'),
   ...sided('port', 'port', 'number', 'Port, or range such as 1000-2000,'),
   ...sided('kind', 'kind', 'enum', 'Kubernetes kind', kinds),
