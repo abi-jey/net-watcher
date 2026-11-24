@@ -120,6 +120,10 @@ func TestEventsPageQueryPlans(t *testing.T) {
 	if !strings.Contains(drill, "idx_process_time") || strings.Contains(drill, "TEMP B-TREE") {
 		t.Fatalf("process drill-down plan: %s", drill)
 	}
+	exit := plan(url.Values{"route": {"exit-node"}})
+	if !strings.Contains(exit, "idx_route_time") || strings.Contains(exit, "TEMP B-TREE") {
+		t.Fatalf("route plan: %s", exit)
+	}
 	search := plan(url.Values{"q": {"api"}})
 	if !strings.Contains(search, "idx_network_events_timestamp") || strings.Contains(search, "TEMP B-TREE") {
 		t.Fatalf("search plan: %s", search)

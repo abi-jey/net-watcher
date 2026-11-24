@@ -52,24 +52,49 @@ export function ipScope(ip: string): Scope {
   return 'public';
 }
 
-export interface InterfaceRole { role: string; help: string }
+export interface InterfaceRole { id: string; role: string; help: string }
 
-/** Names follow Linux, Cilium, Flannel, Docker and Tailscale conventions. */
+/**
+ * Names follow Linux, Cilium, Flannel, Docker and Tailscale conventions. The
+ * ids are the server's ifaceRole filter values (internal/web/events.go).
+ */
 export function interfaceRole(name: string): InterfaceRole {
-  if (!name) return { role: 'unknown', help: 'Interface not recorded.' };
-  if (name === 'lo') return { role: 'loopback', help: 'Traffic within the node.' };
-  if (/^lxc/.test(name)) return { role: 'pod link', help: "Cilium's link to one pod: traffic entering or leaving that pod." };
-  if (/^(veth|cali|azv|eni)/.test(name)) return { role: 'pod link', help: 'Virtual Ethernet link to a pod or container.' };
-  if (/^(cilium_vxlan|cilium_geneve|flannel\.|vxlan|genev)/.test(name)) return { role: 'overlay', help: 'Encapsulated traffic between nodes of the cluster network.' };
-  if (/^cilium_(host|net)/.test(name)) return { role: 'cluster host', help: "Cilium's host-side interface for the node's own cluster traffic." };
-  if (/^(tailscale|ts\d)/.test(name)) return { role: 'Tailscale', help: 'Encrypted Tailscale tunnel to other devices on the tailnet.' };
-  if (/^wg/.test(name)) return { role: 'WireGuard', help: 'WireGuard tunnel.' };
-  if (/^(docker|br-|cni|virbr|kube-bridge)/.test(name)) return { role: 'bridge', help: 'Software bridge for local containers or VMs.' };
-  if (/^(wl|wlan)/.test(name)) return { role: 'Wi-Fi', help: 'Wireless uplink of the node.' };
-  if (/^(en|eth|eno|ens|enp|bond)/.test(name)) return { role: 'uplink', help: 'Physical network interface of the node.' };
-  if (/^(tun|tap)/.test(name)) return { role: 'tunnel', help: 'Tunnel interface (VPN or similar).' };
-  return { role: 'interface', help: 'Network interface ' + name + '.' };
+  if (!name) return { id: '', role: 'unknown', help: 'Interface not recorded.' };
+  if (name === 'lo') return { id: 'loopback', role: 'loopback', help: 'Traffic within the node.' };
+  if (/^lxc/.test(name)) return { id: 'pod', role: 'pod link', help: "Cilium's link to one pod: traffic entering or leaving that pod." };
+  if (/^(veth|cali|azv|eni)/.test(name)) return { id: 'pod', role: 'pod link', help: 'Virtual Ethernet link to a pod or container.' };
+  if (/^(cilium_vxlan|cilium_geneve|flannel\.|vxlan|genev)/.test(name)) return { id: 'overlay', role: 'overlay', help: 'Encapsulated traffic between nodes of the cluster network.' };
+  if (/^cilium_(host|net)/.test(name)) return { id: 'cluster-host', role: 'cluster host', help: "Cilium's host-side interface for the node's own cluster traffic." };
+  if (/^(tailscale|ts\d)/.test(name)) return { id: 'tailscale', role: 'Tailscale', help: 'Encrypted Tailscale tunnel to other devices on the tailnet; traffic appears here decrypted.' };
+  if (/^wg/.test(name)) return { id: 'wireguard', role: 'WireGuard', help: 'WireGuard tunnel.' };
+  if (/^(docker|br-|cni|virbr|kube-bridge)/.test(name)) return { id: 'bridge', role: 'bridge', help: 'Software bridge for local containers or VMs.' };
+  if (/^wl/.test(name)) return { id: 'wifi', role: 'Wi-Fi', help: 'Wireless uplink of the node.' };
+  if (/^(en|eth|bond)/.test(name)) return { id: 'uplink', role: 'uplink', help: 'Physical network interface of the node.' };
+  if (/^(tun|tap)/.test(name)) return { id: 'tunnel', role: 'tunnel', help: 'Tunnel interface (VPN or similar).' };
+  return { id: '', role: 'interface', help: 'Network interface ' + name + '.' };
 }
+
+/** Interface roles the events filter offers, in display order. */
+export const interfaceRoles: { id: string; label: string }[] = [
+  { id: 'pod', label: 'pod link' }, { id: 'uplink', label: 'uplink' }, { id: 'wifi', label: 'Wi-Fi' },
+  { id: 'tailscale', label: 'Tailscale' }, { id: 'overlay', label: 'overlay' }, { id: 'cluster-host', label: 'cluster host' },
+  { id: 'bridge', label: 'bridge' }, { id: 'wireguard', label: 'WireGuard' }, { id: 'tunnel', label: 'tunnel' }, { id: 'loopback', label: 'loopback' },
+];
+
+export interface RouteInfo { label: string; help: string }
+
+/** Tailscale routes recorded by the collector at capture time. */
+export function routeInfo(route: string): RouteInfo | undefined {
+  switch (route) {
+    case 'exit-node': return { label: 'exit node', help: "This node is a tailnet device's exit node: it forwarded the device's traffic to the internet." };
+    case 'subnet-router': return { label: 'subnet route', help: "This node is a tailnet device's subnet router: it forwarded the device's traffic to a private network." };
+    case 'via-tailnet': return { label: 'via tailnet', help: "This node's own traffic was sent into the tailnet, toward another device's exit node or subnet route (or dropped if none is set)." };
+  }
+  return undefined;
+}
+
+/** First label of a MagicDNS name: the device name. */
+export const deviceName = (name: string) => name.split('.')[0];
 
 export type Family = 'tcp' | 'udp' | 'dns' | 'tls' | 'icmp' | 'timeout' | 'gap' | 'other';
 

@@ -74,6 +74,12 @@ func New(dbPath string) (*DB, error) {
 		_ = sqlDB.Close()
 		return nil, err
 	}
+	// Tailscale routes are rare among all events; a partial index keeps the
+	// "exit node traffic" view from walking every event in a window.
+	if err := db.Exec("CREATE INDEX IF NOT EXISTS idx_route_time ON network_events(route, timestamp) WHERE route > ''").Error; err != nil {
+		_ = sqlDB.Close()
+		return nil, err
+	}
 
 	return &DB{DB: db, path: dbPath}, nil
 }

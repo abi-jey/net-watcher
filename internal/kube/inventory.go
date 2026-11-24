@@ -241,6 +241,40 @@ type Index struct {
 	owners    map[string]Owner
 	status    Status
 	pods      *podHistory
+	nodes     map[string]Endpoint // By node name.
+	// The collector's own node and its interface addresses. Kubernetes lists
+	// a node's internal and external IPs, not every address it uses: public
+	// IPv6 (often temporary, rotating) and Wi-Fi or bridge addresses.
+	localNode string
+	local     map[string]bool
+}
+
+// TrackLocalAddresses attributes the addresses of this host's interfaces to
+// node, re-reading them every interval until ctx ends. Addresses Kubernetes
+// lists for any node keep that attribution.
+func (i *Index) TrackLocalAddresses(ctx context.Context, node string, addresses func() []string, every time.Duration) {
+	update := func() {
+		local := map[string]bool{}
+		for _, address := range addresses() {
+			local[address] = true
+		}
+		i.mu.Lock()
+		i.localNode, i.local = node, local
+		i.mu.Unlock()
+	}
+	update()
+	go func() {
+		ticker := time.NewTicker(every)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				update()
+			}
+		}
+	}()
 }
 
 func New(source Source) *Index {
@@ -387,7 +421,7 @@ func (i *Index) replace(objects []Object, listedAt, at time.Time) {
 	}
 	i.mu.Lock()
 	defer i.mu.Unlock()
-	i.endpoints, i.services, i.owners = endpoints, services, owners
+	i.endpoints, i.services, i.owners, i.nodes = endpoints, services, owners, nodesByName
 	i.pods.reconcile(pods, owners, listedAt, at)
 	watching, watchErr := i.status.Watching, i.status.WatchError
 	i.status = Status{Enabled: true, LastSync: at, Resources: len(objects), Watching: watching, WatchError: watchErr, Pods: i.pods.active()}
@@ -431,6 +465,9 @@ func (i *Index) Attribute(ip string, port uint16, protocol string, at time.Time)
 	endpoint, confidence, found := i.pods.resolve(ip, at)
 	if !found {
 		endpoint, found = i.endpoints[ip]
+		if !found && i.local[ip] {
+			endpoint, found = i.nodes[i.localNode]
+		}
 		switch {
 		case found && endpoint.Kind == "node":
 			confidence = ConfidenceNode

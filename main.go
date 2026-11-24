@@ -314,6 +314,11 @@ func main() {
 			return
 		}
 		w.SetContextLookup(inventory.Attribute)
+		if *kubernetes {
+			// The collector shares the host's network namespace: its interface
+			// addresses are this node's, including ones Kubernetes does not list.
+			inventory.TrackLocalAddresses(ctx, *collectorID, hostAddresses, 30*time.Second)
+		}
 		activeWatcher.Store(w)
 		if *processAttribution {
 			containers := func(id string) (string, string, string, bool) {
@@ -441,4 +446,19 @@ func getUsableInterfaces(excludePattern string, includeVirtual bool) ([]net.Inte
 		usableInterfaces = append(usableInterfaces, i)
 	}
 	return usableInterfaces, nil
+}
+
+// hostAddresses lists the addresses of this host's interfaces.
+func hostAddresses() []string {
+	addresses, err := net.InterfaceAddrs()
+	if err != nil {
+		return nil
+	}
+	list := make([]string, 0, len(addresses))
+	for _, address := range addresses {
+		if network, ok := address.(*net.IPNet); ok {
+			list = append(list, network.IP.String())
+		}
+	}
+	return list
 }
