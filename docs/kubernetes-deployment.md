@@ -369,7 +369,9 @@ Tailscale's resolver on the node (`100.100.100.100`, reverse lookup; IPv6
 addresses fall back to matching the forward records of devices already named)
 and cached for an hour, ten minutes after a failure. Packets never wait for a
 lookup, so a device's first events may carry only its address. Failed lookups
-are logged at most every ten minutes.
+are logged at most every ten minutes. Some Tailscale versions answer reverse
+lookups only for IPv4 addresses, and MagicDNS may serve no AAAA records; IPv6
+addresses of devices then keep only the address.
 
 The forwarded copy on the uplink (after the node's NAT) is a separate event
 with the node's address as source; linking the two requires conntrack and is
