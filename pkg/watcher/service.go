@@ -74,7 +74,11 @@ func NewWithDB(db *database.DB, ifaces []net.Interface, logger *log.Logger, only
 // Run starts the monitoring process. It blocks until the context is cancelled.
 func (w *Watcher) Run(ctx context.Context) error {
 	var wg sync.WaitGroup
-	active := make(map[int]context.CancelFunc)
+	type capture struct {
+		name   string
+		cancel context.CancelFunc
+	}
+	active := make(map[int]capture)
 	finished := make(chan int, 1024)
 	update := func(interfaces []net.Interface) {
 		present := make(map[int]bool)
@@ -84,12 +88,17 @@ func (w *Watcher) Run(ctx context.Context) error {
 				continue
 			}
 			captureCtx, cancel := context.WithCancel(ctx)
-			active[iface.Index] = cancel
+			active[iface.Index] = capture{iface.Name, cancel}
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
 				if err := w.sniffInterface(captureCtx, iface); err != nil && captureCtx.Err() == nil {
-					w.logger.Error("Sniffer error", "interface", iface.Name, "error", err)
+					if interfaceGone(captureCtx, iface) {
+						// A pod's link is deleted with the pod: an expected end.
+						w.logger.Info("Capture interface removed", "interface", iface.Name)
+					} else {
+						w.logger.Error("Sniffer error", "interface", iface.Name, "error", err)
+					}
 				}
 				select {
 				case finished <- iface.Index:
@@ -97,10 +106,10 @@ func (w *Watcher) Run(ctx context.Context) error {
 				}
 			}()
 		}
-		for index, cancel := range active {
+		for index, running := range active {
 			if !present[index] {
-				w.logger.Info("Capture interface removed", "index", index)
-				cancel()
+				w.logger.Info("Capture interface removed", "interface", running.name)
+				running.cancel()
 			}
 		}
 	}
@@ -113,8 +122,8 @@ capture:
 		case <-ctx.Done():
 			break capture
 		case index := <-finished:
-			if cancel, exists := active[index]; exists {
-				cancel()
+			if running, exists := active[index]; exists {
+				running.cancel()
 				delete(active, index)
 			}
 		case <-ticker.C:
@@ -128,8 +137,8 @@ capture:
 			}
 		}
 	}
-	for _, cancel := range active {
-		cancel()
+	for _, running := range active {
+		running.cancel()
 	}
 	wg.Wait()
 	w.sessionManager.Stop()
@@ -138,6 +147,30 @@ capture:
 	}
 
 	return nil
+}
+
+// interfaceByIndex is replaced in tests.
+var interfaceByIndex = net.InterfaceByIndex
+
+// interfaceRecheck spaces the checks of interfaceGone: the kernel can fail a
+// capture's poll just before the deleted link disappears from the list.
+var interfaceRecheck = []time.Duration{0, 200 * time.Millisecond, 800 * time.Millisecond}
+
+// interfaceGone reports whether a capture failed because its interface was
+// deleted, renamed or brought down, as a pod's link is when the pod goes.
+func interfaceGone(ctx context.Context, iface net.Interface) bool {
+	for _, wait := range interfaceRecheck {
+		select {
+		case <-ctx.Done():
+			return true
+		case <-time.After(wait):
+		}
+		current, err := interfaceByIndex(iface.Index)
+		if err != nil || current.Name != iface.Name || current.Flags&net.FlagUp == 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // sniffInterface is the core logic that uses afpacket
