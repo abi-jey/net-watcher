@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { url, type HealthResponse, type StatsResponse, type TimelineResponse, type TopHostsResponse } from '../lib/api.ts';
-import { useResource } from '../lib/hooks.ts';
+import { href, useResource } from '../lib/hooks.ts';
+import { format, is } from '../lib/filter.ts';
 import { windowRange } from '../lib/window.ts';
 import { age, bytes, count } from '../lib/format.ts';
 import { Banner, Card, Empty, ErrorBanner, Segmented, Spinner, Stat, StateBadge, UpdatedAt, stateHelp, stateTone } from '../components/ui.tsx';
@@ -64,7 +65,7 @@ export function Overview() {
             <div className="hbar">
               {Object.entries(stats.data.eventCounts ?? {}).sort((a, b) => b[1] - a[1]).map(([type, total]) => (
                 <div key={type} style={{ display: 'contents' }}>
-                  <a className="name" href={`#/events?type=${encodeURIComponent(type)}`}>{type}</a>
+                  <a className="name" href={href(['events'], { f: format(is('type', type)) })}>{type}</a>
                   <span className="muted small">{count(total)}</span>
                   <span className="track"><span style={{ width: `${(total / Math.max(1, stats.data!.totalEvents)) * 100}%` }} /></span>
                 </div>

@@ -1,7 +1,8 @@
-import type { KeyboardEvent, MouseEvent, ReactNode } from 'react';
+import { useEffect, useRef, useState, type MouseEvent, type ReactNode } from 'react';
 import type { NetworkEvent } from '../lib/api.ts';
-import { bytes, dateTime, endpoint, isSet, time } from '../lib/format.ts';
+import { bytes, dateTime, endpoint, isSet } from '../lib/format.ts';
 import { deviceName, eventLabel, family, interfaceRole, ipScope, routeInfo, scopeLabel, scopeTag } from '../lib/network.ts';
+import { describe, is, negate, type Compare } from '../lib/filter.ts';
 import { href } from '../lib/hooks.ts';
 import { Attribution } from './ui.tsx';
 import { Icon } from './icons.tsx';
@@ -11,19 +12,51 @@ interface Side { ip: string; port: number; kind: string; namespace: string; name
 const source = (event: NetworkEvent): Side => ({ ip: event.SrcIP, port: event.SrcPort, kind: event.SrcKind, namespace: event.SrcNamespace, name: event.SrcName, uid: event.SrcUID, workload: event.SrcWorkload, attribution: event.SrcAttribution });
 const destination = (event: NetworkEvent): Side => ({ ip: event.DstIP, port: event.DstPort, kind: event.DstKind, namespace: event.DstNamespace, name: event.DstName, uid: event.DstUID, workload: event.DstWorkload, attribution: event.DstAttribution });
 
-/** Query parameters a clicked tag adds to the events search. */
-export type Filter = Record<string, string>;
-type OnFilter = ((filter: Filter) => void) | undefined;
+/** Called with a condition to add to the search: a tag's value, or its negation. */
+export type OnFilter = ((condition: Compare) => void) | undefined;
 
-/** A tag that narrows the search to events sharing it, when clicked. */
-function Tag({ className, title, filter, onFilter, children }: { className: string; title: string; filter?: Filter; onFilter: OnFilter; children: ReactNode }) {
-  if (!filter || !onFilter) return <span className={className} title={title}>{children}</span>;
-  const apply = (event: MouseEvent | KeyboardEvent) => { event.stopPropagation(); onFilter(filter); };
+/**
+ * A tag that adds its value to the search. Selecting it offers "show only"
+ * and "hide"; Alt-click hides at once. The menu is positioned on the page,
+ * so a row's clipped cells do not cut it off.
+ */
+function Tag({ className, title, condition, onFilter, children }: { className: string; title: string; condition?: Compare; onFilter: OnFilter; children: ReactNode }) {
+  const [at, setAt] = useState<{ left: number; top: number }>();
+  const menu = useRef<HTMLSpanElement>(null);
+  useEffect(() => {
+    if (!at) return;
+    const close = (event: Event) => { if (!menu.current?.contains(event.target as Node)) setAt(undefined); };
+    const key = (event: KeyboardEvent) => { if (event.key === 'Escape') setAt(undefined); };
+    document.addEventListener('mousedown', close);
+    document.addEventListener('keydown', key);
+    window.addEventListener('scroll', close, true);
+    menu.current?.querySelector('button')?.focus();
+    return () => { document.removeEventListener('mousedown', close); document.removeEventListener('keydown', key); window.removeEventListener('scroll', close, true); };
+  }, [at]);
+  if (!condition || !onFilter) return <span className={className} title={title}>{children}</span>;
+  const reading = describe(condition);
+  const value = reading.values.join(', ');
+  const pick = (chosen: Compare) => { setAt(undefined); onFilter(chosen); };
+  const open = (event: MouseEvent<HTMLButtonElement>) => {
+    event.stopPropagation();
+    if (event.altKey) { onFilter(negate(condition) as Compare); return; }
+    const box = event.currentTarget.getBoundingClientRect();
+    setAt(current => (current ? undefined : { left: Math.min(box.left, window.innerWidth - 240), top: box.bottom + 4 }));
+  };
   return (
-    <button type="button" className={`${className} filterable`} title={`${title}. Select to show only these events.`} onClick={apply}
-      onKeyDown={event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); apply(event); } }}>
-      {children}
-    </button>
+    <>
+      <button type="button" className={`${className} filterable`} title={`${title}. Select to filter by ${reading.field} ${value}; Alt-click hides it.`}
+        aria-haspopup="menu" aria-expanded={Boolean(at)} onClick={open} onKeyDown={event => event.stopPropagation()}>
+        {children}
+      </button>
+      {at && (
+        <span className="tag-menu" role="menu" ref={menu} style={at} onClick={event => event.stopPropagation()} onKeyDown={event => event.stopPropagation()}>
+          <span className="tag-menu-head">{reading.field} <b>{value}</b></span>
+          <button type="button" role="menuitem" onClick={() => pick(condition)}><Icon name="check" size={12} />Show only this</button>
+          <button type="button" role="menuitem" onClick={() => pick(negate(condition) as Compare)}><Icon name="close" size={12} />Hide this</button>
+        </span>
+      )}
+    </>
   );
 }
 
@@ -33,23 +66,24 @@ function remoteName(event: NetworkEvent): string {
   return event.Hostname;
 }
 
+/** One end of the connection on one line: kind, name, namespace, address. */
 function Endpoint({ side, which, name, event, onFilter }: { side: Side; which: 'src' | 'dst'; name?: string; event: NetworkEvent; onFilter: OnFilter }) {
   const address = endpoint(side.ip, side.port);
+  const addressTag = side.ip
+    ? <Tag className="ep-addr mono" title={`Address ${side.ip}`} condition={is(`${which}.ip`, side.ip)} onFilter={onFilter}>{address}</Tag>
+    : null;
   if (side.kind) {
     const label = side.kind === 'pod' ? side.name : side.name || side.ip;
     return (
-      <div className="ep">
-        <div className="ep-main">
-          <Tag className={`tag k8s ${side.kind}`} title={`Kubernetes ${side.kind}`} filter={{ [`${which}Kind`]: side.kind }} onFilter={onFilter}>{side.kind}</Tag>
-          {side.kind === 'pod' && side.uid ? <a href={href(['pods', 'uid', side.uid])} onClick={event => event.stopPropagation()} className="ep-name" title={`${label}: open pod`}>{label}</a> : <span className="ep-name" title={label}>{label}</span>}
-          {side.attribution && side.attribution !== 'exact' && side.kind === 'pod' && <Attribution value={side.attribution} />}
-        </div>
-        <div className="ep-sub">
-          <span className="mono">{address}</span>
-          {side.namespace && <Tag className="ns" title={`Namespace ${side.namespace}`} filter={{ namespace: side.namespace }} onFilter={onFilter}>{side.namespace}</Tag>}
-          {side.workload && <span title={side.workload}>{side.workload.replace(/^[^/]+\//, '')}</span>}
-        </div>
-      </div>
+      <span className="ep">
+        <Tag className={`tag k8s ${side.kind}`} title={`Kubernetes ${side.kind}`} condition={is(`${which}.kind`, side.kind)} onFilter={onFilter}>{side.kind}</Tag>
+        {side.kind === 'pod' && side.uid
+          ? <a href={href(['pods', 'uid', side.uid])} onClick={event => event.stopPropagation()} className="ep-name" title={`${label}${side.workload ? ` (${side.workload})` : ''}: open pod`}>{label}</a>
+          : <span className="ep-name" title={label}>{label}</span>}
+        {side.attribution && side.attribution !== 'exact' && side.kind === 'pod' && <Attribution value={side.attribution} />}
+        {side.namespace && <Tag className="ns" title={`Namespace ${side.namespace}`} condition={is('ns', side.namespace)} onFilter={onFilter}>{side.namespace}</Tag>}
+        {label !== side.ip && addressTag}
+      </span>
     );
   }
   const scope = ipScope(side.ip);
@@ -57,23 +91,19 @@ function Endpoint({ side, which, name, event, onFilter }: { side: Side; which: '
   if (event.TailnetPeer && event.TailnetPeer === side.ip) {
     const device = event.TailnetPeerName ? deviceName(event.TailnetPeerName) : '';
     return (
-      <div className="ep">
-        <div className="ep-main">
-          <span className="tag scope tailscale" title="Tailnet device">tailnet</span>
-          <span className={device ? 'ep-name' : 'ep-name mono'} title={event.TailnetPeerName || address}>{device || address}</span>
-        </div>
-        {device && <div className="ep-sub"><span className="mono">{address}</span></div>}
-      </div>
+      <span className="ep">
+        <span className="tag scope tailscale" title="Tailnet device">tailnet</span>
+        {device ? <Tag className="ep-name" title={event.TailnetPeerName} condition={is('peer', event.TailnetPeerName)} onFilter={onFilter}>{device}</Tag> : null}
+        {addressTag}
+      </span>
     );
   }
   return (
-    <div className="ep">
-      <div className="ep-main">
-        <span className={`tag scope ${scope}`} title={scopeLabel(scope)}>{scopeTag(scope)}</span>
-        <span className={name ? 'ep-name' : 'ep-name mono'} title={name || address}>{name || address}</span>
-      </div>
-      {name && <div className="ep-sub"><span className="mono">{address}</span></div>}
-    </div>
+    <span className="ep">
+      <span className={`tag scope ${scope}`} title={scopeLabel(scope)}>{scopeTag(scope)}</span>
+      {name && <Tag className="ep-name" title={`Name ${name}`} condition={is('domain', name.replace(/\.$/, ''))} onFilter={onFilter}>{name}</Tag>}
+      {addressTag}
+    </span>
   );
 }
 
@@ -81,13 +111,11 @@ function Details({ event }: { event: NetworkEvent }) {
   switch (event.EventType) {
     case 'GAP':
       return <span className="detail-main">{event.EventCount.toLocaleString()} lost · {event.Reason}</span>;
-    case 'DNS':
-      return (
-        <>
-          <span className="detail-main">{event.DNSType === 'RESPONSE' ? 'answer ' : 'query '}<strong>{event.DNSQuery}</strong></span>
-          {(event.DNSAnswers || (event.DNSResponseCode && event.DNSResponseCode !== 'NOERROR')) && <span className="detail-sub mono">{event.DNSResponseCode && event.DNSResponseCode !== 'NOERROR' ? event.DNSResponseCode : event.DNSAnswers}</span>}
-        </>
-      );
+    case 'DNS': {
+      const failed = event.DNSResponseCode && event.DNSResponseCode !== 'NOERROR';
+      const answer = failed ? event.DNSResponseCode : event.DNSAnswers;
+      return <span className="detail-main" title={answer || undefined}>{event.DNSType === 'RESPONSE' ? '' : 'query '}<strong>{event.DNSQuery}</strong>{answer ? <span className={failed ? 'warn-text' : 'muted'}> → {answer}</span> : null}</span>;
+    }
     case 'TLS_SNI':
       return <span className="detail-main">SNI <strong>{event.TLSSNI}</strong></span>;
     case 'ICMP':
@@ -103,36 +131,41 @@ function duration(milliseconds: number): string {
   return `${Math.round(milliseconds / 60_000)} min`;
 }
 
+/** Time of day on today's rows, else the date and minute: rows stay narrow. */
+function rowTime(value: string): string {
+  const date = new Date(value);
+  const today = date.toDateString() === new Date().toDateString();
+  return date.toLocaleString(undefined, today
+    ? { hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' }
+    : { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
+}
+
 const rawSkip = new Set(['ID']);
 
-export function EventRow({ event, expanded, onToggle, onFilter }: { event: NetworkEvent; expanded: boolean; onToggle: () => void; onFilter?: (filter: Filter) => void }) {
+export function EventRow({ event, expanded, onToggle, onFilter, fresh }: { event: NetworkEvent; expanded: boolean; onToggle: () => void; onFilter?: OnFilter; fresh?: boolean }) {
   const kind = family(event.EventType);
   const link = interfaceRole(event.Interface);
   const route = routeInfo(event.Route);
   const peer = event.TailnetPeerName ? deviceName(event.TailnetPeerName) : event.TailnetPeer;
   const src = source(event), dst = destination(event);
   return (
-    <li className={`ev ${kind} ${expanded ? 'open' : ''}`}>
+    <li className={`ev ${kind} ${expanded ? 'open' : ''} ${fresh ? 'fresh' : ''}`}>
       <div className="ev-row" role="button" tabIndex={0} aria-expanded={expanded} onClick={onToggle}
         onKeyDown={key => { if (key.key === 'Enter' || key.key === ' ') { key.preventDefault(); onToggle(); } }}>
-        <div className="ev-time mono" title={dateTime(event.Timestamp)}>{time(event.Timestamp)}</div>
-        <div className="ev-type"><span className={`type ${kind}`}>{eventLabel(event.EventType)}</span></div>
-        <div className="ev-src"><Endpoint side={src} which="src" event={event} onFilter={onFilter} /></div>
-        <div className="ev-arrow" aria-label="to"><Icon name="arrow" /></div>
-        <div className="ev-dst"><Endpoint side={dst} which="dst" name={dst.kind ? undefined : remoteName(event)} event={event} onFilter={onFilter} /></div>
-        <div className="ev-detail">
+        <span className="ev-time mono" title={dateTime(event.Timestamp)}>{rowTime(event.Timestamp)}</span>
+        <span className="ev-type"><Tag className={`type ${kind}`} title={event.EventType} condition={is('type', event.EventType)} onFilter={onFilter}>{eventLabel(event.EventType)}</Tag></span>
+        <span className="ev-src"><Endpoint side={src} which="src" event={event} onFilter={onFilter} /></span>
+        <span className="ev-arrow" aria-label="to"><Icon name="arrow" size={14} /></span>
+        <span className="ev-dst"><Endpoint side={dst} which="dst" name={dst.kind ? undefined : remoteName(event)} event={event} onFilter={onFilter} /></span>
+        <span className="ev-detail">
           <Details event={event} />
-          <span className="ev-context">
-            {route && <Tag className="ctx route" title={`${route.help}${event.TailnetPeer ? ` Device: ${event.TailnetPeerName || event.TailnetPeer}.` : ''}`} filter={{ route: event.Route }} onFilter={onFilter}>{route.label}{peer ? <span className="muted"> · {peer}</span> : null}</Tag>}
-            {event.ProcessCommand && <Tag className="ctx process" title={processTitle(event)} onFilter={onFilter}
-              filter={event.ProcessSide ? { process: event.ProcessCommand, processPod: event.ProcessPod, processContainer: event.ProcessContainer, collector: event.CollectorID } : undefined}>
-              <Icon name="process" size={12} />{event.ProcessCommand}{event.ProcessContainer && event.ProcessContainer !== event.ProcessCommand ? <span className="muted"> · {event.ProcessContainer}</span> : null}
-            </Tag>}
-            <Tag className="ctx" title={`${event.Interface}: ${link.help}`} filter={link.id ? { ifaceRole: link.id } : undefined} onFilter={onFilter}><Icon name="network" size={12} />{link.role}</Tag>
-            {event.IPVersion > 0 && <Tag className="ctx" title={`IPv${event.IPVersion}`} filter={{ ipVersion: String(event.IPVersion) }} onFilter={onFilter}>IPv{event.IPVersion}</Tag>}
-            <Tag className="ctx" title="Collector (node) that captured the packet" filter={event.CollectorID ? { collector: event.CollectorID } : undefined} onFilter={onFilter}>{event.CollectorID || 'local'}</Tag>
-          </span>
-        </div>
+          {route && <Tag className="ctx route" title={`${route.help}${event.TailnetPeer ? ` Device: ${event.TailnetPeerName || event.TailnetPeer}.` : ''}`} condition={is('route', event.Route)} onFilter={onFilter}>{route.label}{peer ? <span className="muted"> · {peer}</span> : null}</Tag>}
+          {event.ProcessCommand && <Tag className="ctx process" title={processTitle(event)} condition={is('process', event.ProcessCommand)} onFilter={onFilter}>
+            <Icon name="process" size={12} />{event.ProcessCommand}{event.ProcessContainer && event.ProcessContainer !== event.ProcessCommand ? <span className="muted"> · {event.ProcessContainer}</span> : null}
+          </Tag>}
+          <Tag className="ctx" title={`${event.Interface}: ${link.help}`} condition={link.id ? is('iface.type', link.id) : undefined} onFilter={onFilter}>{link.role}</Tag>
+          <Tag className="ctx node" title="Collector (node) that captured the packet" condition={event.CollectorID ? is('node', event.CollectorID) : undefined} onFilter={onFilter}>{event.CollectorID || 'local'}</Tag>
+        </span>
       </div>
       {expanded && <EventDetails event={event} />}
     </li>
