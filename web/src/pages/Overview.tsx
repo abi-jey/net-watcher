@@ -4,6 +4,7 @@ import { href, useResource } from '../lib/hooks.ts';
 import { format, is } from '../lib/filter.ts';
 import { windowRange } from '../lib/window.ts';
 import { age, bytes, count } from '../lib/format.ts';
+import { eventLabel, family } from '../lib/network.ts';
 import { Banner, Card, Empty, ErrorBanner, Segmented, Spinner, Stat, StateBadge, UpdatedAt, stateHelp, stateTone } from '../components/ui.tsx';
 import { HostBars, TimelineChart } from '../components/charts.tsx';
 
@@ -53,10 +54,10 @@ export function Overview() {
       </Card>
       <div className="grid two">
         <Card title="Top names (24 h, events)">
-          {hostnames.data?.hosts?.length ? <HostBars hosts={hostnames.data.hosts} metric="events" /> : hostnames.loading ? <Spinner /> : <Empty>No names resolved.</Empty>}
+          {hostnames.data?.hosts?.length ? <HostBars hosts={hostnames.data.hosts} metric="events" link={host => href(['events'], { w: '24h', f: format(is('domain', host)) })} /> : hostnames.loading ? <Spinner /> : <Empty>No names resolved.</Empty>}
         </Card>
         <Card title="Top destinations (24 h, bytes)">
-          {destinations.data?.hosts?.length ? <HostBars hosts={destinations.data.hosts} metric="traffic" /> : destinations.loading ? <Spinner /> : <Empty>No traffic recorded.</Empty>}
+          {destinations.data?.hosts?.length ? <HostBars hosts={destinations.data.hosts} metric="traffic" link={host => href(['events'], { w: '24h', f: format(is('dst.ip', host)) })} /> : destinations.loading ? <Spinner /> : <Empty>No traffic recorded.</Empty>}
         </Card>
       </div>
       <div className="grid two">
@@ -65,9 +66,9 @@ export function Overview() {
             <div className="hbar">
               {Object.entries(stats.data.eventCounts ?? {}).sort((a, b) => b[1] - a[1]).map(([type, total]) => (
                 <div key={type} style={{ display: 'contents' }}>
-                  <a className="name" href={href(['events'], { f: format(is('type', type)) })}>{type}</a>
+                  <a className="name" href={href(['events'], { f: format(is('type', type)) })} title={type}><span className={`swatch ${family(type)}`} /> {eventLabel(type)}</a>
                   <span className="muted small">{count(total)}</span>
-                  <span className="track"><span style={{ width: `${(total / Math.max(1, stats.data!.totalEvents)) * 100}%` }} /></span>
+                  <span className={`track ${family(type)}`}><span style={{ width: `${(total / Math.max(1, stats.data!.totalEvents)) * 100}%` }} /></span>
                 </div>
               ))}
             </div>
