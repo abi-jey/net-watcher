@@ -133,8 +133,8 @@ export function Events({ query }: { query: URLSearchParams }) {
       <form className="card filters" onSubmit={submit}>
         <label className="field grow">Search<input type="search" value={draft.q} onChange={event => setDraft({ ...draft, q: event.target.value })} placeholder="IP, DNS name, SNI, pod, namespace, workload or process" /></label>
         <label className="field">Window<WindowSelect value={draft.window} onChange={value => setDraft({ ...draft, window: value })} /></label>
-        <label className="field">Source IP<input value={draft.src} onChange={event => setDraft({ ...draft, src: event.target.value })} placeholder="10.0.1." size={12} /></label>
-        <label className="field">Destination IP<input value={draft.dst} onChange={event => setDraft({ ...draft, dst: event.target.value })} placeholder="any" size={12} /></label>
+        <label className="field">Source IP<input value={draft.src} onChange={event => setDraft({ ...draft, src: event.target.value })} placeholder="any" size={12} title="Matches any part of the address, such as 10.0.1." /></label>
+        <label className="field">Destination IP<input value={draft.dst} onChange={event => setDraft({ ...draft, dst: event.target.value })} placeholder="any" size={12} title="Matches any part of the address, such as 10.0.1." /></label>
         <button className="primary" type="submit" disabled={loading}>Search</button>
         <div className="chips" role="group" aria-label="Event types">
           {eventTypes.map(type => (
