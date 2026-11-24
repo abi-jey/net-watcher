@@ -1,11 +1,30 @@
-import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react';
-import { url, type DNSResolution, type MapLink, type MapNode, type NetworkMap as MapData } from '../lib/api.ts';
-import { useResource } from '../lib/hooks.ts';
+import { Fragment, useMemo, useState } from 'react';
+import { url, type DNSResolution, type MapLink, type NetworkMap as MapData } from '../lib/api.ts';
+import { href, useResource } from '../lib/hooks.ts';
 import { bytes, count, dateTime } from '../lib/format.ts';
-import { evidenceLabel, fit, layout, nodeHeight, nodeWidth, short, type Point } from '../lib/topology.ts';
+import { format, type Term } from '../lib/filter.ts';
+import { evidenceLabel, flowFilter, flowWidth, groupFilter, groupMap, layoutFlows, short, type Box, type Flow, type Group } from '../lib/topology.ts';
 import { Banner, Card, Empty, ErrorBanner, Spinner, UpdatedAt } from '../components/ui.tsx';
 
-const ownership = (node?: MapNode) => !node ? 'Unknown' : node.Kind === 'dns' ? 'DNS evidence' : node.Ownership === 'ours' ? `Ours · ${node.Scope}` : `${node.Scope} · unattributed`;
+/** Selection: a group (on either side) or a flow, by id. */
+type Selection = { group: string } | { flow: string } | null;
+
+function tone(group: Group): string {
+  if (group.kind === 'network') return group.scope === 'public' ? 'external' : 'internal';
+  return group.kind;
+}
+
+function eventsLink(filter: Term | null, since: string): string {
+  return href(['events'], { w: since, f: format(filter) || undefined });
+}
+
+/** The busiest values of a link property, as "443, 53 +3". */
+function summary(links: MapLink[], value: (link: MapLink) => string, limit = 4): string {
+  const totals = new Map<string, number>();
+  for (const link of links) totals.set(value(link), (totals.get(value(link)) ?? 0) + link.Events);
+  const sorted = [...totals.entries()].filter(([key]) => key).sort((a, b) => b[1] - a[1]).map(([key]) => key);
+  return sorted.slice(0, limit).join(', ') + (sorted.length > limit ? ` +${sorted.length - limit}` : '');
+}
 
 export function NetworkMap() {
   const [since, setSince] = useState('1h');
@@ -13,58 +32,27 @@ export function NetworkMap() {
   const [ip, setIP] = useState('');
   const [ipDraft, setIPDraft] = useState('');
   const [live, setLive] = useState(true);
-  const [selection, setSelection] = useState('');
-  const [positions, setPositions] = useState<Record<string, Point>>({});
-  const [view, setView] = useState({ x: 0, y: 0, scale: 0.8 });
-  const svg = useRef<SVGSVGElement>(null);
-  const drag = useRef<{ id: string; x: number; y: number; view: typeof view; position?: Point } | null>(null);
-  const fitted = useRef(false);
+  const [selection, setSelection] = useState<Selection>(null);
   // 30 s refresh while visible; the server caches each variant for 15 s.
   const map = useResource<MapData>(url('/api/network-map', { since, namespace, ip }), live ? 30_000 : undefined);
   const data = map.data;
 
-  useEffect(() => { fitted.current = false; }, [since, namespace, ip]);
-  useEffect(() => { if (data) setPositions(previous => layout(data.Nodes ?? [], data.Links ?? [], previous)); }, [data]);
-  const fitView = () => { const box = svg.current?.getBoundingClientRect(); if (box) setView(fit(positions, box.width, box.height)); };
-  useEffect(() => { if (!fitted.current && Object.keys(positions).length && svg.current) { fitView(); fitted.current = true; } }, [positions]); // eslint-disable-line react-hooks/exhaustive-deps
-  useEffect(() => {
-    const element = svg.current;
-    if (!element) return;
-    const wheel = (event: WheelEvent) => {
-      event.preventDefault();
-      const box = element.getBoundingClientRect();
-      const x = event.clientX - box.left, y = event.clientY - box.top;
-      setView(old => { const scale = Math.max(0.01, Math.min(3, old.scale * Math.exp(-event.deltaY * 0.001))); const ratio = scale / old.scale; return { x: x - (x - old.x) * ratio, y: y - (y - old.y) * ratio, scale }; });
-    };
-    element.addEventListener('wheel', wheel, { passive: false });
-    return () => element.removeEventListener('wheel', wheel);
-  }, []);
-
-  const startDrag = (event: ReactPointerEvent, id = '') => {
-    if (event.button !== 0) return;
-    event.stopPropagation();
-    svg.current?.setPointerCapture(event.pointerId);
-    drag.current = { id, x: event.clientX, y: event.clientY, view, position: positions[id] };
-    if (id) setSelection(id);
-  };
-  const moveDrag = (event: ReactPointerEvent) => {
-    const current = drag.current;
-    if (!current) return;
-    const dx = event.clientX - current.x, dy = event.clientY - current.y;
-    if (current.id && current.position) setPositions(previous => ({ ...previous, [current.id]: { x: current.position!.x + dx / current.view.scale, y: current.position!.y + dy / current.view.scale } }));
-    else setView({ ...current.view, x: current.view.x + dx, y: current.view.y + dy });
-  };
-
-  const nodes = data?.Nodes ?? [];
-  const links = data?.Links ?? [];
-  const index = useMemo(() => new Map(nodes.map(node => [node.ID, node])), [nodes]);
+  const { groups, flows } = useMemo(() => groupMap(data?.Nodes ?? [], data?.Links ?? []), [data]);
+  const layout = useMemo(() => layoutFlows(groups, flows), [groups, flows]);
+  const position = useMemo(() => new Map(layout.boxes.map(box => [box.key, box])), [layout]);
+  const most = Math.max(1, ...flows.map(flow => flow.events));
   const names = [...new Set([namespace, ...(data?.Namespaces ?? [])].filter(Boolean))].sort();
-  const activate = (event: React.KeyboardEvent, id: string) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); setSelection(id); } };
+  const addresses = data?.Nodes?.length ?? 0;
+
+  const selectedGroup = selection && 'group' in selection ? selection.group : '';
+  const selectedFlow = selection && 'flow' in selection ? selection.flow : '';
+  const related = (flow: Flow) => !selection || flow.id === selectedFlow || flow.source === selectedGroup || flow.target === selectedGroup;
+  const activate = (event: React.KeyboardEvent, next: Selection) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); setSelection(next); } };
 
   return (
     <>
       <div className="page-header">
-        <div><h1>Network map</h1><p>Observed connections, Kubernetes context and DNS evidence</p></div>
+        <div><h1>Network map</h1><p>Who opened connections to whom: pods grouped by workload, nodes by name, other addresses by network.</p></div>
         <UpdatedAt at={map.updatedAt} loading={map.loading} />
       </div>
       <div className="card toolbar">
@@ -80,107 +68,170 @@ export function NetworkMap() {
         </form>
         <label className="small"><input type="checkbox" checked={live} onChange={event => setLive(event.target.checked)} /> Auto-refresh</label>
         <button onClick={map.refresh} disabled={map.loading}>Refresh</button>
-        <button onClick={fitView}>Fit</button>
-        <button onClick={() => { if (data) setPositions(layout(data.Nodes ?? [], data.Links ?? [])); fitted.current = false; }}>Reset layout</button>
       </div>
       <ErrorBanner error={map.error} retry={map.refresh} />
-      {data?.Truncated && <Banner tone="warn">This is a bounded sample. Narrow the window, pick a namespace or filter by IP to see more.</Banner>}
+      {data?.Truncated && <Banner tone="warn">This is a bounded sample of the newest connections. Narrow the window, pick a namespace or filter by IP to see more.</Banner>}
       {data?.Kubernetes?.Error && <Banner tone="warn">Kubernetes inventory: {data.Kubernetes.Error}</Banner>}
-      <p className="muted small">{count(nodes.length)} nodes · {count(links.length)} relationships · {count(data?.Observations ?? 0)} connection observations</p>
+      <p className="muted small">{count(groups.size)} groups · {count(flows.length)} flows · {count(addresses)} addresses · {count(data?.Observations ?? 0)} connection observations</p>
       <div className="map-layout">
-        <div className="card" style={{ padding: 8 }}>
-          <svg ref={svg} className="map-canvas" role="application" aria-label="Interactive network map" onPointerDown={event => startDrag(event)} onPointerMove={moveDrag} onPointerUp={() => { drag.current = null; }} onPointerCancel={() => { drag.current = null; }}>
-            <defs>
-              <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M 0 0 L 10 5 L 0 10 z" fill="var(--accent-work)" /></marker>
-            </defs>
-            <g transform={`translate(${view.x},${view.y}) scale(${view.scale})`}>
-              {links.map(link => {
-                const a = positions[link.Source], b = positions[link.Target];
+        <div className="card map-card">
+          {flows.length > 0 ? (
+            <div className="map-scroll">
+            <svg className="flow-map" viewBox={`0 0 ${layout.width} ${layout.height}`} style={{ aspectRatio: `${layout.width} / ${layout.height}` }}
+              role="group" aria-label="Connections between groups; select a group or a flow for details" onClick={() => setSelection(null)}>
+              <text x={0} y={14} className="column-title">Opened by</text>
+              <text x={layout.width} y={14} className="column-title" textAnchor="end">Received by</text>
+              {layout.headings.map(heading => (
+                <text key={`${heading.side}:${heading.text}`} x={heading.side === 'source' ? 0 : layout.width} y={heading.y} textAnchor={heading.side === 'source' ? 'start' : 'end'} className="section-title">{heading.text}</text>
+              ))}
+              {[...flows].sort((a, b) => Number(related(a)) - Number(related(b)) || a.events - b.events).map(flow => {
+                const a = position.get(`source:${flow.source}`), b = position.get(`target:${flow.target}`);
                 if (!a || !b) return null;
-                const x1 = a.x + nodeWidth, y1 = a.y + nodeHeight / 2, x2 = b.x, y2 = b.y + nodeHeight / 2;
-                const bend = Math.max(65, Math.abs(x2 - x1) / 2);
+                const x1 = a.x + layout.boxWidth, y1 = a.y + layout.boxHeight / 2, x2 = b.x, y2 = b.y + layout.boxHeight / 2;
+                const bend = (x2 - x1) / 2;
                 const path = `M${x1},${y1} C${x1 + bend},${y1} ${x2 - bend},${y2} ${x2},${y2}`;
-                const label = link.Kind === 'connection' ? `${link.Protocol} ${link.Port || ''} · ${link.Events}` : link.Kind === 'dns_query' ? 'DNS query' : 'DNS answer';
+                const protocol = summary(flow.links, link => link.Protocol, 1).toLowerCase();
+                const title = `${a.group.label} → ${b.group.label}: ${count(flow.events)} ${flow.events === 1 ? 'connection' : 'connections'}${flow.bytes ? `, ${bytes(flow.bytes)}` : ''}; ports ${summary(flow.links, link => String(link.Port || ''))}`;
                 return (
-                  <g key={link.ID} className={`map-link ${link.Kind} ${selection === link.ID ? 'selected' : ''}`} role="button" tabIndex={0}
-                    aria-label={`${label}: ${index.get(link.Source)?.Label} to ${index.get(link.Target)?.Label}`}
-                    onKeyDown={event => activate(event, link.ID)} onPointerDown={event => event.stopPropagation()} onClick={() => setSelection(link.ID)}>
-                    <path d={path} className="hit" /><path d={path} className="line" markerEnd="url(#arrow)" />
-                    <text x={(x1 + x2) / 2} y={(y1 + y2) / 2 - 8} textAnchor="middle">{label}</text>
+                  <g key={flow.id} className={`flow ${protocol} ${related(flow) ? '' : 'faded'} ${flow.id === selectedFlow ? 'selected' : ''}`}
+                    role="button" tabIndex={0} aria-label={title} onKeyDown={event => activate(event, { flow: flow.id })}
+                    onClick={event => { event.stopPropagation(); setSelection({ flow: flow.id }); }}>
+                    <title>{title}</title>
+                    <path d={path} className="hit" />
+                    <path d={path} className="line" style={{ strokeWidth: flowWidth(flow.events, most) }} />
                   </g>
                 );
               })}
-              {nodes.map(node => {
-                const p = positions[node.ID];
-                if (!p) return null;
-                return (
-                  <g key={node.ID} transform={`translate(${p.x},${p.y})`} className={`map-node ${node.Kind} ${node.Ownership === 'ours' ? 'owned' : node.Scope} ${selection === node.ID ? 'selected' : ''}`}
-                    role="button" tabIndex={0} aria-label={`${node.Kind}: ${node.Label}, ${ownership(node)}`} onKeyDown={event => activate(event, node.ID)} onPointerDown={event => startDrag(event, node.ID)}>
-                    <title>{`${node.Label}${node.IP ? ` (${node.IP})` : ''} · ${ownership(node)}`}</title>
-                    <rect width={nodeWidth} height={nodeHeight} rx={10} />
-                    <text x={14} y={20} className="kind">{`${node.Kind} · ${ownership(node)}`.toUpperCase()}</text>
-                    <text x={14} y={43} className="title">{short(node.Label)}</text>
-                    <text x={14} y={63} className="address">{node.IP || 'client-scoped DNS observation'}</text>
-                  </g>
-                );
-              })}
-            </g>
-          </svg>
-          {!nodes.length && (map.loading ? <Empty><Spinner /> Loading observations…</Empty> : <Empty>No observations in this window.</Empty>)}
-          <div className="legend" style={{ padding: '8px 4px 0' }}>
-            <span><span className="dot ok" />Ours (inventory or configured)</span>
-            <span><span className="dot" style={{ background: 'var(--accent-work)' }} />Internal · unattributed</span>
-            <span><span className="dot" style={{ background: 'var(--editorial)' }} />External · unattributed</span>
-            <span>Drag nodes · drag background to pan · scroll to zoom</span>
+              {layout.boxes.map(box => <GroupBox key={box.key} box={box} layout={layout} selected={box.group.id === selectedGroup}
+                dim={Boolean(selection) && box.group.id !== selectedGroup && !flows.some(flow => related(flow) && (box.side === 'source' ? flow.source : flow.target) === box.group.id)}
+                onSelect={() => setSelection({ group: box.group.id })} onKey={event => activate(event, { group: box.group.id })} />)}
+            </svg>
+            </div>
+          ) : map.loading ? <Empty><Spinner /> Loading observations…</Empty> : <Empty>No connections in this window.</Empty>}
+          <div className="legend">
+            <span><span className="swatch-line workload" />Pods</span>
+            <span><span className="swatch-line node" />Nodes</span>
+            <span><span className="swatch-line service" />Services</span>
+            <span><span className="swatch-line internal" />Private network, tailnet</span>
+            <span><span className="swatch-line external" />Internet</span>
+            <span>Line width: connections, on a log scale · select a box or line for details</span>
           </div>
         </div>
-        <Inspector selection={selection} data={data} index={index} onClose={() => setSelection('')} />
+        <Inspector selection={selection} groups={groups} flows={flows} since={since} onClose={() => setSelection(null)} />
       </div>
-      <p className="muted small">“Ours” means a pod, Service or node identified by Kubernetes inventory, or an address configured as owned. “Internal” includes private, link-local and Tailscale ranges; unattributed does not mean someone else owns them. The map shows capture observations, not firewall verdicts. NAT paths and encrypted DNS are not inferred.</p>
+      <p className="muted small">Groups come from Kubernetes inventory at capture time; addresses outside it are grouped by network and are not attributed to anyone. The map shows capture observations, not firewall verdicts. NAT paths and encrypted DNS are not inferred.</p>
     </>
   );
 }
 
-function Inspector({ selection, data, index, onClose }: { selection: string; data?: MapData; index: Map<string, MapNode>; onClose: () => void }) {
-  if (!selection || !data) return <Card title="Details"><p className="muted">Select a node or connection to see its endpoints, Kubernetes ownership and DNS evidence.</p></Card>;
-  const node = index.get(selection);
-  const allLinks = data.Links ?? [];
-  const link = allLinks.find(item => item.ID === selection);
-  if (!node && !link) return <Card title="Details" actions={<button onClick={onClose}>Clear</button>}><p className="muted">This item is outside the current window.</p></Card>;
-  const related: MapLink[] = node ? allLinks.filter(edge => edge.Source === node.ID || edge.Target === node.ID) : [link!];
-  const ids = [...new Set(related.flatMap(edge => edge.EvidenceIDs ?? []))];
+function GroupBox({ box, layout, selected, dim, onSelect, onKey }: { box: Box; layout: { boxWidth: number; boxHeight: number }; selected: boolean; dim: boolean; onSelect: () => void; onKey: (event: React.KeyboardEvent) => void }) {
+  const { group } = box;
+  return (
+    <g transform={`translate(${box.x},${box.y})`} className={`group-box ${tone(group)} ${selected ? 'selected' : ''} ${dim ? 'faded' : ''}`}
+      role="button" tabIndex={0} aria-label={`${group.label}, ${group.detail}, ${count(box.events)} connections ${box.side === 'source' ? 'opened' : 'received'}`}
+      onKeyDown={onKey} onClick={event => { event.stopPropagation(); onSelect(); }}>
+      <title>{`${group.label} · ${group.detail}`}</title>
+      <rect width={layout.boxWidth} height={layout.boxHeight} rx={7} />
+      <rect width={4} height={layout.boxHeight} rx={2} className="accent" />
+      <text x={14} y={17} className="title">{short(group.label, 30)}</text>
+      <text x={14} y={32} className="detail">{short(group.detail, 42)}</text>
+      <text x={layout.boxWidth - 10} y={17} className="count" textAnchor="end">{count(box.events)}</text>
+    </g>
+  );
+}
+
+function Inspector({ selection, groups, flows, since, onClose }: { selection: Selection; groups: Map<string, Group>; flows: Flow[]; since: string; onClose: () => void }) {
+  if (!selection) {
+    return (
+      <Card title="Details">
+        <p className="muted">Select a group to see its members and connections, or a line to see one flow: ports, collectors, DNS evidence and its events.</p>
+      </Card>
+    );
+  }
+  const group = 'group' in selection ? groups.get(selection.group) : undefined;
+  const flow = 'flow' in selection ? flows.find(item => item.id === selection.flow) : undefined;
+  if (!group && !flow) return <Card title="Details" actions={<button onClick={onClose}>Clear</button>}><p className="muted">This item is outside the current window.</p></Card>;
+  const links = flow ? flow.links : flows.filter(item => item.source === group!.id || item.target === group!.id).flatMap(item => item.links);
+  const ids = [...new Set(links.flatMap(link => link.EvidenceIDs ?? []))];
   return (
     <div className="card inspector" aria-label="Details">
       <header style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
-        <h2>{node ? node.Label : link!.Kind === 'connection' ? `${link!.Protocol} connection` : 'DNS relationship'}</h2>
+        <h2>{group ? group.label : `${groups.get(flow!.source)?.label} → ${groups.get(flow!.target)?.label}`}</h2>
         <button className="ghost" onClick={onClose} aria-label="Close details">✕</button>
       </header>
-      {node && (
-        <dl className="kv">
-          <dt>Kind</dt><dd>{node.Kind}</dd>
-          <dt>Address</dt><dd className="mono">{node.IP || 'DNS name'}</dd>
-          {node.Kind !== 'dns' && <><dt>Ownership</dt><dd>{ownership(node)}{node.OwnershipSource ? ` (${node.OwnershipSource})` : ''}</dd></>}
-          {node.Context?.Namespace && <><dt>Namespace</dt><dd>{node.Context.Namespace}</dd></>}
-          {node.Context?.Owner?.Name && <><dt>Workload</dt><dd>{node.Context.Owner.Kind}/{node.Context.Owner.Name}</dd></>}
-          {node.Context?.Node && <><dt>Node</dt><dd>{node.Context.Node}</dd></>}
-          {node.Context?.UID && <><dt>UID</dt><dd className="mono">{node.Context.UID}</dd></>}
-          {node.Context?.Kind && <><dt>Inventory snapshot</dt><dd>{dateTime(node.Context.ObservedAt)}</dd></>}
-        </dl>
-      )}
-      {link && (
-        <dl className="kv">
-          <dt>Source</dt><dd>{index.get(link.Source)?.Label}</dd>
-          <dt>Destination</dt><dd>{index.get(link.Target)?.Label}</dd>
-          <dt>Protocol / port</dt><dd>{link.Protocol} / {link.Port || '—'}</dd>
-          <dt>Captured by</dt><dd>{link.CollectorID || 'local'} · {link.Interface || '—'}</dd>
-          <dt>Observations</dt><dd>{count(link.Events)} · {bytes(link.Bytes)}</dd>
-          <dt>Seen</dt><dd>{dateTime(link.FirstSeen)} – {dateTime(link.LastSeen)}</dd>
-          <dt>Evidence</dt><dd>{evidenceLabel(link)}</dd>
-          {!!link.SNI?.length && <><dt>TLS SNI</dt><dd>{link.SNI.join(', ')}</dd></>}
-        </dl>
-      )}
+      {group ? <GroupDetails group={group} groups={groups} flows={flows} since={since} /> : <FlowDetails flow={flow!} groups={groups} since={since} />}
       <Evidence ids={ids} />
     </div>
+  );
+}
+
+function GroupDetails({ group, groups, flows, since }: { group: Group; groups: Map<string, Group>; flows: Flow[]; since: string }) {
+  const out = flows.filter(flow => flow.source === group.id).sort((a, b) => b.events - a.events);
+  const into = flows.filter(flow => flow.target === group.id).sort((a, b) => b.events - a.events);
+  const members = [...new Set(group.members.map(member => (group.kind === 'workload' ? member.Context?.Name : member.IP) || member.Label))].sort();
+  const filter = groupFilter(group);
+  return (
+    <>
+      <p className="muted small" style={{ margin: 0 }}>{group.detail}</p>
+      {filter
+        ? <a className="button small" href={eventsLink(filter, since)}>Show its events</a>
+        : <p className="muted small" style={{ margin: 0 }}>Too many addresses to list in one filter; select a line to see one flow's events.</p>}
+      <section>
+        <h3>{group.kind === 'workload' ? 'Pods' : 'Addresses'} ({count(members.length)})</h3>
+        <ul className="member-list mono">
+          {members.slice(0, 40).map(member => <li key={member}>{member}</li>)}
+          {members.length > 40 && <li className="muted">+{count(members.length - 40)} more</li>}
+        </ul>
+      </section>
+      {[['Opened connections to', out, 'target'], ['Received connections from', into, 'source']].map(([title, list, end]) => (list as Flow[]).length > 0 && (
+        <section key={title as string}>
+          <h3>{title as string}</h3>
+          <dl className="kv">
+            {(list as Flow[]).slice(0, 12).map(flow => (
+              <Fragment key={flow.id}>
+                <dt><FlowLink flow={flow} groups={groups} since={since}>{short(groups.get(end === 'target' ? flow.target : flow.source)?.label ?? '', 26)}</FlowLink></dt>
+                <dd>{count(flow.events)} · ports {summary(flow.links, link => String(link.Port || ''), 3) || '—'}</dd>
+              </Fragment>
+            ))}
+          </dl>
+        </section>
+      ))}
+    </>
+  );
+}
+
+function addressList(addresses: Set<string>, limit = 6): string {
+  const sorted = [...addresses].sort();
+  return sorted.slice(0, limit).join(', ') + (sorted.length > limit ? ` +${sorted.length - limit}` : '');
+}
+
+function FlowLink({ flow, groups, since, children }: { flow: Flow; groups: Map<string, Group>; since: string; children: React.ReactNode }) {
+  const filter = flowFilter(flow, groups);
+  return filter ? <a href={eventsLink(filter, since)}>{children}</a> : <>{children}</>;
+}
+
+function FlowDetails({ flow, groups, since }: { flow: Flow; groups: Map<string, Group>; since: string }) {
+  const source = groups.get(flow.source)!, target = groups.get(flow.target)!;
+  const first = flow.links.map(link => link.FirstSeen).filter(Boolean).sort()[0];
+  const last = flow.links.map(link => link.LastSeen).filter(Boolean).sort().at(-1);
+  const names = [...new Set(flow.links.flatMap(link => link.SNI ?? []))];
+  return (
+    <>
+      {flowFilter(flow, groups)
+        ? <a className="button small" href={eventsLink(flowFilter(flow, groups), since)}>Show these events</a>
+        : <p className="muted small" style={{ margin: 0 }}>Too many addresses to list in one filter; narrow the window or filter by IP.</p>}
+      <dl className="kv">
+        <dt>From</dt><dd>{source.label} <span className="muted">· {source.kind === 'network' ? addressList(flow.sourceAddresses) : source.detail}</span></dd>
+        <dt>To</dt><dd>{target.label} <span className="muted">· {target.kind === 'network' ? addressList(flow.targetAddresses) : target.detail}</span></dd>
+        <dt>Connections</dt><dd>{count(flow.events)}{flow.bytes ? ` · ${bytes(flow.bytes)}` : ''}</dd>
+        <dt>Protocols</dt><dd>{summary(flow.links, link => link.Protocol)}</dd>
+        <dt>Ports</dt><dd className="mono">{summary(flow.links, link => String(link.Port || ''), 8) || '—'}</dd>
+        <dt>Captured by</dt><dd>{summary(flow.links, link => `${link.CollectorID || 'local'} · ${link.Interface || '—'}`, 3)}</dd>
+        <dt>Seen</dt><dd>{dateTime(first)} – {dateTime(last)}</dd>
+        <dt>Evidence</dt><dd>{flow.links.some(link => link.EvidenceIDs?.length) ? `${flow.links.filter(link => link.EvidenceIDs?.length).length} of ${flow.links.length} address pairs: ${evidenceLabel({ EvidenceIDs: [1] })}` : evidenceLabel({ EvidenceIDs: null })}</dd>
+        {names.length > 0 && <><dt>TLS SNI</dt><dd>{names.slice(0, 8).join(', ')}{names.length > 8 ? ` +${names.length - 8}` : ''}</dd></>}
+      </dl>
+    </>
   );
 }
 
