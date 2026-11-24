@@ -23,6 +23,11 @@ RUN make build VERSION="$VERSION" COMMIT_SHA="$COMMIT_SHA"
 # without OpenSSL: Go uses its own TLS implementation.
 FROM gcr.io/distroless/base-nossl-debian12:nonroot
 
+# Links the GHCR package to this repository, so its workflows can publish it.
+LABEL org.opencontainers.image.source="https://github.com/abi-jey/net-watcher" \
+      org.opencontainers.image.description="Network event capture and audit log for hosts and Kubernetes nodes" \
+      org.opencontainers.image.licenses="MIT"
+
 COPY --from=build /src/net-watcher /net-watcher
 USER nonroot:nonroot
 ENTRYPOINT ["/net-watcher"]
