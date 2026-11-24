@@ -285,6 +285,7 @@ up in the socket table of that pod's network namespace (or the host's), then
 finds which of that pod's processes holds the socket. For the receiving side
 of a connection not yet accepted, the listening socket identifies the server.
 Later events of the same connection (TLS, end, timeout) reuse the result.
+
 A process running as another (non-root) user keeps `/proc/<pid>/fd` private to
 that user, which `CAP_SYS_PTRACE` does not override. For such sockets the
 socket table's owner uid is matched against the pod's processes: if every
@@ -293,11 +294,20 @@ are recorded with PID 0 ("PID not readable"); otherwise the connection stays
 unattributed. Adding `CAP_DAC_READ_SEARCH` would make those descriptors
 readable and record exact PIDs, at the cost of letting the collector read any
 file it can reach through `/host/proc`.
+
 All `/proc` reads happen on one background worker within a CPU-time budget of
 about 3% of one core, so packet capture never waits for it; lookups beyond the
-budget are skipped and counted. The collector logs counters every 30 seconds
-(`Process attribution`: attempted, matched, inherited, no_socket, over_budget,
-expired, proc_ms).
+budget are skipped and counted. Reading a TCP socket table walks the kernel's
+node-wide connection hash whichever namespace it is for (about 1 ms even when
+nearly empty), so one read serves every lookup for that namespace queued
+before it started. Endpoints that cannot match (kernel tunnels such as VXLAN,
+ports with no listener) are skipped for a minute.
+
+Every 30 seconds the collector logs `Process attribution` with its counters
+(`attempted`, `matched`, `by_owner`, `inherited`, `no_socket`, `no_owner`,
+`known_miss`, `deadline_hit`, `over_budget`, `expired`, `tables_read`,
+`tables_reused`, `lookup_ms`, `snapshot_ms`) and up to four example misses
+with their reason.
 
 Connections stay unattributed when the socket closed before the lookup ran,
 when neither end runs on a node with a collector, or during bursts beyond the

@@ -313,3 +313,46 @@ func TestProcessIdentifiedBySocketOwnerWhenDescriptorsArePrivate(t *testing.T) {
 		})
 	}
 }
+
+// One socket table read serves every lookup queued before it started: such a
+// read lists each of their sockets that was still open. Flows queued later
+// need a new read, and the table that held a namespace's last socket is read
+// first.
+func TestSocketTableReadServesLookupsQueuedBeforeIt(t *testing.T) {
+	a, _ := newTestAttributor(t)
+	procDir := filepath.Join(a.root, "200")
+	deadline := time.Now().Add(time.Minute)
+	queued := time.Now()
+	client := candidate{side: "src", ip: "10.2.0.8", port: 40000, otherIP: "10.96.0.1", otherPort: 443, netns: "net:[2]", queuedAt: queued}
+	if inode, _, _ := a.findSocket(client, procDir, false, deadline); inode != "700" {
+		t.Fatalf("client socket: %q", inode)
+	}
+	server := candidate{side: "dst", ip: "10.2.0.8", port: 8080, otherIP: "10.2.0.30", otherPort: 41000, netns: "net:[2]", queuedAt: queued}
+	if inode, _, _ := a.findSocket(server, procDir, false, deadline); inode != "701" || a.tableReads.Load() != 1 || a.tableReuse.Load() != 1 {
+		t.Fatalf("listener %q from %d reads, %d reused", inode, a.tableReads.Load(), a.tableReuse.Load())
+	}
+
+	// A socket opened after the read is found by a flow queued after it.
+	file, err := os.OpenFile(filepath.Join(procDir, "net", "tcp"), os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = file.WriteString(socketRow("10.2.0.8", 40001, "10.96.0.1", 443, "01", "704"))
+	_ = file.Close()
+	later := client
+	later.port, later.queuedAt = 40001, time.Now()
+	if inode, _, _ := a.findSocket(later, procDir, false, deadline); inode != "704" || a.tableReads.Load() != 2 {
+		t.Fatalf("new socket %q after %d reads", inode, a.tableReads.Load())
+	}
+
+	// The sidecar's dual-stack socket is in tcp6; after one find there, the
+	// namespace's tcp6 table is read first.
+	sidecar := candidate{side: "src", ip: "10.2.0.8", port: 15001, otherIP: "10.2.0.20", otherPort: 52000, netns: "net:[2]", queuedAt: time.Now()}
+	if inode, _, _ := a.findSocket(sidecar, procDir, false, deadline); inode != "702" || a.tableReads.Load() != 4 {
+		t.Fatalf("v4-mapped socket %q after %d reads", inode, a.tableReads.Load())
+	}
+	sidecar.queuedAt = time.Now()
+	if inode, _, _ := a.findSocket(sidecar, procDir, false, deadline); inode != "702" || a.tableReads.Load() != 5 {
+		t.Fatalf("tcp6 not read first: %q after %d reads", inode, a.tableReads.Load())
+	}
+}

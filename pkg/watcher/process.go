@@ -1,7 +1,7 @@
 package watcher
 
 import (
-	"bufio"
+	"bytes"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -39,7 +39,10 @@ const (
 	processSnapshotEvery  = 15 * time.Second
 	processSnapshotOnMiss = 3 * time.Second // A pod unknown to the snapshot may have just started.
 	processRemoteFor      = time.Minute     // A pod UID with no processes here is on another node.
-	processLookupDeadline = 10 * time.Millisecond
+	// A TCP socket table read walks the kernel's node-wide connection hash,
+	// whichever namespace it is for: about 1 ms even when nearly empty, more
+	// on large or busy nodes.
+	processLookupDeadline = 25 * time.Millisecond
 	processMaxFDLinks     = 4096
 	processQueueAge       = 2 * time.Second // Older sockets have likely closed.
 	processFlowTTL        = 15 * time.Minute
@@ -49,6 +52,7 @@ const (
 	processMaxMisses      = 50_000
 	processQueueSize      = 256
 	processFullRescan     = time.Minute // Between rescans, only new PIDs are read in full.
+	processMaxTables      = 64          // Socket tables kept for lookups queued before they were read.
 	// /proc work is bounded to about 3% of one core on average, with bursts of
 	// twice that: two thirds for pod lookups and snapshots, which are cheap
 	// and most useful, one third for host lookups, which may scan the
@@ -83,6 +87,7 @@ type procSnapshot struct {
 	byPod     map[string][]procEntry // Pod UID -> processes in the pod's own network namespace.
 	host      []procEntry            // Processes in the host network namespace.
 	hostIPs   map[string]bool
+	podNetns  map[string]string // Pod UID -> network namespace.
 }
 
 type processJob struct {
@@ -136,6 +141,13 @@ type processAttributor struct {
 	// resume: where a descriptor scan that ran out of time continues for the
 	// same socket, so a socket held deep in a busy host is found eventually.
 	resume map[string]int
+	// tables: recently read socket tables by namespace and name. A table read
+	// after a flow was queued lists its socket if it was still open, so one
+	// read serves every lookup waiting for that namespace.
+	tables map[string]socketTable
+	// tableFirst: per namespace, protocol and side, the table (IPv4 or IPv6)
+	// that last held the socket, read first next time.
+	tableFirst map[string]int
 
 	hostIPs atomic.Pointer[map[string]bool]
 
@@ -151,7 +163,13 @@ type processAttributor struct {
 	budgetHit, overBudget, expired          atomic.Uint64
 	queueFull, noSocket, snapshots, indexed atomic.Uint64
 	knownMiss, noOwner, byOwner             atomic.Uint64
+	tableReads, tableReuse                  atomic.Uint64
 	work, snapshotWork                      atomic.Int64 // Nanoseconds spent reading /proc.
+}
+
+type socketTable struct {
+	at   time.Time // When the read started.
+	data []byte
 }
 
 type knownProc struct {
@@ -181,6 +199,7 @@ func (a *processAttributor) start() error {
 	a.remote = map[string]time.Time{}
 	a.misses = map[string]time.Time{}
 	a.resume = map[string]int{}
+	a.tables, a.tableFirst = map[string]socketTable{}, map[string]int{}
 	a.podWork, a.hostWork = newWorkBudget(podWorkPerSecond, time.Now()), newWorkBudget(hostWorkPerSecond, time.Now())
 	a.refresh(time.Now())
 	if a.snapshot.hostNetns == "" || len(a.snapshot.host) == 0 {
@@ -308,7 +327,7 @@ func (a *processAttributor) report() {
 	budgetHit, overBudget, expired := a.budgetHit.Swap(0), a.overBudget.Swap(0), a.expired.Swap(0)
 	queueFull, noSocket, snapshots, work := a.queueFull.Swap(0), a.noSocket.Swap(0), a.snapshots.Swap(0), a.work.Swap(0)
 	indexed, snapshotWork, knownMiss, noOwner := a.indexed.Swap(0), a.snapshotWork.Swap(0), a.knownMiss.Swap(0), a.noOwner.Swap(0)
-	byOwner := a.byOwner.Swap(0)
+	byOwner, tableReads, tableReuse := a.byOwner.Swap(0), a.tableReads.Swap(0), a.tableReuse.Swap(0)
 	a.exampleMu.Lock()
 	examples := a.examples
 	a.examples = nil
@@ -316,7 +335,7 @@ func (a *processAttributor) report() {
 	if attempted+inherited+overBudget+expired+queueFull > 0 {
 		a.logger.Info("Process attribution", "attempted", attempted, "matched", matched, "from_index", indexed, "by_owner", byOwner, "inherited", inherited,
 			"no_socket", noSocket, "no_owner", noOwner, "known_miss", knownMiss, "not_local", notLocal, "deadline_hit", budgetHit, "over_budget", overBudget,
-			"expired", expired, "queue_full", queueFull, "flows", flows, "snapshots", snapshots,
+			"expired", expired, "queue_full", queueFull, "flows", flows, "snapshots", snapshots, "tables_read", tableReads, "tables_reused", tableReuse,
 			"snapshot_ms", time.Duration(snapshotWork).Milliseconds(), "lookup_ms", time.Duration(work).Milliseconds(), "misses", strings.Join(examples, "; "))
 	}
 }
@@ -348,6 +367,8 @@ type candidate struct {
 	port, otherPort uint16
 	procs           []procEntry
 	host            bool
+	netns           string
+	queuedAt        time.Time
 }
 
 func (a *processAttributor) candidates(event database.NetworkEvent, queuedAt, now time.Time) []candidate {
@@ -359,7 +380,7 @@ func (a *processAttributor) candidates(event database.NetworkEvent, queuedAt, no
 		{"src", event.SrcKind, event.SrcUID, event.SrcIP, event.DstIP, event.SrcPort, event.DstPort},
 		{"dst", event.DstKind, event.DstUID, event.DstIP, event.SrcIP, event.DstPort, event.SrcPort},
 	} {
-		c := candidate{side: side.name, ip: side.ip, otherIP: side.otherIP, port: side.port, otherPort: side.otherPort}
+		c := candidate{side: side.name, ip: side.ip, otherIP: side.otherIP, port: side.port, otherPort: side.otherPort, queuedAt: queuedAt}
 		if side.kind == "pod" && side.uid != "" {
 			if now.Before(a.remote[side.uid]) {
 				continue
@@ -377,16 +398,16 @@ func (a *processAttributor) candidates(event database.NetworkEvent, queuedAt, no
 				}
 				continue
 			}
-			c.procs = procs
+			c.procs, c.netns = procs, a.snapshot.podNetns[side.uid]
 			list = append(list, c)
 			continue
 		}
 		if a.snapshot.hostIPs[side.ip] {
-			c.procs, c.host = a.hostOrder(), true
+			c.procs, c.host, c.netns = a.hostOrder(), true, a.snapshot.hostNetns
 			list = append(list, c)
 		}
 	}
-	// Pod lookups are cheap (few processes, small tables) and tried first;
+	// Pod lookups are cheap (few processes to scan) and tried first;
 	// within each kind the source, which opened the flow, comes first.
 	sort.SliceStable(list, func(i, j int) bool { return !list[i].host && list[j].host })
 	return list
@@ -477,7 +498,8 @@ func (a *processAttributor) lookup(event database.NetworkEvent, c candidate, dea
 	var owner uint32
 	opened := false
 	for i := 0; i < len(c.procs) && i < 3 && !opened; i++ {
-		inode, owner, opened = findSocket(filepath.Join(a.root, strconv.Itoa(c.procs[i].pid)), udp, c.side == "dst", c.ip, c.port, c.otherIP, c.otherPort, deadline)
+		procDir := filepath.Join(a.root, strconv.Itoa(c.procs[i].pid))
+		inode, owner, opened = a.findSocket(c, procDir, udp, deadline)
 	}
 	a.lastCacheable = false
 	if inode == "" {
@@ -726,6 +748,7 @@ func (a *processAttributor) refresh(now time.Time) {
 		a.known, a.fullAt = map[int]knownProc{}, now
 		a.sockets = map[string]socketRef{}
 		a.resume = map[string]int{}
+		a.tableFirst = map[string]int{}
 	}
 	snapshot := &procSnapshot{at: now, byPod: map[string][]procEntry{}, hostIPs: a.addresses()}
 	a.hostIPs.Store(&snapshot.hostIPs)
@@ -750,6 +773,7 @@ func (a *processAttributor) refresh(now time.Time) {
 	}
 	known := make(map[int]knownProc, len(a.known))
 	podNetns := map[string]string{}
+	snapshot.podNetns = podNetns
 	for _, entry := range entries {
 		pid, err := strconv.Atoi(entry.Name())
 		if err != nil || pid < 1 {
@@ -806,16 +830,15 @@ func localAddresses() map[string]bool {
 	return local
 }
 
-// findSocket returns the inode and owner uid of a flow's socket in the network
-// namespace of process directory procDir, and whether any table was readable.
-// An exact match wins; otherwise, for the receiving side, a TCP listener on the
-// local port (the server of a connection not yet accepted), or an unconnected
-// UDP socket bound to it.
-// IPv4 flows are also looked up in the IPv6 tables, where dual-stack sockets
-// appear v4-mapped.
-func findSocket(procDir string, udp, server bool, localIP string, localPort uint16, remoteIP string, remotePort uint16, deadline time.Time) (string, uint32, bool) {
-	local, localErr := netip.ParseAddr(localIP)
-	remote, remoteErr := netip.ParseAddr(remoteIP)
+// findSocket returns the inode and owner uid of a candidate's socket in the
+// network namespace of process directory procDir, and whether any table was
+// readable. An exact match wins; otherwise, for the receiving side, a TCP
+// listener on the local port (the server of a connection not yet accepted), or
+// an unconnected UDP socket bound to it. IPv4 flows are also looked up in the
+// IPv6 tables, where dual-stack sockets appear v4-mapped.
+func (a *processAttributor) findSocket(c candidate, procDir string, udp bool, deadline time.Time) (string, uint32, bool) {
+	local, localErr := netip.ParseAddr(c.ip)
+	remote, remoteErr := netip.ParseAddr(c.otherIP)
 	if localErr != nil || remoteErr != nil {
 		return "", 0, true
 	}
@@ -827,49 +850,127 @@ func findSocket(procDir string, udp, server bool, localIP string, localPort uint
 	if local.Is6() {
 		tables = tables[1:]
 	}
-	var fallback string
-	var fallbackUID uint32
+	hint := c.netns + "|" + tables[0] + "|" + c.side
+	if len(tables) == 2 && a.tableFirst[hint] == 1 {
+		tables[0], tables[1] = tables[1], tables[0]
+	}
+	server := c.side == "dst"
+	needle := []byte(fmt.Sprintf(":%04X ", c.port))
 	opened := false
-	for _, table := range tables {
-		file, err := os.Open(filepath.Join(procDir, "net", table))
-		if err != nil {
+	for _, name := range tables {
+		data, ok := a.socketTable(c, procDir, name, deadline)
+		if !ok {
+			if time.Now().After(deadline) {
+				return "", 0, opened
+			}
 			continue
 		}
 		opened = true
-		scanner := bufio.NewScanner(file)
-		for scanner.Scan() {
-			if time.Now().After(deadline) {
-				_ = file.Close()
-				return "", 0, true
-			}
-			fields := strings.Fields(scanner.Text())
-			if len(fields) < 10 || fields[9] == "0" {
-				continue // Header, or a request socket not yet accepted.
-			}
-			from, fromPort, fromOK := parseProcAddress(fields[1])
-			if !fromOK || fromPort != localPort {
-				continue
-			}
-			to, toPort, toOK := parseProcAddress(fields[2])
-			uid, err := strconv.ParseUint(fields[7], 10, 32)
-			if !toOK || err != nil {
-				continue
-			}
-			from, to = from.Unmap(), to.Unmap()
-			if from == local && to == remote && toPort == remotePort {
-				_ = file.Close()
-				return fields[9], uint32(uid), true
-			}
-			boundHere := from == local || from.IsUnspecified()
-			listening := server && !udp && fields[3] == "0A"
-			unconnected := udp && to.IsUnspecified() && toPort == 0
-			if fallback == "" && boundHere && (listening || unconnected) {
-				fallback, fallbackUID = fields[9], uint32(uid)
+		inode, uid := scanSocketTable(data, needle, udp, server, local, c.port, remote, c.otherPort)
+		if inode == "" {
+			continue
+		}
+		if len(tables) == 2 {
+			if name == "tcp6" || name == "udp6" {
+				a.tableFirst[hint] = 1
+			} else {
+				delete(a.tableFirst, hint)
 			}
 		}
-		_ = file.Close()
+		// A listener or unconnected socket found here is the answer too: an
+		// accepted connection is in its listener's table, so the other table
+		// cannot hold an exact match for it.
+		return inode, uid, true
 	}
-	return fallback, fallbackUID, opened
+	return "", 0, opened
+}
+
+// socketTable returns a namespace's socket table, reusing a read that started
+// after the candidate's flow was queued: such a read lists the flow's socket
+// if it was still open, as a new read would.
+func (a *processAttributor) socketTable(c candidate, procDir, name string, deadline time.Time) ([]byte, bool) {
+	key := c.netns + "|" + name
+	if cached, ok := a.tables[key]; ok && c.netns != "" && !cached.at.Before(c.queuedAt) {
+		a.tableReuse.Add(1)
+		return cached.data, true
+	}
+	started := time.Now()
+	file, err := os.Open(filepath.Join(procDir, "net", name))
+	if err != nil {
+		return nil, false
+	}
+	defer file.Close()
+	data := make([]byte, 0, 64<<10)
+	for {
+		if time.Now().After(deadline) {
+			return nil, false
+		}
+		if len(data) == cap(data) {
+			data = append(data, 0)[:len(data)]
+		}
+		n, err := file.Read(data[len(data):cap(data)])
+		data = data[:len(data)+n]
+		if err != nil || n == 0 {
+			break
+		}
+	}
+	a.tableReads.Add(1)
+	if c.netns != "" {
+		if len(a.tables) >= processMaxTables {
+			for k, table := range a.tables {
+				if started.Sub(table.at) > processQueueAge {
+					delete(a.tables, k)
+				}
+			}
+			if len(a.tables) >= processMaxTables {
+				a.tables = map[string]socketTable{}
+			}
+		}
+		a.tables[key] = socketTable{at: started, data: data}
+	}
+	return data, true
+}
+
+// scanSocketTable finds a socket in the text of a /proc/net socket table. Only
+// lines containing the local port in hex are parsed.
+func scanSocketTable(data, needle []byte, udp, server bool, local netip.Addr, localPort uint16, remote netip.Addr, remotePort uint16) (inode string, uid uint32) {
+	var fallback string
+	var fallbackUID uint32
+	for len(data) > 0 {
+		line := data
+		if i := bytes.IndexByte(data, '\n'); i >= 0 {
+			line, data = data[:i], data[i+1:]
+		} else {
+			data = nil
+		}
+		if !bytes.Contains(line, needle) {
+			continue
+		}
+		fields := strings.Fields(string(line))
+		if len(fields) < 10 || fields[9] == "0" {
+			continue // Header, or a request socket not yet accepted.
+		}
+		from, fromPort, fromOK := parseProcAddress(fields[1])
+		if !fromOK || fromPort != localPort {
+			continue
+		}
+		to, toPort, toOK := parseProcAddress(fields[2])
+		owner, err := strconv.ParseUint(fields[7], 10, 32)
+		if !toOK || err != nil {
+			continue
+		}
+		from, to = from.Unmap(), to.Unmap()
+		if from == local && to == remote && toPort == remotePort {
+			return fields[9], uint32(owner)
+		}
+		boundHere := from == local || from.IsUnspecified()
+		listening := server && !udp && fields[3] == "0A"
+		unconnected := udp && to.IsUnspecified() && toPort == 0
+		if fallback == "" && boundHere && (listening || unconnected) {
+			fallback, fallbackUID = fields[9], uint32(owner)
+		}
+	}
+	return fallback, fallbackUID
 }
 
 func parseProcAddress(value string) (netip.Addr, uint16, bool) {
