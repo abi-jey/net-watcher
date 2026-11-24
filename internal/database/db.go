@@ -41,7 +41,7 @@ func New(dbPath string) (*DB, error) {
 	// Pod summaries written before byte totals existed must be rebuilt, or
 	// their hours would report zero traffic.
 	rebuildPods := db.Migrator().HasTable(&HourlyPod{}) && !db.Migrator().HasColumn(&HourlyPod{}, "ByteCount")
-	if err := db.AutoMigrate(&NetworkEvent{}, &DNSResolution{}, &IngestedEvent{}, &IngestedResolution{}, &IngestCursor{}, &HourlyEvent{}, &HourlyHost{}, &AggregateState{}, &HourlyPod{}, &CollectorStatus{}); err != nil {
+	if err := db.AutoMigrate(&NetworkEvent{}, &DNSResolution{}, &IngestedEvent{}, &IngestedResolution{}, &IngestCursor{}, &HourlyEvent{}, &HourlyHost{}, &AggregateState{}, &HourlyPod{}, &HourlyProcess{}, &CollectorStatus{}); err != nil {
 		_ = sqlDB.Close()
 		return nil, err
 	}
@@ -65,6 +65,14 @@ func New(dbPath string) (*DB, error) {
 			_ = sqlDB.Close()
 			return nil, err
 		}
+	}
+
+	// Drill-down from a process to its events. Partial: only attributed
+	// events are indexed, so other traffic adds no write cost. Queries must
+	// repeat the condition for SQLite to use it.
+	if err := db.Exec("CREATE INDEX IF NOT EXISTS idx_process_time ON network_events(process_command, process_pod, process_container, timestamp) WHERE process_side > ''").Error; err != nil {
+		_ = sqlDB.Close()
+		return nil, err
 	}
 
 	return &DB{DB: db, path: dbPath}, nil
@@ -147,7 +155,7 @@ type CompactStats struct {
 func (db *DB) Compact(olderThan time.Time, dedupeWindow time.Duration) (*CompactStats, error) {
 	// Compaction rewrites observations rather than merely expiring them. Readers
 	// fall back to raw data until the throttled worker rebuilds the summaries.
-	paused := db.Model(&AggregateState{}).Where("id IN ?", []uint{1, podSummaryState}).Update("paused", true)
+	paused := db.Model(&AggregateState{}).Where("id IN ?", []uint{1, podSummaryState, processSummaryState}).Update("paused", true)
 	if paused.Error != nil {
 		return nil, paused.Error
 	}
@@ -155,6 +163,9 @@ func (db *DB) Compact(olderThan time.Time, dedupeWindow time.Duration) (*Compact
 		defer func() {
 			if err := db.Transaction(resetPodSummaries); err != nil {
 				log.Error("Could not reset pod summaries after compaction", "error", err)
+			}
+			if err := db.Transaction(resetProcessSummaries); err != nil {
+				log.Error("Could not reset process summaries after compaction", "error", err)
 			}
 			if err := db.Transaction(resetSummaries); err != nil {
 				log.Error("Could not reset summaries after compaction", "error", err)

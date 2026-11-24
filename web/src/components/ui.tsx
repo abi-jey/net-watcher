@@ -1,4 +1,4 @@
-import type { ReactNode } from 'react';
+import { Component, type ReactNode } from 'react';
 import { ApiError } from '../lib/api.ts';
 import { windows } from '../lib/window.ts';
 
@@ -106,4 +106,25 @@ const attributionHelp: Record<string, string> = {
 };
 export function Attribution({ value }: { value: string }) {
   return <Badge tone={attributionTones[value] ?? 'muted'} title={attributionHelp[value]}>{value}</Badge>;
+}
+
+/**
+ * Keeps a failing page from blanking the whole app: shows what went wrong,
+ * with a reload (most often a page of an older build after a deploy).
+ */
+export class PageBoundary extends Component<{ children: ReactNode }, { error?: Error }> {
+  state: { error?: Error } = {};
+
+  static getDerivedStateFromError(error: Error) {
+    return { error };
+  }
+
+  render() {
+    if (!this.state.error) return this.props.children;
+    return (
+      <Banner tone="danger" action={<button onClick={() => location.reload()}>Reload</button>}>
+        This page failed to load: {this.state.error.message}. If Net Watcher was just updated, reloading fetches the new version.
+      </Banner>
+    );
+  }
 }

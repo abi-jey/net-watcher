@@ -5,7 +5,7 @@ go 1.27.4
 require (
 	github.com/charmbracelet/log v0.4.2
 	github.com/google/gopacket v1.1.19
-	github.com/gorilla/websocket v1.5.3
+	github.com/gorilla/websocket v1.5.4-0.20250319132907-e064f32e3674
 	gorm.io/driver/sqlite v1.6.0
 	gorm.io/gorm v1.31.2
 )

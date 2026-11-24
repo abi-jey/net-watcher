@@ -97,6 +97,13 @@ type NetworkEvent struct {
 	DstAttribution string
 	ProcessPID     int    // Host PID observed through read-only procfs; zero when unavailable.
 	ProcessCommand string // Kernel comm name; never full command-line arguments.
+	// ProcessSide is "src" or "dst": the endpoint whose socket the process
+	// owns. Empty when no process was attributed.
+	ProcessSide string
+	// ProcessPod is namespace/name of the pod the process runs in, including
+	// host-network pods; empty for host processes outside pods.
+	ProcessPod       string
+	ProcessContainer string // Container name from the pod's status.
 
 	// Compaction metadata
 	Compacted   bool   // Whether this is a compacted record

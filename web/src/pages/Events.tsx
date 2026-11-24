@@ -14,16 +14,28 @@ const liveLimit = 300;
 // button keeps the browser responsive.
 const autoLoadLimit = 3000;
 
-interface Search { window: string; types: string[]; src: string; dst: string; q: string }
+// A process filter comes from the Processes page and selects one exact
+// identity: node, pod, container and command.
+interface ProcessFilter { process: string; processPod: string; processContainer: string; collector: string }
+interface Search extends ProcessFilter { window: string; types: string[]; src: string; dst: string; q: string }
 
 function readSearch(query: URLSearchParams): Search {
-  return { window: query.get('w') ?? '24h', types: (query.get('type') ?? '').split(',').filter(Boolean), src: query.get('src') ?? '', dst: query.get('dst') ?? '', q: query.get('q') ?? '' };
+  return {
+    window: query.get('w') ?? '24h', types: (query.get('type') ?? '').split(',').filter(Boolean), src: query.get('src') ?? '', dst: query.get('dst') ?? '', q: query.get('q') ?? '',
+    process: query.get('process') ?? '', processPod: query.get('processPod') ?? '', processContainer: query.get('processContainer') ?? '', collector: query.get('collector') ?? '',
+  };
+}
+
+function processQuery(search: Search): Partial<ProcessFilter> {
+  return search.process ? { process: search.process, processPod: search.processPod, processContainer: search.processContainer, collector: search.collector || undefined } : {};
 }
 
 function matches(event: NetworkEvent, search: Search): boolean {
   const has = (value: string, needle: string) => !needle || value.includes(needle);
   return (!search.types.length || search.types.includes(event.EventType)) && has(event.SrcIP, search.src) && has(event.DstIP, search.dst)
-    && (!search.q || [event.SrcIP, event.DstIP, event.Hostname, event.DNSQuery, event.TLSSNI, event.SrcName, event.DstName, event.SrcNamespace, event.DstNamespace, event.SrcWorkload, event.DstWorkload, event.ProcessCommand].some(value => value?.includes(search.q)));
+    && (!search.process || (event.ProcessCommand === search.process && event.ProcessPod === search.processPod && event.ProcessContainer === search.processContainer))
+    && (!search.collector || event.CollectorID === search.collector)
+    && (!search.q || [event.SrcIP, event.DstIP, event.Hostname, event.DNSQuery, event.TLSSNI, event.SrcName, event.DstName, event.SrcNamespace, event.DstNamespace, event.SrcWorkload, event.DstWorkload, event.ProcessCommand, event.ProcessPod, event.ProcessContainer].some(value => value?.includes(search.q)));
 }
 
 export function Events({ query }: { query: URLSearchParams }) {
@@ -49,7 +61,7 @@ export function Events({ query }: { query: URLSearchParams }) {
     setError(undefined);
     try {
       const result = await getJSON<EventsResponse>(url('/api/events', {
-        ...fixedRange, limit: pageSize, cursor, eventType: search.types.join(','), srcIP: search.src, dstIP: search.dst, q: search.q,
+        ...fixedRange, limit: pageSize, cursor, eventType: search.types.join(','), srcIP: search.src, dstIP: search.dst, q: search.q, ...processQuery(search),
       }), abort.signal);
       setPage(result);
       const received = result.events ?? [];
@@ -106,10 +118,11 @@ export function Events({ query }: { query: URLSearchParams }) {
 
   const submit = (event: FormEvent) => {
     event.preventDefault();
-    setQuery(['events'], { w: draft.window, type: draft.types.join(','), src: draft.src.trim(), dst: draft.dst.trim(), q: draft.q.trim() });
+    setQuery(['events'], { w: draft.window, type: draft.types.join(','), src: draft.src.trim(), dst: draft.dst.trim(), q: draft.q.trim(), ...processQuery(search) });
   };
+  const clearProcess = () => setQuery(['events'], { w: search.window, type: search.types.join(','), src: search.src, dst: search.dst, q: search.q });
   const toggleType = (type: string) => setDraft(previous => ({ ...previous, types: previous.types.includes(type) ? previous.types.filter(item => item !== type) : [...previous.types, type] }));
-  const filtered = Boolean(search.q || search.src || search.dst || search.types.length);
+  const filtered = Boolean(search.q || search.src || search.dst || search.types.length || search.process);
 
   return (
     <>
@@ -120,8 +133,8 @@ export function Events({ query }: { query: URLSearchParams }) {
       <form className="card filters" onSubmit={submit}>
         <label className="field grow">Search<input type="search" value={draft.q} onChange={event => setDraft({ ...draft, q: event.target.value })} placeholder="IP, DNS name, SNI, pod, namespace, workload or process" /></label>
         <label className="field">Window<WindowSelect value={draft.window} onChange={value => setDraft({ ...draft, window: value })} /></label>
-        <label className="field">Source IP<input value={draft.src} onChange={event => setDraft({ ...draft, src: event.target.value })} placeholder="10.0.1." size={12} /></label>
-        <label className="field">Destination IP<input value={draft.dst} onChange={event => setDraft({ ...draft, dst: event.target.value })} placeholder="any" size={12} /></label>
+        <label className="field">Source IP<input value={draft.src} onChange={event => setDraft({ ...draft, src: event.target.value })} placeholder="any" size={12} title="Matches any part of the address, such as 10.0.1." /></label>
+        <label className="field">Destination IP<input value={draft.dst} onChange={event => setDraft({ ...draft, dst: event.target.value })} placeholder="any" size={12} title="Matches any part of the address, such as 10.0.1." /></label>
         <button className="primary" type="submit" disabled={loading}>Search</button>
         <div className="chips" role="group" aria-label="Event types">
           {eventTypes.map(type => (
@@ -132,6 +145,12 @@ export function Events({ query }: { query: URLSearchParams }) {
           {draft.types.length > 0 && <button type="button" className="ghost small" onClick={() => setDraft({ ...draft, types: [] })}>Clear types</button>}
         </div>
       </form>
+      {search.process && (
+        <div className="filter-chip">
+          <span>Process <b className="mono">{search.process}</b>{search.processContainer && <> in container <b>{search.processContainer}</b></>}{search.processPod ? <> of pod <b>{search.processPod}</b></> : ' on the host'}{search.collector && <> · node {search.collector}</>}</span>
+          <button type="button" onClick={clearProcess} aria-label="Remove process filter">✕</button>
+        </div>
+      )}
       <ErrorBanner error={error} retry={() => void load(page?.nextCursor && events.length ? page.nextCursor : undefined)} />
       {live && <Banner>Live tail: new events appear as they are stored (newest {liveLimit} kept).{skipped > 0 && ` ${skipped.toLocaleString()} events arrived faster than the live view shows; turn live tail off and search to see all of them.`}</Banner>}
       <div className="event-list card flush">

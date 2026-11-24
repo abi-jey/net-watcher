@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -68,29 +69,6 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		}
 		position = *after
 	}
-	filter := func(db *gorm.DB) *gorm.DB {
-		if value := query.Get("eventType"); value != "" {
-			db = db.Where("event_type IN ?", strings.Split(value, ","))
-		}
-		if value := query.Get("srcIP"); value != "" {
-			db = db.Where("src_ip LIKE ?", "%"+value+"%")
-		}
-		if value := query.Get("dstIP"); value != "" {
-			db = db.Where("dst_ip LIKE ?", "%"+value+"%")
-		}
-		if value := query.Get("q"); value != "" {
-			like := "%" + value + "%"
-			columns := []string{"src_ip", "dst_ip", "hostname", "dns_query", "tls_sni", "src_name", "dst_name", "src_namespace", "dst_namespace", "src_workload", "dst_workload", "process_command"}
-			clauses := make([]string, len(columns))
-			args := make([]interface{}, len(columns))
-			for i, column := range columns {
-				clauses[i], args[i] = column+" LIKE ?", like
-			}
-			db = db.Where("("+strings.Join(clauses, " OR ")+")", args...)
-		}
-		return db
-	}
-
 	response := EventsResponse{Events: []database.NetworkEvent{}, From: from, To: to}
 	started := time.Now()
 	slice := eventsFirstSlice
@@ -108,11 +86,7 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 			defer cancel()
 		}
 		var rows []database.NetworkEvent
-		err := filter(s.db.WithContext(ctx).Table("network_events INDEXED BY idx_network_events_timestamp")).
-			// A row value, not "t < ? OR (t = ? AND id < ?)": SQLite plans the OR
-			// as a multi-index union and sorts the whole slice before LIMIT.
-			Where("timestamp >= ? AND (timestamp, id) < (?, ?)", sliceStart, position.at, position.id).
-			Order("timestamp DESC, id DESC").Limit(limit - len(response.Events)).Find(&rows).Error
+		err := eventsSlice(s.db.WithContext(ctx), query, sliceStart, position, limit-len(response.Events)).Find(&rows).Error
 		if err != nil {
 			if r.Context().Err() == nil && (errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded)) {
 				break // Budget spent inside this slice; resume from the last full slice.
@@ -144,4 +118,55 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(response)
+}
+
+// eventsFilter applies the request's filters to an events query.
+func eventsFilter(query url.Values, db *gorm.DB) *gorm.DB {
+	if value := query.Get("eventType"); value != "" {
+		db = db.Where("event_type IN ?", strings.Split(value, ","))
+	}
+	if value := query.Get("srcIP"); value != "" {
+		db = db.Where("src_ip LIKE ?", "%"+value+"%")
+	}
+	if value := query.Get("dstIP"); value != "" {
+		db = db.Where("dst_ip LIKE ?", "%"+value+"%")
+	}
+	// Exact process identity, as listed by /api/processes. An empty pod
+	// selects host processes once a command is given.
+	if value := query.Get("process"); value != "" {
+		db = db.Where("process_command = ? AND process_pod = ? AND process_container = ? AND process_side > ''", value, query.Get("processPod"), query.Get("processContainer"))
+	}
+	if value := query.Get("collector"); value != "" {
+		db = db.Where("collector_id = ?", value)
+	}
+	if value := query.Get("q"); value != "" {
+		like := "%" + value + "%"
+		columns := []string{"src_ip", "dst_ip", "hostname", "dns_query", "tls_sni", "src_name", "dst_name", "src_namespace", "dst_namespace", "src_workload", "dst_workload", "process_command", "process_pod", "process_container"}
+		clauses := make([]string, len(columns))
+		args := make([]interface{}, len(columns))
+		for i, column := range columns {
+			clauses[i], args[i] = column+" LIKE ?", like
+		}
+		db = db.Where("("+strings.Join(clauses, " OR ")+")", args...)
+	}
+	return db
+}
+
+// eventsIndex is the index a page walks, newest first. A process drill-down
+// walks the partial index of attributed events, which holds only that
+// identity's rows in time order; other filters walk all events by time.
+func eventsIndex(query url.Values) string {
+	if query.Get("process") != "" {
+		return "idx_process_time"
+	}
+	return "idx_network_events_timestamp"
+}
+
+// eventsSlice selects one time slice of a page, newest first, before position.
+func eventsSlice(db *gorm.DB, query url.Values, sliceStart time.Time, position cursor, limit int) *gorm.DB {
+	return eventsFilter(query, db.Table("network_events INDEXED BY "+eventsIndex(query))).
+		// A row value, not "t < ? OR (t = ? AND id < ?)": SQLite plans the OR
+		// as a multi-index union and sorts the whole slice before LIMIT.
+		Where("timestamp >= ? AND (timestamp, id) < (?, ?)", sliceStart, position.at, position.id).
+		Order("timestamp DESC, id DESC").Limit(limit)
 }

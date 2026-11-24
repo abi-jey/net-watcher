@@ -65,6 +65,7 @@ func (s *Server) Start(ctx context.Context) error {
 	mux.HandleFunc("/api/dns-evidence", s.handleDNSEvidence)
 	mux.HandleFunc("/api/collectors", s.handleCollectors)
 	mux.HandleFunc("/api/pods", cacheGET(35*time.Second, s.handlePods))
+	mux.HandleFunc("/api/processes", cacheGET(35*time.Second, s.handleProcesses))
 	mux.HandleFunc("/api/pod-connections", s.handlePodConnections)
 
 	mux.Handle("/", uiHandler())

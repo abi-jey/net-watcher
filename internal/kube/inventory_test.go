@@ -115,3 +115,26 @@ func TestCiliumNodeDiscoveryIsOptional(t *testing.T) {
 		t.Fatalf("optional Cilium CRD blocked core inventory: %v", err)
 	}
 }
+
+func TestContainerIDsNameContainersIncludingHostNetworkPods(t *testing.T) {
+	var objects []Object
+	body := `[
+	 {"kind":"Pod","metadata":{"name":"api-1","namespace":"demo","uid":"pod1"},"spec":{"nodeName":"node-a"},
+	  "status":{"phase":"Running","podIP":"10.2.0.8","containerStatuses":[{"name":"api","containerID":"containerd://abc"}],"initContainerStatuses":[{"name":"migrate","containerID":"containerd://init1"}]}},
+	 {"kind":"Pod","metadata":{"name":"cilium-x","namespace":"kube-system","uid":"pod2"},"spec":{"nodeName":"node-a","hostNetwork":true},
+	  "status":{"phase":"Running","podIP":"192.0.2.10","containerStatuses":[{"name":"cilium-agent","containerID":"cri-o://def"},{"name":"waiting","containerID":""}]}}]`
+	if err := json.Unmarshal([]byte(body), &objects); err != nil {
+		t.Fatal(err)
+	}
+	index := New(nil)
+	index.Replace(objects, time.Now())
+	for id, want := range map[string]string{"abc": "demo/api-1/api", "init1": "demo/api-1/migrate", "def": "kube-system/cilium-x/cilium-agent"} {
+		ref, ok := index.Container(id)
+		if !ok || ref.Namespace+"/"+ref.Pod+"/"+ref.Name != want {
+			t.Errorf("%s: %+v %v, want %s", id, ref, ok, want)
+		}
+	}
+	if _, ok := index.Container(""); ok {
+		t.Error("empty container ID must not match")
+	}
+}

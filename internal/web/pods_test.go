@@ -67,6 +67,8 @@ func (f podFixture) get(t *testing.T, path string, params url.Values, target int
 		f.server.handlePods(recorder, request)
 	case "/api/events":
 		f.server.handleEvents(recorder, request)
+	case "/api/processes":
+		f.server.handleProcesses(recorder, request)
 	default:
 		f.server.handlePodConnections(recorder, request)
 	}

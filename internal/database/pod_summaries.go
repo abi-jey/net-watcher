@@ -87,8 +87,14 @@ func resetPodSummaries(tx *gorm.DB) error {
 }
 
 func applyPodSummaries(tx *gorm.DB, events []NetworkEvent, delta int64) error {
+	return applyCoveredSummary(tx, podSummaryState, events, delta, aggregatePods)
+}
+
+// applyCoveredSummary aggregates the events a summary already covers: those
+// below its backfill cursor or above its target. The backfill counts the rest.
+func applyCoveredSummary(tx *gorm.DB, stateID uint, events []NetworkEvent, delta int64, aggregate func(*gorm.DB, []NetworkEvent, int64) error) error {
 	var state AggregateState
-	err := tx.First(&state, podSummaryState).Error
+	err := tx.First(&state, stateID).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) || (err == nil && state.Paused) {
 		return nil
 	}
@@ -101,7 +107,7 @@ func applyPodSummaries(tx *gorm.DB, events []NetworkEvent, delta int64) error {
 			covered = append(covered, event)
 		}
 	}
-	return aggregatePods(tx, covered, delta)
+	return aggregate(tx, covered, delta)
 }
 
 func aggregatePods(tx *gorm.DB, events []NetworkEvent, delta int64) error {
@@ -192,13 +198,22 @@ func aggregatePods(tx *gorm.DB, events []NetworkEvent, delta int64) error {
 // BackfillPodSummaries covers at most limit historical events in one
 // transaction, like BackfillSummaries.
 func (db *DB) BackfillPodSummaries(ctx context.Context, limit int) (bool, error) {
+	return db.backfillSummary(ctx, podSummaryState, limit, aggregatePods)
+}
+
+func (db *DB) backfillSummary(ctx context.Context, stateID uint, limit int, aggregate func(*gorm.DB, []NetworkEvent, int64) error) (bool, error) {
 	if limit < 1 || limit > 10000 {
 		return false, fmt.Errorf("summary batch size must be between 1 and 10000")
 	}
 	var done bool
 	err := db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var state AggregateState
-		if err := tx.First(&state, podSummaryState).Error; err != nil {
+		err := tx.First(&state, stateID).Error
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			done = true // Not enabled on this database.
+			return nil
+		}
+		if err != nil {
 			return err
 		}
 		if state.Paused {
@@ -212,7 +227,7 @@ func (db *DB) BackfillPodSummaries(ctx context.Context, limit int) (bool, error)
 		if err := tx.Select(summaryColumns).Where("id > ? AND id <= ?", state.Cursor, state.Target).Order("id").Limit(limit).Find(&events).Error; err != nil {
 			return err
 		}
-		if err := aggregatePods(tx, events, 1); err != nil {
+		if err := aggregate(tx, events, 1); err != nil {
 			return err
 		}
 		cursor := state.Target
