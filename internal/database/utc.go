@@ -32,7 +32,12 @@ func (d *utcDriver) Open(dsn string) (driver.Conn, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &utcConn{conn.(*sqlite3.SQLiteConn)}, nil
+	sqliteConn := conn.(*sqlite3.SQLiteConn)
+	if err := sqliteConn.RegisterFunc("ip_in_prefix", IPInPrefix, true); err != nil {
+		_ = sqliteConn.Close()
+		return nil, err
+	}
+	return &utcConn{sqliteConn}, nil
 }
 
 type utcConn struct{ *sqlite3.SQLiteConn }

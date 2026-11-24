@@ -114,3 +114,18 @@ const eventLabels: Record<string, string> = {
   TLS_SNI: 'TLS hello', ICMP: 'ICMP', TIMEOUT: 'Timed out', GAP: 'Loss',
 };
 export const eventLabel = (eventType: string) => eventLabels[eventType] ?? eventType;
+
+// The collector stores gopacket's descriptions of DNS response codes; people
+// know them by their standard names.
+const rcodes: Record<string, string> = {
+  'no error': 'NOERROR', 'format error': 'FORMERR', 'server failure': 'SERVFAIL', 'non-existent domain': 'NXDOMAIN', 'not implemented': 'NOTIMP',
+  'query refused': 'REFUSED', 'name exists when it should not': 'YXDOMAIN', 'rr set exists when it should not': 'YXRRSET',
+  'rr set that should exist does not': 'NXRRSET', 'server not authoritative for zone': 'NOTAUTH', 'name not contained in zone': 'NOTZONE', 'bad opt version': 'BADVERS',
+};
+
+/** The standard name of a stored DNS response code (NXDOMAIN), or the stored text. */
+export function rcodeName(stored: string | undefined): string {
+  if (!stored) return '';
+  const trimmed = stored.trim();
+  return rcodes[trimmed.toLowerCase()] ?? trimmed;
+}

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { deviceName, family, interfaceRole, ipScope, routeInfo } from './network.ts';
+import { deviceName, family, interfaceRole, ipScope, rcodeName, routeInfo } from './network.ts';
 
 test('classifies IPv4 and IPv6 scopes', () => {
   const cases: [string, string][] = [
@@ -42,4 +42,12 @@ test('Tailscale routes and device names', () => {
   assert.equal(routeInfo('exit-node')?.label, 'exit node');
   assert.equal(routeInfo(''), undefined);
   assert.equal(deviceName('pixel-8a.tailfb4030.ts.net'), 'pixel-8a');
+});
+
+test('names DNS response codes as people know them', () => {
+  assert.equal(rcodeName('Non-Existent Domain'), 'NXDOMAIN');
+  assert.equal(rcodeName('Server Failure '), 'SERVFAIL');
+  assert.equal(rcodeName('No Error'), 'NOERROR');
+  assert.equal(rcodeName(''), '');
+  assert.equal(rcodeName('Something New'), 'Something New');
 });

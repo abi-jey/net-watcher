@@ -75,7 +75,8 @@ func TestEventsFilters(t *testing.T) {
 			}
 		})
 	}
-	for _, bad := range []url.Values{{"ifaceRole": {"pods"}}, {"ipVersion": {"5"}}, {"withProcess": {"maybe"}}, {"srcKind": {"Pod"}}, {"port": {"https"}}, {"route": {"exit"}}} {
+	for _, bad := range []url.Values{{"ifaceRole": {"pods"}}, {"ipVersion": {"5"}}, {"withProcess": {"maybe"}}, {"srcKind": {"pods"}}, {"port": {"https"}}, {"route": {"exit"}},
+		{"f": {"kind = pods"}}, {"f": {"colour = red"}}, {"f": {"port = (53,"}}, {"f": {"ip = 10.0.0.0/33"}}, {"f": {"bytes > lots"}}, {"f": {"ns = x or"}}} {
 		if code := f.get(t, "/api/events", bad, nil); code != 400 {
 			t.Errorf("%v: status %d, want 400", bad, code)
 		}

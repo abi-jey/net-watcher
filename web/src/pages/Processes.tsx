@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react';
 import { ApiError, url, type PodsWarming, type ProcessesResponse, type ProcessSummary } from '../lib/api.ts';
 import { href, setQuery, useResource } from '../lib/hooks.ts';
 import { windowRange } from '../lib/window.ts';
+import { allOf, format, is } from '../lib/filter.ts';
 import { bytes, count, dateTime, time } from '../lib/format.ts';
 import { Badge, Banner, Empty, ErrorBanner, Spinner, Stat, UpdatedAt, WindowSelect } from '../components/ui.tsx';
 
@@ -12,7 +13,9 @@ function percent(part: number, whole: number): string {
 }
 
 function eventsLink(process: ProcessSummary, window: string): string {
-  return href(['events'], { w: window, process: process.command, processPod: process.pod, processContainer: process.container, collector: process.collector });
+  const conditions = [is('process', process.command), is('process.pod', process.pod || 'none'), is('process.container', process.container || 'none')];
+  if (process.collector) conditions.push(is('node', process.collector));
+  return href(['events'], { w: window, f: format(allOf(conditions)) });
 }
 
 export function Processes({ query }: { query: URLSearchParams }) {

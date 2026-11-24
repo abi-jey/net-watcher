@@ -1,107 +1,64 @@
-import { useEffect, useRef, useState, type FormEvent } from 'react';
-import { getJSON, url, type EventsResponse, type HealthResponse, type NetworkEvent } from '../lib/api.ts';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { ApiError, getJSON, url, type EventsResponse, type HealthResponse, type NetworkEvent } from '../lib/api.ts';
 import { setQuery, useResource } from '../lib/hooks.ts';
 import { windowRange } from '../lib/window.ts';
 import { dateTime } from '../lib/format.ts';
-import { eventLabel, family, interfaceRole, interfaceRoles, routeInfo } from '../lib/network.ts';
-import { Banner, Empty, ErrorBanner, Spinner, WindowSelect } from '../components/ui.tsx';
-import { EventRow, type Filter } from '../components/EventRow.tsx';
+import { addCondition, allOf, conditions, format, fromLegacy, legacyParams, tryParse, type Compare } from '../lib/filter.ts';
+import { Pacer } from '../lib/pacer.ts';
+import { Banner, Empty, ErrorBanner, Spinner } from '../components/ui.tsx';
+import { EventRow } from '../components/EventRow.tsx';
+import { FilterBar, type Suggestions } from '../components/FilterBar.tsx';
+import { Icon } from '../components/icons.tsx';
 
-const eventTypes = ['TCP_START', 'TCP_END', 'UDP_START', 'UDP_END', 'DNS', 'TLS_SNI', 'ICMP', 'TIMEOUT', 'GAP'];
 const pageSize = 100;
 const liveLimit = 300;
 // Scrolling loads older pages automatically up to this many rows; beyond it a
 // button keeps the browser responsive.
 const autoLoadLimit = 3000;
 
-// Exact-match filters. Names are the URL and /api/events parameters alike.
-const exactKeys = ['collector', 'iface', 'ifaceRole', 'ipVersion', 'withProcess', 'srcKind', 'dstKind', 'namespace', 'port', 'route'] as const;
-type ExactKey = typeof exactKeys[number];
-type Exact = Record<ExactKey, string>;
+/**
+ * The search in the URL: the window (w) and the filter expression (f).
+ * Links and bookmarks from before filters were expressions carry one-value
+ * parameters; they are read into the filter.
+ */
+function readSearch(query: URLSearchParams): { window: string; text: string; legacy: boolean } {
+  const window = query.get('w') ?? '24h';
+  const raw = query.get('f') ?? '';
+  const legacy = fromLegacy(query);
+  if (!legacy.length) return { window, text: raw, legacy: false };
+  const parsed = tryParse(raw);
+  const text = parsed.error ? [format(allOf(legacy)), `(${raw})`].join(' and ') : format(allOf([...legacy, ...conditions(parsed.term)]));
+  return { window, text, legacy: true };
+}
 
-// A process filter comes from the Processes page or a process tag and selects
-// one exact identity: pod, container and command (with the collector's node).
-interface ProcessFilter { process: string; processPod: string; processContainer: string }
-interface Search extends ProcessFilter, Exact { window: string; types: string[]; src: string; dst: string; q: string }
-
-function readSearch(query: URLSearchParams): Search {
-  const exact = Object.fromEntries(exactKeys.map(key => [key, query.get(key) ?? ''])) as Exact;
-  return {
-    ...exact, window: query.get('w') ?? '24h', types: (query.get('type') ?? '').split(',').filter(Boolean), src: query.get('src') ?? '', dst: query.get('dst') ?? '', q: query.get('q') ?? '',
-    process: query.get('process') ?? '', processPod: query.get('processPod') ?? '', processContainer: query.get('processContainer') ?? '',
+/** Values seen in the loaded events, offered while adding a condition. */
+function suggestionsFrom(events: NetworkEvent[], nodes: string[]): Suggestions {
+  const sets: Record<string, Set<string>> = {};
+  const add = (name: string, ...values: (string | number | undefined)[]) => {
+    for (const value of values) if (value !== undefined && value !== '' && value !== 0) (sets[name] ??= new Set()).add(String(value));
   };
-}
-
-/** The search as URL query parameters. */
-function searchQuery(search: Search): Record<string, string | undefined> {
-  const exact = Object.fromEntries(exactKeys.map(key => [key, search[key].trim() || undefined]));
-  const process = search.process ? { process: search.process, processPod: search.processPod, processContainer: search.processContainer } : {};
-  return { ...exact, ...process, w: search.window, type: search.types.join(','), src: search.src.trim(), dst: search.dst.trim(), q: search.q.trim() };
-}
-
-const kinds = [
-  { id: 'pod', label: 'pod' }, { id: 'node', label: 'node' }, { id: 'service', label: 'service' }, { id: 'endpoint', label: 'endpoint' },
-  { id: 'none', label: 'outside the cluster' },
-];
-const routes = [
-  { id: 'any', label: 'any Tailscale route' }, { id: 'exit-node', label: 'exit node traffic' },
-  { id: 'subnet-router', label: 'subnet route traffic' }, { id: 'via-tailnet', label: "node's traffic into the tailnet" },
-];
-
-/** Plain-language label of an active exact filter. */
-function describe(key: ExactKey, value: string): string {
-  switch (key) {
-    case 'collector': return `node ${value}`;
-    case 'iface': return `interface ${value}`;
-    case 'ifaceRole': return `${interfaceRoles.find(role => role.id === value)?.label ?? value} interfaces`;
-    case 'ipVersion': return `IPv${value}`;
-    case 'withProcess': return value === 'yes' ? 'with a process' : 'without a process';
-    case 'srcKind': return `source ${kinds.find(kind => kind.id === value)?.label ?? value}`;
-    case 'dstKind': return `destination ${kinds.find(kind => kind.id === value)?.label ?? value}`;
-    case 'namespace': return `namespace ${value}`;
-    case 'port': return `port ${value}`;
-    case 'route': return value === 'any' ? 'any Tailscale route' : routeInfo(value)?.label ?? value;
+  add('node', ...nodes);
+  for (const e of events.slice(0, 600)) {
+    add('node', e.CollectorID);
+    add('ns', e.SrcNamespace, e.DstNamespace);
+    add('name', e.SrcName, e.DstName);
+    add('workload', e.SrcWorkload, e.DstWorkload);
+    add('ip', e.SrcIP, e.DstIP);
+    add('port', e.DstPort);
+    add('process', e.ProcessCommand);
+    add('process.pod', e.ProcessPod);
+    add('process.container', e.ProcessContainer);
+    add('iface', e.Interface);
+    add('domain', e.Hostname?.replace(/\.$/, ''), e.TLSSNI, e.DNSQuery?.replace(/\.$/, ''));
+    add('rcode', e.DNSResponseCode);
+    add('peer', e.TailnetPeerName, e.TailnetPeer);
   }
-}
-
-/** Mirrors the server's filters for events arriving over the live tail. */
-function matches(event: NetworkEvent, search: Search): boolean {
-  const has = (value: string, needle: string) => !needle || value.includes(needle);
-  const kind = (value: string, want: string) => !want || (want === 'none' ? !value : value === want);
-  return (!search.types.length || search.types.includes(event.EventType)) && has(event.SrcIP, search.src) && has(event.DstIP, search.dst)
-    && (!search.process || (event.ProcessCommand === search.process && event.ProcessPod === search.processPod && event.ProcessContainer === search.processContainer))
-    && (!search.collector || event.CollectorID === search.collector)
-    && (!search.iface || event.Interface === search.iface)
-    && (!search.ifaceRole || interfaceRole(event.Interface).id === search.ifaceRole)
-    && (!search.ipVersion || String(event.IPVersion) === search.ipVersion)
-    && (!search.withProcess || (search.withProcess === 'yes') === Boolean(event.ProcessSide))
-    && kind(event.SrcKind, search.srcKind) && kind(event.DstKind, search.dstKind)
-    && (!search.namespace || event.SrcNamespace === search.namespace || event.DstNamespace === search.namespace)
-    && (!search.port || String(event.SrcPort) === search.port || String(event.DstPort) === search.port)
-    && (!search.route || (search.route === 'any' ? Boolean(event.Route) : event.Route === search.route))
-    && (!search.q || [event.SrcIP, event.DstIP, event.Hostname, event.DNSQuery, event.TLSSNI, event.SrcName, event.DstName, event.SrcNamespace, event.DstNamespace, event.SrcWorkload, event.DstWorkload,
-      event.ProcessCommand, event.ProcessPod, event.ProcessContainer, event.TailnetPeer, event.TailnetPeerName].some(value => value?.includes(search.q)));
-}
-
-/** A select of one exact filter, with "any" as the empty choice. */
-function Pick({ label, value, options, onChange, title }: { label: string; value: string; options: { id: string; label: string }[]; onChange: (value: string) => void; title?: string }) {
-  return (
-    <label className="field" title={title}>{label}
-      <select value={value} onChange={event => onChange(event.target.value)}>
-        <option value="">any</option>
-        {options.map(option => <option key={option.id} value={option.id}>{option.label}</option>)}
-        {value && !options.some(option => option.id === value) && <option value={value}>{value}</option>}
-      </select>
-    </label>
-  );
+  return Object.fromEntries(Object.entries(sets).map(([name, values]) => [name, [...values].sort().slice(0, 60)]));
 }
 
 export function Events({ query }: { query: URLSearchParams }) {
   const search = readSearch(query);
-  const key = query.toString();
-  const [draft, setDraft] = useState(search);
-  const exactActive = exactKeys.filter(key => search[key]);
-  const [more, setMore] = useState(() => exactActive.length > 0);
+  const key = `${search.window}|${search.text}`;
   const collectors = useResource<HealthResponse>('/api/collectors', 60_000);
   const [events, setEvents] = useState<NetworkEvent[]>([]);
   const [page, setPage] = useState<EventsResponse>();
@@ -110,9 +67,19 @@ export function Events({ query }: { query: URLSearchParams }) {
   const [error, setError] = useState<Error>();
   const [expanded, setExpanded] = useState<number>();
   const [live, setLive] = useState(false);
-  const [skipped, setSkipped] = useState(0);
   const controller = useRef<AbortController>(undefined);
   const sentinel = useRef<HTMLDivElement>(null);
+
+  // Older one-value links become the filter text in the URL.
+  useEffect(() => {
+    if (search.legacy) setQuery(['events'], { w: search.window, f: search.text || undefined, ...Object.fromEntries(legacyParams.map(param => [param, undefined])) });
+  }, [search.legacy, search.window, search.text]);
+
+  const apply = (text: string, window = search.window) => setQuery(['events'], { w: window, f: text || undefined });
+  const onFilter = (condition: Compare) => {
+    setExpanded(undefined);
+    apply(format(addCondition(tryParse(search.text).term, condition)));
+  };
 
   const load = async (cursor?: string, fixedRange = range) => {
     controller.current?.abort();
@@ -121,13 +88,10 @@ export function Events({ query }: { query: URLSearchParams }) {
     setLoading(true);
     setError(undefined);
     try {
-      const result = await getJSON<EventsResponse>(url('/api/events', {
-        ...searchQuery(search), w: undefined, type: undefined, src: undefined, dst: undefined,
-        ...fixedRange, limit: pageSize, cursor, eventType: search.types.join(','), srcIP: search.src, dstIP: search.dst,
-      }), abort.signal);
+      const result = await getJSON<EventsResponse>(url('/api/events', { ...fixedRange, f: search.text, limit: pageSize, cursor }), abort.signal);
       setPage(result);
       const received = result.events ?? [];
-      setEvents(previous => cursor ? [...previous, ...received] : received);
+      setEvents(previous => (cursor ? [...previous, ...received] : received));
     } catch (failure) {
       if (!abort.signal.aborted) setError(failure as Error);
     } finally {
@@ -137,7 +101,7 @@ export function Events({ query }: { query: URLSearchParams }) {
 
   // A new search fixes its window so cursors stay valid while paging.
   useEffect(() => {
-    setDraft(search);
+    if (search.legacy) return;
     const fixed = windowRange(search.window);
     setRange(fixed);
     setExpanded(undefined);
@@ -145,22 +109,25 @@ export function Events({ query }: { query: URLSearchParams }) {
     setPage(undefined);
     void load(undefined, fixed);
     return () => controller.current?.abort();
+    // An older link is rewritten to the same filter text: search once the
+    // URL no longer carries the older parameters.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [key]);
+  }, [key, search.legacy]);
 
-  // Live tail over the WebSocket hub: newest events, gaps announced.
+  const liveTail = useLiveTail(live && !search.legacy, search.text, expanded !== undefined, setEvents);
+
+  // Live rows were added above the search results and the oldest dropped, so
+  // the page cursor no longer follows the list: search again when stopping.
+  const wasLive = useRef(false);
   useEffect(() => {
-    if (!live) return;
-    setSkipped(0);
-    const socket = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}${location.pathname.replace(/[^/]*$/, '')}api/ws`);
-    socket.onmessage = message => {
-      const data = JSON.parse(message.data as string) as { type: string; data?: NetworkEvent; count?: number };
-      if (data.type === 'skipped') setSkipped(total => total + (data.count ?? 0));
-      if (data.type === 'event' && data.data && matches(data.data, search)) setEvents(previous => [data.data!, ...previous].slice(0, liveLimit));
-    };
-    return () => socket.close();
+    if (wasLive.current && !live) {
+      const fixed = windowRange(search.window);
+      setRange(fixed);
+      void load(undefined, fixed);
+    }
+    wasLive.current = live;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [live, key]);
+  }, [live]);
 
   const paused = Boolean(page && !page.complete && (page.events?.length ?? 0) < pageSize);
   const canAutoLoad = Boolean(page?.nextCursor) && !paused && !loading && !live && !error && events.length < autoLoadLimit;
@@ -178,83 +145,38 @@ export function Events({ query }: { query: URLSearchParams }) {
     return () => observer.disconnect();
   }, [canAutoLoad]);
 
-  const submit = (event: FormEvent) => {
-    event.preventDefault();
-    setQuery(['events'], searchQuery({ ...draft, process: search.process, processPod: search.processPod, processContainer: search.processContainer }));
-  };
-  // Tags and chips apply at once, on top of the current search.
-  const apply = (change: Partial<Search>) => setQuery(['events'], searchQuery({ ...search, ...change }));
-  const onFilter = (filter: Filter) => { setExpanded(undefined); apply(filter); };
-  const clearProcess = () => apply({ process: '', processPod: '', processContainer: '' });
-  const clearAll = () => apply({ ...Object.fromEntries(exactKeys.map(key => [key, ''])) as Exact, process: '', processPod: '', processContainer: '', src: '', dst: '', q: '', types: [] });
-  const setExact = (key: ExactKey) => (value: string) => setDraft(previous => ({ ...previous, [key]: value }));
-  const toggleType = (type: string) => setDraft(previous => ({ ...previous, types: previous.types.includes(type) ? previous.types.filter(item => item !== type) : [...previous.types, type] }));
-  const filtered = Boolean(search.q || search.src || search.dst || search.types.length || search.process || exactActive.length);
-  const nodes = (collectors.data?.collectors ?? []).map(collector => ({ id: collector.CollectorID, label: collector.CollectorID || 'local' }));
+  const nodes = useMemo(() => (collectors.data?.collectors ?? []).map(collector => collector.CollectorID).filter(Boolean), [collectors.data]);
+  const suggestions = useMemo(() => suggestionsFrom(events, nodes), [events, nodes]);
+  const filtered = search.text.trim() !== '';
+  // The server checks values the browser does not (ports, prefixes, units):
+  // its objection belongs beside the filter, and retrying cannot help.
+  const filterError = error instanceof ApiError && error.status === 400 && error.message.startsWith('filter: ')
+    ? error.message.replace(/^filter: /, '').replace(/ \(at \d+\)$/, '') : undefined;
 
   return (
     <>
       <div className="page-header">
-        <div><h1>Events</h1><p>Every stored observation, newest first. Select a row for its source, destination and capture details; select a tag in a row to show only events sharing it.</p></div>
-        <label className="switch"><input type="checkbox" checked={live} onChange={event => setLive(event.target.checked)} /><span>Live tail</span></label>
+        <div><h1>Events</h1><p>Every stored observation, newest first. Select a row for its details; select a tag in a row to show only, or hide, events sharing it.</p></div>
+        <div className="live-controls">
+          {live && <button type="button" className="ghost small" onClick={liveTail.toggleHold} aria-pressed={liveTail.held}><Icon name={liveTail.held ? 'play' : 'pause'} size={12} />{liveTail.held ? 'Resume' : 'Pause'}</button>}
+          <label className="switch"><input type="checkbox" checked={live} onChange={event => setLive(event.target.checked)} /><span>Live tail</span></label>
+        </div>
       </div>
-      <form className="card filters" onSubmit={submit}>
-        <label className="field grow">Search<input type="search" value={draft.q} onChange={event => setDraft({ ...draft, q: event.target.value })} placeholder="IP, DNS name, SNI, pod, namespace, workload or process" /></label>
-        <label className="field">Window<WindowSelect value={draft.window} onChange={value => setDraft({ ...draft, window: value })} /></label>
-        <label className="field">Source IP<input value={draft.src} onChange={event => setDraft({ ...draft, src: event.target.value })} placeholder="any" size={12} title="Matches any part of the address, such as 10.0.1." /></label>
-        <label className="field">Destination IP<input value={draft.dst} onChange={event => setDraft({ ...draft, dst: event.target.value })} placeholder="any" size={12} title="Matches any part of the address, such as 10.0.1." /></label>
-        <button className="primary" type="submit" disabled={loading}>Search</button>
-        <button type="button" className="ghost" aria-expanded={more} aria-controls="more-filters" onClick={() => setMore(open => !open)}>
-          {more ? 'Fewer filters' : 'More filters'}{!more && exactActive.length > 0 && ` (${exactActive.length})`}
-        </button>
-        {more && (
-          <div className="more-filters" id="more-filters">
-            <Pick label="Node" value={draft.collector} options={nodes} onChange={setExact('collector')} title="Collector (node) that captured the packet" />
-            <Pick label="Interface type" value={draft.ifaceRole} options={interfaceRoles} onChange={setExact('ifaceRole')} />
-            <label className="field">Interface<input value={draft.iface} onChange={event => setExact('iface')(event.target.value)} placeholder="any" size={10} title="Exact interface name, such as tailscale0 or enp0s25" /></label>
-            <Pick label="IP version" value={draft.ipVersion} options={[{ id: '4', label: 'IPv4' }, { id: '6', label: 'IPv6' }]} onChange={setExact('ipVersion')} />
-            <Pick label="Process" value={draft.withProcess} options={[{ id: 'yes', label: 'identified' }, { id: 'no', label: 'not identified' }]} onChange={setExact('withProcess')} />
-            <Pick label="Source is" value={draft.srcKind} options={kinds} onChange={setExact('srcKind')} title="Kubernetes identity of the source address" />
-            <Pick label="Destination is" value={draft.dstKind} options={kinds} onChange={setExact('dstKind')} title="Kubernetes identity of the destination address" />
-            <label className="field">Namespace<input value={draft.namespace} onChange={event => setExact('namespace')(event.target.value)} placeholder="any" size={10} title="Kubernetes namespace of either end" /></label>
-            <label className="field">Port<input value={draft.port} onChange={event => setExact('port')(event.target.value.replace(/\D/g, ''))} placeholder="any" size={5} inputMode="numeric" title="Source or destination port" /></label>
-            <Pick label="Tailscale" value={draft.route} options={routes} onChange={setExact('route')} title="Traffic this node forwarded as a tailnet device's exit node or subnet router, or its own traffic into the tailnet" />
+      <FilterBar text={search.text} window={search.window} onApply={apply} suggestions={suggestions} busy={loading} serverError={filterError} />
+      <ErrorBanner error={filterError ? undefined : error} retry={() => void load(page?.nextCursor && events.length ? page.nextCursor : undefined)} />
+      <div className="event-list card flush" onMouseEnter={() => liveTail.setHover(true)} onMouseLeave={() => liveTail.setHover(false)}>
+        <div ref={liveTail.top} />
+        <div className="ev-sticky">
+          {live && <LiveStatus tail={liveTail} />}
+          <div className="ev-head" aria-hidden="true">
+            <span>Time</span><span>Type</span><span>Source</span><span /><span>Destination</span><span>Details</span>
           </div>
-        )}
-        <div className="chips" role="group" aria-label="Event types">
-          {eventTypes.map(type => (
-            <button key={type} type="button" className="chip" aria-pressed={draft.types.includes(type)} onClick={() => toggleType(type)} title={type}>
-              <span className={`swatch ${family(type)}`} />{eventLabel(type)}
-            </button>
+        </div>
+        <ol aria-label="Events" aria-live={live ? 'off' : undefined}>
+          {events.map(event => (
+            <EventRow key={event.ID} event={event} fresh={liveTail.fresh.has(event.ID)} expanded={expanded === event.ID}
+              onToggle={() => setExpanded(current => (current === event.ID ? undefined : event.ID))} onFilter={onFilter} />
           ))}
-          {draft.types.length > 0 && <button type="button" className="ghost small" onClick={() => setDraft({ ...draft, types: [] })}>Clear types</button>}
-        </div>
-      </form>
-      {(search.process || exactActive.length > 0) && (
-        <div className="active-filters" aria-label="Active filters">
-          {search.process && (
-            <span className="filter-chip">
-              <span>Process <b className="mono">{search.process}</b>{search.processContainer && <> in container <b>{search.processContainer}</b></>}{search.processPod ? <> of pod <b>{search.processPod}</b></> : ' on the host'}</span>
-              <button type="button" onClick={clearProcess} aria-label="Remove process filter">✕</button>
-            </span>
-          )}
-          {exactActive.map(key => (
-            <span key={key} className="filter-chip">
-              <span>{describe(key, search[key])}</span>
-              <button type="button" onClick={() => apply({ [key]: '' })} aria-label={`Remove filter ${describe(key, search[key])}`}>✕</button>
-            </span>
-          ))}
-          <button type="button" className="ghost small" onClick={clearAll}>Clear all</button>
-        </div>
-      )}
-      <ErrorBanner error={error} retry={() => void load(page?.nextCursor && events.length ? page.nextCursor : undefined)} />
-      {live && <Banner>Live tail: new events appear as they are stored (newest {liveLimit} kept).{skipped > 0 && ` ${skipped.toLocaleString()} events arrived faster than the live view shows; turn live tail off and search to see all of them.`}</Banner>}
-      <div className="event-list card flush">
-        <div className="ev-head" aria-hidden="true">
-          <span>Time</span><span>Type</span><span>Source</span><span /><span>Destination</span><span>Details</span>
-        </div>
-        <ol aria-label="Events">
-          {events.map(event => <EventRow key={event.ID} event={event} expanded={expanded === event.ID} onToggle={() => setExpanded(current => current === event.ID ? undefined : event.ID)} onFilter={onFilter} />)}
         </ol>
         {!events.length && (loading ? <Empty><Spinner /> Searching…</Empty> : page?.complete ? <Empty>No {filtered ? 'matching ' : ''}events between {dateTime(page.from)} and {dateTime(page.to)}.</Empty> : null)}
         <div ref={sentinel} />
@@ -266,12 +188,157 @@ export function Events({ query }: { query: URLSearchParams }) {
         <div className="table-foot">
           <span className="muted small" aria-live="polite">
             {events.length.toLocaleString()} shown
-            {page && (page.complete && !page.nextCursor ? ' · whole window searched' : ` · back to ${dateTime(page.searchedFrom)}`)}
+            {page && !live && (page.complete && !page.nextCursor ? ' · whole window searched' : ` · back to ${dateTime(page.searchedFrom)}`)}
           </span>
           {loading && events.length > 0 && <span className="muted small"><Spinner /> Loading older events…</span>}
-          {page?.nextCursor && !paused && !loading && !canAutoLoad && <button onClick={() => void load(page.nextCursor)}>Load older</button>}
+          {page?.nextCursor && !paused && !loading && !canAutoLoad && !live && <button onClick={() => void load(page.nextCursor)}>Load older</button>}
         </div>
       </div>
     </>
+  );
+}
+
+interface LiveTail {
+  held: boolean;
+  /** The server connection: lost connections are retried with backoff. */
+  connection: 'connecting' | 'open' | 'retrying';
+  /** Whether a connection dropped since the tail started; events stored in
+   *  the meantime are only found by searching. */
+  interrupted: boolean;
+  /** Why rows are not being added: the reader's attention, or the button. */
+  reason: string;
+  pending: number;
+  dropped: number;
+  skipped: number;
+  rate: number;
+  fresh: Set<number>;
+  top: React.RefObject<HTMLDivElement | null>;
+  setHover: (hover: boolean) => void;
+  toggleHold: () => void;
+  showNow: () => void;
+}
+
+/**
+ * The live tail: events matching the filter arrive from the server and are
+ * added at a readable pace (lib/pacer.ts). Adding holds while the pointer is
+ * over the list, a row is open or the list is scrolled down, so rows do not
+ * move under the reader; held events are added on resuming.
+ */
+function useLiveTail(enabled: boolean, text: string, rowOpen: boolean, setEvents: React.Dispatch<React.SetStateAction<NetworkEvent[]>>): LiveTail {
+  const pacer = useRef(new Pacer<NetworkEvent>());
+  const fresh = useRef(new Set<number>());
+  const top = useRef<HTMLDivElement>(null);
+  const [hover, setHover] = useState(false);
+  const [scrolled, setScrolled] = useState(false);
+  const [manual, setManual] = useState(false);
+  const [stats, setStats] = useState({ pending: 0, dropped: 0, skipped: 0, rate: 0 });
+  const [connection, setConnection] = useState<LiveTail['connection']>('connecting');
+  const [interrupted, setInterrupted] = useState(false);
+  const reason = manual ? 'paused' : rowOpen ? 'a row is open' : scrolled ? 'the list is scrolled down' : hover ? 'the pointer is over the list' : '';
+  const held = reason !== '';
+  const holding = useRef(held);
+  holding.current = held;
+
+  const add = (shown: NetworkEvent[]) => {
+    if (!shown.length) return;
+    for (const event of shown) fresh.current.add(event.ID);
+    if (fresh.current.size > 2 * liveLimit) fresh.current = new Set([...fresh.current].slice(-liveLimit));
+    setEvents(previous => {
+      const seen = new Set(previous.map(event => event.ID));
+      return [...shown.filter(event => !seen.has(event.ID)).reverse(), ...previous].slice(0, liveLimit);
+    });
+  };
+
+  useEffect(() => {
+    const target = top.current;
+    if (!enabled || !target || typeof IntersectionObserver === 'undefined') return;
+    const observer = new IntersectionObserver(entries => setScrolled(!entries.some(entry => entry.isIntersecting)), { rootMargin: '120px 0px 0px 0px' });
+    observer.observe(target);
+    return () => observer.disconnect();
+  }, [enabled]);
+
+  useEffect(() => {
+    if (!enabled) return;
+    pacer.current = new Pacer<NetworkEvent>();
+    fresh.current = new Set();
+    setInterrupted(false);
+    let skipped = 0;
+    let socket: WebSocket | undefined;
+    let retry: ReturnType<typeof setTimeout> | undefined;
+    let failures = 0;
+    let stopped = false;
+    const address = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}${location.pathname.replace(/[^/]*$/, '')}api/ws${text ? `?f=${encodeURIComponent(text)}` : ''}`;
+    const connect = () => {
+      setConnection(failures ? 'retrying' : 'connecting');
+      const current = new WebSocket(address);
+      socket = current;
+      current.onopen = () => {
+        if (failures) setInterrupted(true);
+        failures = 0;
+        setConnection('open');
+      };
+      // A restarted server or a dropped network closes the socket; retry
+      // with backoff (1 s doubling to 30 s) for as long as the tail is on.
+      current.onclose = () => {
+        if (stopped) return;
+        failures++;
+        setConnection('retrying');
+        retry = setTimeout(connect, Math.min(30_000, 1000 * 2 ** (failures - 1)));
+      };
+      current.onmessage = onMessage;
+    };
+    const onMessage = (message: MessageEvent) => {
+      // Messages queued together share a frame, one per line.
+      const arrived: NetworkEvent[] = [];
+      for (const line of String(message.data).split('\n')) {
+        if (!line) continue;
+        const data = JSON.parse(line) as { type: string; data?: NetworkEvent; count?: number };
+        if (data.type === 'event' && data.data) arrived.push(data.data);
+        if (data.type === 'skipped') skipped += data.count ?? 0;
+      }
+      arrived.sort((a, b) => a.Timestamp.localeCompare(b.Timestamp) || a.ID - b.ID);
+      pacer.current.push(arrived, performance.now(), holding.current);
+    };
+    connect();
+    const timer = setInterval(() => {
+      const now = performance.now();
+      add(pacer.current.take(now, holding.current));
+      const next = { pending: pacer.current.pending, dropped: pacer.current.dropped, skipped, rate: Math.round(pacer.current.rate(now) * 10) / 10 };
+      setStats(previous => (previous.pending === next.pending && previous.dropped === next.dropped && previous.skipped === next.skipped && previous.rate === next.rate ? previous : next));
+    }, 100);
+    return () => { stopped = true; socket?.close(); clearTimeout(retry); clearInterval(timer); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [enabled, text]);
+
+  return {
+    held, connection, interrupted, reason, ...stats, fresh: fresh.current, top, setHover,
+    toggleHold: () => setManual(value => !value),
+    showNow: () => {
+      add(pacer.current.flush());
+      setManual(false);
+      top.current?.scrollIntoView({ block: 'start', behavior: 'smooth' });
+    },
+  };
+}
+
+function LiveStatus({ tail }: { tail: LiveTail }) {
+  const fast = tail.rate > 12;
+  const down = tail.connection !== 'open';
+  return (
+    <div className={`live-status ${down ? 'down' : tail.held ? 'held' : ''}`} role="status">
+      <span className="live-dot" aria-hidden="true" />
+      {down
+        ? <span>{tail.connection === 'connecting' ? 'Connecting to the live stream…' : 'Live stream disconnected; reconnecting…'}</span>
+        : tail.held
+        ? <span>Holding new rows while {tail.reason}{tail.pending > 0 && <> · <b>{tail.pending}</b> waiting</>}</span>
+        : <span>Live · {tail.rate > 0 ? `${tail.rate.toLocaleString()} matching events/s` : 'waiting for matching events'}{fast && ' · showing about 12/s, newest kept'}</span>}
+      {(tail.dropped > 0 || tail.skipped > 0) && (
+        <span className="muted" title="The live view shows a readable sample of a fast stream; searching shows every stored event.">
+          · {(tail.dropped + tail.skipped).toLocaleString()} not shown live; add conditions or search to see all
+        </span>
+      )}
+      {tail.interrupted && <span className="muted" title="Events stored while the live stream was disconnected are not added here; turn off live tail to search them.">· reconnected after a break; search for events in between</span>}
+      {tail.held && tail.pending > 0 && <button type="button" className="small" onClick={tail.showNow}>Show now</button>}
+    </div>
   );
 }

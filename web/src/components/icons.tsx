@@ -9,6 +9,12 @@ const paths: Record<string, string> = {
   arrow: 'M2.5 8h10M9 4.5L12.5 8 9 11.5',
   process: 'M3 4.5l3 3.5-3 3.5M7.5 11.5h5.5',
   network: 'M8 2a6 6 0 1 0 0 12A6 6 0 0 0 8 2zM2 8h12M8 2c1.8 2 1.8 10 0 12M8 2c-1.8 2-1.8 10 0 12',
+  check: 'M3 8.5l3 3 7-7',
+  close: 'M4 4l8 8M12 4l-8 8',
+  plus: 'M8 3v10M3 8h10',
+  filter: 'M2.5 3h11l-4.2 5v4.5l-2.6-1.3V8z',
+  pause: 'M5.5 3.5v9M10.5 3.5v9',
+  play: 'M5 3.5l7 4.5-7 4.5z',
 };
 
 export function Icon({ name, size = 16, title }: { name: keyof typeof paths | string; size?: number; title?: string }) {
