@@ -200,7 +200,8 @@ func eventsFilter(query url.Values, db *gorm.DB) *gorm.DB {
 
 // eventsIndex is the index a page walks, newest first. A process drill-down
 // or one Tailscale route walks a partial index holding only those rows in
-// time order; other filters walk all events by time.
+// time order; a namespace walks its two sides' indexes (eventsSlice); other
+// filters walk all events by time.
 func eventsIndex(query url.Values) string {
 	if query.Get("process") != "" {
 		return "idx_process_time"
@@ -213,10 +214,33 @@ func eventsIndex(query url.Values) string {
 
 // eventsSlice selects one time slice of a page, newest first, before position.
 func eventsSlice(db *gorm.DB, query url.Values, sliceStart time.Time, position cursor, limit int) *gorm.DB {
-	return eventsFilter(query, db.Table("network_events INDEXED BY "+eventsIndex(query))).
-		// A row value, not "t < ? OR (t = ? AND id < ?)": SQLite plans the OR
-		// as a multi-index union and sorts the whole slice before LIMIT.
-		Where("timestamp >= ? AND (timestamp, id) < (?, ?)", sliceStart, position.at, position.id).
+	index := eventsIndex(query)
+	if namespace := query.Get("namespace"); namespace != "" && index == "idx_network_events_timestamp" {
+		// Events from or to a namespace: walking all events by time reads a
+		// quiet namespace's whole window. Each side's index lists only its
+		// events, by time; the newest of both make the page.
+		others := url.Values{}
+		for key, values := range query {
+			if key != "namespace" {
+				others[key] = values
+			}
+		}
+		// Each part starts its own statement on the caller's connection.
+		part := func() *gorm.DB { return db.Session(&gorm.Session{NewDB: true}) }
+		from := eventsWalk(eventsFilter(others, part().Table("network_events INDEXED BY idx_src_namespace_time")).
+			Where("src_namespace = ?", namespace), sliceStart, position, limit)
+		to := eventsWalk(eventsFilter(others, part().Table("network_events INDEXED BY idx_dst_namespace_time")).
+			Where("dst_namespace = ? AND src_namespace != ?", namespace, namespace), sliceStart, position, limit)
+		return part().Table("(SELECT * FROM (?) UNION ALL SELECT * FROM (?)) AS network_events", from, to).
+			Order("timestamp DESC, id DESC").Limit(limit)
+	}
+	return eventsWalk(eventsFilter(query, db.Table("network_events INDEXED BY "+index)), sliceStart, position, limit)
+}
+
+func eventsWalk(db *gorm.DB, sliceStart time.Time, position cursor, limit int) *gorm.DB {
+	// A row value, not "t < ? OR (t = ? AND id < ?)": SQLite plans the OR
+	// as a multi-index union and sorts the whole slice before LIMIT.
+	return db.Where("timestamp >= ? AND (timestamp, id) < (?, ?)", sliceStart, position.at, position.id).
 		Order("timestamp DESC, id DESC").Limit(limit)
 }
 
