@@ -282,7 +282,7 @@ func main() {
 		if *ingestURL != "" {
 			forwarder := &ingest.Forwarder{DB: db, URL: *ingestURL, Token: *ingestToken, CollectorID: *collectorID, Logger: logger,
 				Version: version, StorageLimit: storageLimit, Stats: func() ingest.LocalStats {
-					stats := ingest.LocalStats{InventoryAgeSeconds: -1}
+					stats := ingest.LocalStats{InventoryAgeSeconds: -1, Addresses: hostAddresses()}
 					if w := activeWatcher.Load(); w != nil {
 						captured := w.Stats()
 						stats.DiscardedEvents, stats.CaptureDrops = captured.DiscardedEvents, captured.CaptureDrops

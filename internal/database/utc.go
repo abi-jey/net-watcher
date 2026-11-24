@@ -67,7 +67,7 @@ func dialector(dsn string) gorm.Dialector {
 
 // storedModels are the tables AutoMigrate maintains.
 func storedModels() []any {
-	return []any{&NetworkEvent{}, &DNSResolution{}, &IngestedEvent{}, &IngestedResolution{}, &IngestCursor{}, &HourlyEvent{}, &HourlyHost{}, &AggregateState{}, &HourlyPod{}, &HourlyProcess{}, &CollectorStatus{}}
+	return []any{&NetworkEvent{}, &DNSResolution{}, &IngestedEvent{}, &IngestedResolution{}, &IngestCursor{}, &HourlyEvent{}, &HourlyHost{}, &AggregateState{}, &HourlyPod{}, &HourlyProcess{}, &CollectorStatus{}, &NodeAddress{}}
 }
 
 // Migration records one-time data migrations that have completed.

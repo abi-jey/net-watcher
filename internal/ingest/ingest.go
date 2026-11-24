@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"math"
 	"net/http"
+	"net/netip"
 	"strings"
 	"sync"
 	"time"
@@ -57,6 +58,9 @@ type Health struct {
 	CaptureDrops        int64     `json:"captureDrops"`
 	InventoryAgeSeconds int64     `json:"inventoryAgeSeconds"`
 	PodWatch            bool      `json:"podWatch"`
+	// Addresses are the node's global interface addresses (see addresses.go),
+	// sent only to an ingester that accepts them.
+	Addresses []string `json:"addresses,omitempty"`
 }
 
 // LocalStats supplies capture-side counters to a Forwarder's health report.
@@ -65,6 +69,7 @@ type LocalStats struct {
 	CaptureDrops        int64
 	InventoryAgeSeconds int64
 	PodWatch            bool
+	Addresses           []string // This host's interface addresses.
 }
 
 // rejectHeader marks a 400 response as a permanent rejection of the batch
@@ -79,6 +84,7 @@ type Receiver struct {
 
 	receivedMu sync.Mutex
 	received   map[string]time.Time
+	addresses  nodeAddresses
 }
 
 func (r *Receiver) markReceived(collector string, at time.Time) {
@@ -160,6 +166,7 @@ func (r *Receiver) handleBatch(w http.ResponseWriter, request *http.Request) {
 		http.Error(w, "could not store ingest batch", http.StatusInternalServerError)
 		return
 	}
+	w.Header().Set(acceptsHeader, acceptsAddresses)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -174,6 +181,16 @@ func validToken(header, token string) bool {
 func validBatch(batch Batch) bool {
 	if len(batch.CollectorID) == 0 || len(batch.CollectorID) > 253 || len(batch.Events) > maxEvents || len(batch.Resolutions) > maxEvents*4 {
 		return false
+	}
+	if batch.Health != nil {
+		if len(batch.Health.Addresses) > maxReportedAddresses {
+			return false
+		}
+		for _, address := range batch.Health.Addresses {
+			if _, err := netip.ParseAddr(address); err != nil {
+				return false
+			}
+		}
 	}
 	eventIDs, resolutionIDs := make(map[uint]bool), make(map[uint]bool)
 	for _, event := range batch.Events {
@@ -208,6 +225,11 @@ func (r *Receiver) store(ctx context.Context, batch Batch) error {
 		// The outer transaction already rolls back the whole batch, including
 		// evidence and ingest keys; avoid per-table savepoints for GORM batches.
 		tx = tx.Session(&gorm.Session{SkipDefaultTransaction: true})
+		if batch.Health != nil && len(batch.Health.Addresses) > 0 {
+			if err := r.addresses.record(tx, batch.CollectorID, batch.Health.Addresses, batch.Health.ReportedAt); err != nil {
+				return err
+			}
+		}
 		resolutionIDs := make(map[uint]uint, len(batch.Resolutions))
 		for start := 0; start < len(batch.Resolutions); start += 500 {
 			end := min(start+500, len(batch.Resolutions))
@@ -287,6 +309,9 @@ func (r *Receiver) store(ctx context.Context, batch Batch) error {
 			newEventIDs = append(newEventIDs, sourceID)
 			newEvents = append(newEvents, event)
 		}
+		if err := r.addresses.label(tx, newEvents); err != nil {
+			return err
+		}
 		if len(newEvents) > 0 {
 			if err := tx.CreateInBatches(&newEvents, eventInsertSize).Error; err != nil {
 				return err
@@ -358,6 +383,8 @@ type Forwarder struct {
 	lastAcknowledged    time.Time
 	lastHeartbeat       time.Time
 	missingEvidence     int64
+	// acceptsAddresses: the ingester stores Health.Addresses.
+	acceptsAddresses bool
 }
 
 // heartbeatInterval keeps the central view of an idle collector fresh.
@@ -406,6 +433,9 @@ func (f *Forwarder) health() *Health {
 	if f.Stats != nil {
 		stats := f.Stats()
 		h.DiscardedEvents, h.CaptureDrops, h.InventoryAgeSeconds, h.PodWatch = stats.DiscardedEvents, stats.CaptureDrops, stats.InventoryAgeSeconds, stats.PodWatch
+		if f.acceptsAddresses {
+			h.Addresses = reportableAddresses(stats.Addresses)
+		}
 	}
 	return h
 }
@@ -519,6 +549,7 @@ func (f *Forwarder) postBody(ctx context.Context, body []byte) (bool, error) {
 	}
 	_ = response.Body.Close()
 	if response.StatusCode == http.StatusNoContent {
+		f.acceptsAddresses = strings.Contains(response.Header.Get(acceptsHeader), acceptsAddresses)
 		return false, nil
 	}
 	err = fmt.Errorf("ingest endpoint returned HTTP %d", response.StatusCode)
