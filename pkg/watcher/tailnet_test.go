@@ -119,3 +119,48 @@ func TestTailnetIPv6NamedThroughKnownDevices(t *testing.T) {
 	names.name("fd7a:115c:a1e0::401:1f73")
 	wait("fd7a:115c:a1e0::401:1f73", "pixel-8a.tailnet.ts.net")
 }
+
+// Both addresses of a device are often looked up at once. When the IPv6
+// lookup fails while the IPv4 one names the device, the IPv6 miss must not
+// be kept: the next packet retries.
+func TestTailnetIPv6RetriedWhenNamedConcurrently(t *testing.T) {
+	names := newTailnetNames()
+	ipv4Named := make(chan struct{})
+	names.lookup = func(_ context.Context, ip string) (string, error) {
+		if ip == "100.67.31.108" {
+			return "pixel-8a.tailnet.ts.net", nil
+		}
+		<-ipv4Named // The IPv6 lookup is still running when the device is named.
+		return "", errors.New("NXDOMAIN")
+	}
+	var forward atomic.Int32
+	names.addresses = func(_ context.Context, _ string) ([]netip.Addr, error) {
+		if forward.Add(1) == 1 {
+			return nil, errors.New("timeout") // The first forward lookup fails.
+		}
+		return []netip.Addr{netip.MustParseAddr("fd7a:115c:a1e0::401:1f73")}, nil
+	}
+	names.name("fd7a:115c:a1e0::401:1f73")
+	names.name("100.67.31.108")
+	deadline := time.Now().Add(2 * time.Second)
+	for names.cached("100.67.31.108") == "" {
+		if time.Now().After(deadline) {
+			t.Fatal("IPv4 not named")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	close(ipv4Named)
+	for forward.Load() < 1 {
+		if time.Now().After(deadline) {
+			t.Fatal("IPv6 lookup did not finish")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	for names.cached("fd7a:115c:a1e0::401:1f73") != "pixel-8a.tailnet.ts.net" {
+		if time.Now().After(deadline) {
+			t.Fatalf("IPv6 not retried: %q after %d forward lookups", names.cached("fd7a:115c:a1e0::401:1f73"), forward.Load())
+		}
+		names.name("fd7a:115c:a1e0::401:1f73") // The next packet.
+		time.Sleep(5 * time.Millisecond)
+	}
+}

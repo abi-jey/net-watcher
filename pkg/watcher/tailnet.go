@@ -125,6 +125,9 @@ type tailnetNames struct {
 	// failed reports a failed lookup at most every tailnetMissTTL.
 	failed     func(ip string, err error)
 	lastFailed time.Time
+	// learned counts newly named devices. An IPv6 lookup that fails while
+	// a device is being named may have missed it, so its miss is not kept.
+	learned uint64
 }
 
 type tailnetName struct {
@@ -180,6 +183,9 @@ func (t *tailnetNames) name(ip string) string {
 	default:
 		return entry.name // Enough lookups running; a later packet retries.
 	}
+	t.mu.Lock()
+	learned := t.learned
+	t.mu.Unlock()
 	go func() {
 		defer func() { <-t.inFlight }()
 		ctx, cancel := context.WithTimeout(context.Background(), tailnetLookupFor)
@@ -193,13 +199,20 @@ func (t *tailnetNames) name(ip string) string {
 			name, ttl = entry.name, tailnetMissTTL // Keep a known name through resolver hiccups.
 		}
 		t.mu.Lock()
-		if (err != nil || name == "") && t.failed != nil && time.Since(t.lastFailed) > tailnetMissTTL {
+		defer t.mu.Unlock()
+		if name == "" && t.learned != learned {
+			// A device was named meanwhile: retry on the next packet.
+			t.names[ip] = tailnetName{}
+			return
+		}
+		if name == "" && t.failed != nil && time.Since(t.lastFailed) > tailnetMissTTL {
 			t.lastFailed = time.Now()
 			go t.failed(ip, err)
 		}
 		if name != "" && name != entry.name {
-			// A newly named device may own IPv6 addresses that failed before
-			// any device was known: let them retry on their next packet.
+			t.learned++
+			// The device may own IPv6 addresses that failed before any
+			// device was known: let them retry on their next packet.
 			for other, cached := range t.names {
 				if cached.name == "" && strings.Contains(other, ":") {
 					t.names[other] = tailnetName{}
@@ -207,7 +220,6 @@ func (t *tailnetNames) name(ip string) string {
 			}
 		}
 		t.names[ip] = tailnetName{name: name, until: time.Now().Add(ttl)}
-		t.mu.Unlock()
 	}()
 	return entry.name
 }
