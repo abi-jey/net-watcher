@@ -53,12 +53,11 @@ const (
 	processQueueSize      = 256
 	processFullRescan     = time.Minute // Between rescans, only new PIDs are read in full.
 	processMaxTables      = 64          // Socket tables kept for lookups queued before they were read.
-	// /proc work is bounded to about 3% of one core on average, with bursts of
-	// twice that: two thirds for pod lookups and snapshots, which are cheap
-	// and most useful, one third for host lookups, which may scan the
-	// descriptors of many processes. Neither can starve the other.
-	podWorkPerSecond  = 20 * time.Millisecond
-	hostWorkPerSecond = 10 * time.Millisecond
+	// /proc work is bounded by default to about 3% of one core on average,
+	// with bursts of twice that: two thirds for pod lookups and snapshots,
+	// which are cheap and most useful, one third for host lookups, which may
+	// scan the descriptors of many processes. Neither can starve the other.
+	DefaultProcessBudget = 30 * time.Millisecond
 )
 
 // ContainerLookup names a container by runtime ID.
@@ -119,6 +118,7 @@ type processAttributor struct {
 	addresses  func() map[string]bool
 	onEvent    func(database.NetworkEvent)
 	logger     *log.Logger
+	budget     time.Duration // CPU time per second; DefaultProcessBudget when zero.
 
 	jobsMu  sync.RWMutex
 	closed  bool
@@ -148,6 +148,13 @@ type processAttributor struct {
 	// tableFirst: per namespace, protocol and side, the table (IPv4 or IPv6)
 	// that last held the socket, read first next time.
 	tableFirst map[string]int
+	// diag looks sockets up exactly in diagNetns, the namespace this process
+	// runs in (the host's, for a host-network collector), instead of reading
+	// its socket tables. diagErrors counts consecutive failures; after
+	// sockDiagMaxErrors, lookups go back to the tables.
+	diag       *sockDiag
+	diagNetns  string
+	diagErrors int
 
 	hostIPs atomic.Pointer[map[string]bool]
 
@@ -163,7 +170,7 @@ type processAttributor struct {
 	budgetHit, overBudget, expired          atomic.Uint64
 	queueFull, noSocket, snapshots, indexed atomic.Uint64
 	knownMiss, noOwner, byOwner             atomic.Uint64
-	tableReads, tableReuse                  atomic.Uint64
+	tableReads, tableReuse, diagLookups     atomic.Uint64
 	work, snapshotWork                      atomic.Int64 // Nanoseconds spent reading /proc.
 }
 
@@ -182,8 +189,8 @@ type socketRef struct {
 	fd  string
 }
 
-func newProcessAttributor(root string, containers ContainerLookup, logger *log.Logger, onEvent func(database.NetworkEvent)) (*processAttributor, error) {
-	a := &processAttributor{root: root, containers: containers, addresses: localAddresses, onEvent: onEvent, logger: logger}
+func newProcessAttributor(root string, containers ContainerLookup, budget time.Duration, logger *log.Logger, onEvent func(database.NetworkEvent)) (*processAttributor, error) {
+	a := &processAttributor{root: root, containers: containers, budget: budget, addresses: localAddresses, onEvent: onEvent, logger: logger}
 	if err := a.start(); err != nil {
 		return nil, err
 	}
@@ -200,10 +207,21 @@ func (a *processAttributor) start() error {
 	a.misses = map[string]time.Time{}
 	a.resume = map[string]int{}
 	a.tables, a.tableFirst = map[string]socketTable{}, map[string]int{}
-	a.podWork, a.hostWork = newWorkBudget(podWorkPerSecond, time.Now()), newWorkBudget(hostWorkPerSecond, time.Now())
+	budget := a.budget
+	if budget <= 0 {
+		budget = DefaultProcessBudget
+	}
+	a.podWork, a.hostWork = newWorkBudget(budget*2/3, time.Now()), newWorkBudget(budget/3, time.Now())
 	a.refresh(time.Now())
 	if a.snapshot.hostNetns == "" || len(a.snapshot.host) == 0 {
 		return fmt.Errorf("cannot read process namespaces under %s; process attribution needs CAP_SYS_PTRACE", a.root)
+	}
+	if self, err := os.Readlink(selfNetnsPath); err == nil && self == a.snapshot.hostNetns {
+		if diag, err := openSockDiag(); err == nil {
+			a.diag, a.diagNetns = diag, self
+		} else {
+			a.logger.Warn("Host socket lookups read socket tables", "error", err)
+		}
 	}
 	a.workers.Add(1)
 	go a.run()
@@ -308,6 +326,10 @@ func (a *processAttributor) stop() {
 	}
 	a.jobsMu.Unlock()
 	a.workers.Wait()
+	if a.diag != nil {
+		a.diag.close()
+		a.diag = nil
+	}
 	a.report()
 }
 
@@ -327,7 +349,7 @@ func (a *processAttributor) report() {
 	budgetHit, overBudget, expired := a.budgetHit.Swap(0), a.overBudget.Swap(0), a.expired.Swap(0)
 	queueFull, noSocket, snapshots, work := a.queueFull.Swap(0), a.noSocket.Swap(0), a.snapshots.Swap(0), a.work.Swap(0)
 	indexed, snapshotWork, knownMiss, noOwner := a.indexed.Swap(0), a.snapshotWork.Swap(0), a.knownMiss.Swap(0), a.noOwner.Swap(0)
-	byOwner, tableReads, tableReuse := a.byOwner.Swap(0), a.tableReads.Swap(0), a.tableReuse.Swap(0)
+	byOwner, tableReads, tableReuse, diagLookups := a.byOwner.Swap(0), a.tableReads.Swap(0), a.tableReuse.Swap(0), a.diagLookups.Swap(0)
 	a.exampleMu.Lock()
 	examples := a.examples
 	a.examples = nil
@@ -335,7 +357,7 @@ func (a *processAttributor) report() {
 	if attempted+inherited+overBudget+expired+queueFull > 0 {
 		a.logger.Info("Process attribution", "attempted", attempted, "matched", matched, "from_index", indexed, "by_owner", byOwner, "inherited", inherited,
 			"no_socket", noSocket, "no_owner", noOwner, "known_miss", knownMiss, "not_local", notLocal, "deadline_hit", budgetHit, "over_budget", overBudget,
-			"expired", expired, "queue_full", queueFull, "flows", flows, "snapshots", snapshots, "tables_read", tableReads, "tables_reused", tableReuse,
+			"expired", expired, "queue_full", queueFull, "flows", flows, "snapshots", snapshots, "tables_read", tableReads, "tables_reused", tableReuse, "socket_queries", diagLookups,
 			"snapshot_ms", time.Duration(snapshotWork).Milliseconds(), "lookup_ms", time.Duration(work).Milliseconds(), "misses", strings.Join(examples, "; "))
 	}
 }
@@ -843,6 +865,11 @@ func (a *processAttributor) findSocket(c candidate, procDir string, udp bool, de
 		return "", 0, true
 	}
 	local, remote = local.Unmap(), remote.Unmap()
+	if a.diag != nil && c.netns != "" && c.netns == a.diagNetns {
+		if inode, uid, answered := a.querySocket(udp, c.side == "dst", netip.AddrPortFrom(local, c.port), netip.AddrPortFrom(remote, c.otherPort)); answered {
+			return inode, uid, true
+		}
+	}
 	tables := []string{"tcp", "tcp6"}
 	if udp {
 		tables = []string{"udp", "udp6"}
@@ -883,6 +910,35 @@ func (a *processAttributor) findSocket(c candidate, procDir string, udp bool, de
 		return inode, uid, true
 	}
 	return "", 0, opened
+}
+
+// selfNetnsPath names the network namespace this process runs in.
+var selfNetnsPath = "/proc/self/ns/net"
+
+// sockDiagMaxErrors consecutive failed queries switch lookups back to reading
+// socket tables.
+const sockDiagMaxErrors = 3
+
+// querySocket asks the kernel for the socket; answered is false when the
+// query itself failed and the tables must be read instead.
+func (a *processAttributor) querySocket(udp, server bool, local, remote netip.AddrPort) (inode string, uid uint32, answered bool) {
+	a.diagLookups.Add(1)
+	found, owner, err := a.diag.find(udp, server, local, remote)
+	switch {
+	case err == nil:
+		a.diagErrors = 0
+		return strconv.FormatUint(uint64(found), 10), owner, true
+	case errors.Is(err, errNoSocket):
+		a.diagErrors = 0
+		return "", 0, true
+	}
+	a.diagErrors++
+	if a.diagErrors >= sockDiagMaxErrors {
+		a.logger.Warn("Host socket lookups read socket tables from now on", "error", err)
+		a.diag.close()
+		a.diag = nil
+	}
+	return "", 0, false
 }
 
 // socketTable returns a namespace's socket table, reusing a read that started

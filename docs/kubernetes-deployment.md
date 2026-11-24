@@ -282,8 +282,13 @@ unavailable ... needs CAP_SYS_PTRACE` at start even with the capability; the
 How it works: every 15 seconds (and at most every 3 when an unknown pod shows
 up) the collector maps processes to pods through `/proc/<pid>/cgroup`, which
 names the pod UID and container ID. When a connection starts, it looks the flow
-up in the socket table of that pod's network namespace (or the host's), then
-finds which of that pod's processes holds the socket. For the receiving side
+up in the socket table of that pod's network namespace, then finds which of
+that pod's processes holds the socket. For the host's own namespace, where the
+host-network collector runs, it asks the kernel for that one socket through
+`sock_diag` netlink (the query `ss` uses, no privilege needed) instead of
+reading the node's whole socket table: microseconds instead of milliseconds,
+which matters on gateways and exit nodes where much traffic is forwarded and
+has no local socket. For the receiving side
 of a connection not yet accepted, the listening socket identifies the server.
 Later events of the same connection (TLS, end, timeout) reuse the result.
 
@@ -296,9 +301,12 @@ unattributed. Adding `CAP_DAC_READ_SEARCH` would make those descriptors
 readable and record exact PIDs, at the cost of letting the collector read any
 file it can reach through `/host/proc`.
 
-All `/proc` reads happen on one background worker within a CPU-time budget of
-about 3% of one core, so packet capture never waits for it; lookups beyond the
-budget are skipped and counted. Reading a TCP socket table walks the kernel's
+All `/proc` reads happen on one background worker within a CPU-time budget,
+so packet capture never waits for it; lookups beyond the budget are skipped
+and counted as `over_budget`. `--process-budget` sets it in CPU time per
+second (default `30ms`, about 3% of one core, with bursts of twice that): two
+thirds for pod lookups and process snapshots, one third for host processes.
+Raise it where `over_budget` stays high and the node has CPU to spare. Reading a TCP socket table walks the kernel's
 node-wide connection hash whichever namespace it is for (about 1 ms even when
 nearly empty), so one read serves every lookup for that namespace queued
 before it started. Endpoints that cannot match (kernel tunnels such as VXLAN,
@@ -307,7 +315,7 @@ ports with no listener) are skipped for a minute.
 Every 30 seconds the collector logs `Process attribution` with its counters
 (`attempted`, `matched`, `by_owner`, `inherited`, `no_socket`, `no_owner`,
 `known_miss`, `deadline_hit`, `over_budget`, `expired`, `tables_read`,
-`tables_reused`, `lookup_ms`, `snapshot_ms`) and up to four example misses
+`tables_reused`, `socket_queries`, `lookup_ms`, `snapshot_ms`) and up to four example misses
 with their reason.
 
 Connections stay unattributed when the socket closed before the lookup ran,

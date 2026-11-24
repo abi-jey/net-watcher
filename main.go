@@ -53,6 +53,7 @@ FLAGS:
     --owned-cidrs        Comma-separated operator-owned IP ranges for map labels
     --process-attribution  Best-effort host TLS PID/name using read-only procfs
     --process-proc-root    Host procfs mount (default: /host/proc)
+    --process-budget       CPU time per second for process attribution (default: 30ms)
     --include-virtual    Include bridge/veth interfaces during automatic discovery
     --db                 SQLite database path (default: netwatcher.db)
     --max-db-size-gb     Maximum central/standalone SQLite size in GiB (default: 10)
@@ -101,6 +102,7 @@ func main() {
 		ownedCIDRs := startCmd.String("owned-cidrs", "", "Comma-separated operator-owned CIDRs for network map classification")
 		processAttribution := startCmd.Bool("process-attribution", false, "Attribute flows on this node to processes and containers from read-only host procfs (needs CAP_SYS_PTRACE)")
 		processProcRoot := startCmd.String("process-proc-root", "/host/proc", "Read-only host procfs mount for process attribution")
+		processBudget := startCmd.Duration("process-budget", watcher.DefaultProcessBudget, "CPU time per second process attribution may spend on lookups: two thirds for pods, one third for host processes (1ms-1s)")
 		includeVirtual := startCmd.Bool("include-virtual", false, "Include bridge/veth interfaces")
 		ingestURL := startCmd.String("ingest-url", "", "Authenticated central ingestion base URL for this collector")
 		ingestToken := startCmd.String("ingest-token", "", "Bearer token for central ingestion")
@@ -108,6 +110,10 @@ func main() {
 		ingestQueueMB := startCmd.Int64("ingest-queue-size-mb", 256, "Maximum pending ingestion payload in MiB; stored beside --db")
 		collectorID := startCmd.String("collector-id", "", "Stable collector identity for central ingestion")
 		_ = startCmd.Parse(os.Args[2:])
+		if *processBudget < time.Millisecond || *processBudget > time.Second {
+			log.Error("--process-budget must be between 1ms and 1s")
+			os.Exit(1)
+		}
 		if *ingestQueueMB <= 0 || *ingestQueueMB > (1<<63-1)/(1<<20) {
 			log.Error("--ingest-queue-size-mb must be a positive number of MiB")
 			os.Exit(1)
@@ -331,7 +337,7 @@ func main() {
 				ref, ok := inventory.Container(id)
 				return ref.Namespace, ref.Pod, ref.Name, ok
 			}
-			if err := w.EnableProcessAttribution(*processProcRoot, containers); err != nil {
+			if err := w.EnableProcessAttribution(*processProcRoot, containers, *processBudget); err != nil {
 				log.Warn("Process attribution unavailable; continuing packet capture", "error", err)
 			}
 		}
