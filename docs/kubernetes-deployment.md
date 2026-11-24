@@ -346,6 +346,17 @@ temporary public IPv6 or Wi-Fi addresses. The collector re-reads its addresses
 every 30 seconds, so a node's own connections over its public address show as
 `node` rather than as internet-to-internet traffic.
 
+Another node's such addresses are unknown to a collector, so with central
+ingestion each collector also reports its global interface addresses (public
+and tailnet; not private or link-local ones, which repeat across hosts) in its
+health reports. The ingester records when each node held each address in
+`node_addresses` and attributes an event side that no collector attributed to
+the one node that held its address at capture time (from an hour before its
+first report to 10 minutes after its last), with `node` confidence and that
+evidence in the side's context. An address two nodes reported is left alone.
+Collectors send addresses only to an ingester that advertises support for
+them, so either can be upgraded first.
+
 If the watch is unavailable (missing RBAC, API errors), collector health reports
 `pod watch disconnected` and attribution falls back to the list interval, where
 reuse within those 30 seconds is reported as `ambiguous` rather than guessed.

@@ -138,6 +138,16 @@ func NewGapEvent(reason string, count int64, from, to time.Time, iface string) N
 	return NetworkEvent{Timestamp: from, EndTime: to, EventType: EventGap, Reason: reason, EventCount: count, Interface: iface}
 }
 
+// NodeAddress records that a node's collector reported a global interface
+// address, from FirstSeen to LastSeen: the evidence for attributing the
+// address to that node in other nodes' events.
+type NodeAddress struct {
+	Node      string `gorm:"primaryKey"`
+	Address   string `gorm:"primaryKey;index"`
+	FirstSeen time.Time
+	LastSeen  time.Time
+}
+
 // CollectorStatus is the latest health report from a collector, kept centrally so
 // a silent collector is visible instead of indistinguishable from a quiet one.
 type CollectorStatus struct {
