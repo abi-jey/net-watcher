@@ -1,7 +1,7 @@
 import { lazy, Suspense } from 'react';
 import { useResource, useRoute } from './lib/hooks.ts';
 import type { HealthResponse } from './lib/api.ts';
-import { Spinner } from './components/ui.tsx';
+import { PageBoundary, Spinner } from './components/ui.tsx';
 import { Icon } from './components/icons.tsx';
 import { Overview } from './pages/Overview.tsx';
 
@@ -56,7 +56,7 @@ export function App() {
         <div className="sidebar-foot">{version.data?.version ? (version.data.version === 'dev' ? 'development build' : `v${version.data.version.replace(/^v/, '')}`) : ''}</div>
       </nav>
       <main className="main">
-        <Suspense fallback={<Spinner />}>{page}</Suspense>
+        <PageBoundary key={section}><Suspense fallback={<Spinner />}>{page}</Suspense></PageBoundary>
       </main>
     </div>
   );
