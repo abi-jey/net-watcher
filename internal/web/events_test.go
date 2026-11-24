@@ -136,7 +136,7 @@ func TestEventsNamespaceWalksBothSides(t *testing.T) {
 
 	sql := f.server.db.ToSQL(func(tx *gorm.DB) *gorm.DB {
 		var rows []database.NetworkEvent
-		return eventsSlice(tx, url.Values{"namespace": {"quiet"}}, f.now.Add(-time.Hour), cursor{at: f.now}, 50).Find(&rows)
+		return eventsSlice(tx, requestFilter(t, url.Values{"namespace": {"quiet"}}), f.now.Add(-time.Hour), cursor{at: f.now}, 50).Find(&rows)
 	})
 	var steps []struct{ Detail string }
 	if err := f.server.db.Raw("EXPLAIN QUERY PLAN " + sql).Scan(&steps).Error; err != nil {

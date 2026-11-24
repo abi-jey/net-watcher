@@ -40,11 +40,11 @@ type EventsResponse struct {
 }
 
 // handleEvents pages through events in a bounded time window (default 24 h,
-// at most 7 days) with keyset pagination. Filters: eventType (comma list),
-// srcIP, dstIP and q (substrings of addresses, names, Kubernetes identity or
-// process); collector, iface, ifaceRole, ipVersion, withProcess, srcKind,
-// dstKind, namespace, port and route (exact; route "any" for every Tailscale
-// route); an exact process identity; from, to, limit and cursor.
+// at most 7 days) with keyset pagination: from, to, limit and cursor. f is a
+// filter expression (filter.go); the older one-value parameters (eventType,
+// srcIP, dstIP, q, collector, iface, ifaceRole, ipVersion, withProcess,
+// srcKind, dstKind, namespace, port, route and a process identity) still
+// work and must hold as well.
 func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	query := r.URL.Query()
 	from, to, err := timeWindow(r, eventsDefaultWindow)
@@ -60,7 +60,8 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if err := validateEventFilters(query); err != nil {
+	filter, err := eventsRequestFilter(query)
+	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -92,7 +93,7 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 			defer cancel()
 		}
 		var rows []database.NetworkEvent
-		err := eventsSlice(s.db.WithContext(ctx), query, sliceStart, position, limit-len(response.Events)).Find(&rows).Error
+		err := eventsSlice(s.db.WithContext(ctx), filter, sliceStart, position, limit-len(response.Events)).Find(&rows).Error
 		if err != nil {
 			if r.Context().Err() == nil && (errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded)) {
 				break // Budget spent inside this slice; resume from the last full slice.
@@ -126,115 +127,190 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(response)
 }
 
-// eventsFilter applies the request's filters to an events query.
-func eventsFilter(query url.Values, db *gorm.DB) *gorm.DB {
+// eventsRequestFilter reads a request's filter: the expression in f and the
+// older one-value parameters, all of which must hold.
+func eventsRequestFilter(query url.Values) (*expr, error) {
+	parsed, err := parseFilter(query.Get("f"))
+	if err != nil {
+		return nil, err
+	}
+	var terms []*expr
+	add := func(param, name, op string, values ...string) error {
+		canonical, field, _ := lookupField(name)
+		term, err := newCompare(canonical, field, op, values, 0)
+		if err != nil {
+			var filterError *FilterError
+			if errors.As(err, &filterError) {
+				return fmt.Errorf("%s: %s", param, filterError.Message)
+			}
+			return err
+		}
+		terms = append(terms, term)
+		return nil
+	}
+	for _, legacy := range []struct{ param, field, op string }{
+		{"srcIP", "src.ip", "~"}, {"dstIP", "dst.ip", "~"}, {"collector", "node", "="}, {"iface", "iface", "="}, {"ifaceRole", "iface.type", "="},
+		{"ipVersion", "ipv", "="}, {"srcKind", "src.kind", "="}, {"dstKind", "dst.kind", "="}, {"namespace", "ns", "="}, {"port", "port", "="},
+	} {
+		if value := query.Get(legacy.param); value != "" {
+			if err := add(legacy.param, legacy.field, legacy.op, value); err != nil {
+				return nil, err
+			}
+		}
+	}
 	if value := query.Get("eventType"); value != "" {
-		db = db.Where("event_type IN ?", strings.Split(value, ","))
+		if err := add("eventType", "type", "=", strings.Split(value, ",")...); err != nil {
+			return nil, err
+		}
 	}
-	if value := query.Get("srcIP"); value != "" {
-		db = db.Where("src_ip LIKE ?", "%"+value+"%")
-	}
-	if value := query.Get("dstIP"); value != "" {
-		db = db.Where("dst_ip LIKE ?", "%"+value+"%")
-	}
-	// Exact process identity, as listed by /api/processes. An empty pod
-	// selects host processes once a command is given.
+	// An exact process identity, as listed by /api/processes; an empty pod
+	// selects host processes.
 	if value := query.Get("process"); value != "" {
-		db = db.Where("process_command = ? AND process_pod = ? AND process_container = ? AND process_side > ''", value, query.Get("processPod"), query.Get("processContainer"))
-	}
-	if value := query.Get("collector"); value != "" {
-		db = db.Where("collector_id = ?", value)
-	}
-	if value := query.Get("iface"); value != "" {
-		db = db.Where("interface = ?", value)
-	}
-	if role, ok := interfaceRoles[query.Get("ifaceRole")]; ok {
-		db = db.Where(globClause(role.match, " OR "), globArgs(role.match)...)
-		if len(role.except) > 0 {
-			db = db.Where("NOT "+globClause(role.except, " OR "), globArgs(role.except)...)
+		for _, err := range []error{add("process", "process", "=", value), add("processPod", "process.pod", "=", orNone(query.Get("processPod"))),
+			add("processContainer", "process.container", "=", orNone(query.Get("processContainer")))} {
+			if err != nil {
+				return nil, err
+			}
 		}
 	}
-	if value := query.Get("ipVersion"); value != "" {
-		db = db.Where("ip_version = ?", value)
-	}
-	switch query.Get("withProcess") {
-	case "yes":
-		db = db.Where("process_side > ''")
-	case "no":
-		db = db.Where("COALESCE(process_side, '') = ''")
-	}
-	for _, side := range []string{"src", "dst"} {
-		switch value := query.Get(side + "Kind"); value {
-		case "":
-		case "none":
-			db = db.Where("COALESCE(" + side + "_kind, '') = ''")
-		default:
-			db = db.Where(side+"_kind = ?", value)
+	switch value := query.Get("withProcess"); value {
+	case "":
+	case "yes", "no":
+		op := map[string]string{"yes": "!=", "no": "="}[value]
+		if err := add("withProcess", "process.side", op, "none"); err != nil {
+			return nil, err
 		}
-	}
-	if value := query.Get("namespace"); value != "" {
-		db = db.Where("(src_namespace = ? OR dst_namespace = ?)", value, value)
-	}
-	if value := query.Get("port"); value != "" {
-		db = db.Where("(src_port = ? OR dst_port = ?)", value, value)
+	default:
+		return nil, fmt.Errorf("withProcess must be yes or no")
 	}
 	switch value := query.Get("route"); value {
 	case "":
 	case "any":
-		db = db.Where("route > ''")
-	default:
-		db = db.Where("route = ? AND route > ''", value) // The second term lets SQLite use the partial index.
-	}
-	if value := query.Get("q"); value != "" {
-		like := "%" + value + "%"
-		columns := []string{"src_ip", "dst_ip", "hostname", "dns_query", "tls_sni", "src_name", "dst_name", "src_namespace", "dst_namespace", "src_workload", "dst_workload", "process_command", "process_pod", "process_container", "tailnet_peer", "tailnet_peer_name"}
-		clauses := make([]string, len(columns))
-		args := make([]interface{}, len(columns))
-		for i, column := range columns {
-			clauses[i], args[i] = column+" LIKE ?", like
+		if err := add("route", "route", "!=", "none"); err != nil {
+			return nil, err
 		}
-		db = db.Where("("+strings.Join(clauses, " OR ")+")", args...)
+	default:
+		if err := add("route", "route", "=", value); err != nil {
+			return nil, err
+		}
 	}
-	return db
+	if text := query.Get("q"); text != "" {
+		terms = append(terms, &expr{kind: exprText, raw: []string{text}, norm: []value{{text: text}}})
+	}
+	return andFilters(append(terms, parsed)...), nil
 }
 
-// eventsIndex is the index a page walks, newest first. A process drill-down
-// or one Tailscale route walks a partial index holding only those rows in
-// time order; a namespace walks its two sides' indexes (eventsSlice); other
-// filters walk all events by time.
-func eventsIndex(query url.Values) string {
-	if query.Get("process") != "" {
-		return "idx_process_time"
+func orNone(value string) string {
+	if value == "" {
+		return "none"
 	}
-	if route := query.Get("route"); route != "" && route != "any" {
-		return "idx_route_time"
+	return value
+}
+
+// eventsPart is one index walk of a page: the index and the conditions that
+// let SQLite read it in time order.
+type eventsPart struct {
+	index, where string
+	args         []any
+}
+
+// maxNamespaceWalks bounds the index walks a namespace list makes.
+const maxNamespaceWalks = 8
+
+// eventsParts chooses the indexes a page walks, newest first, from the
+// filter's top-level conditions. A process identity or one Tailscale route
+// walks a partial index holding only those rows in time order. Namespaces
+// walk each side's (namespace, time) index, which lists only their events:
+// walking all events by time would read a quiet namespace's whole window.
+// Anything else walks all events by time.
+func eventsParts(filter *expr) []eventsPart {
+	conditions := []*expr{filter}
+	if filter == nil {
+		conditions = nil
+	} else if filter.kind == exprAnd {
+		conditions = filter.terms
 	}
-	return "idx_network_events_timestamp"
+	single := func(name string) (string, bool) {
+		for _, c := range conditions {
+			if c.kind == exprCompare && c.name == name && c.op == "=" && len(c.norm) == 1 {
+				return c.norm[0].text, true
+			}
+		}
+		return "", false
+	}
+	if command, ok := single("process"); ok && command != "" {
+		pod, podOK := single("process.pod")
+		container, containerOK := single("process.container")
+		if podOK && containerOK {
+			return []eventsPart{{"idx_process_time", "process_command = ? AND process_pod = ? AND process_container = ? AND process_side > ''", []any{command, pod, container}}}
+		}
+	}
+	if route, ok := single("route"); ok && route != "" {
+		return []eventsPart{{"idx_route_time", "route = ? AND route > ''", []any{route}}} // The second term lets SQLite use the partial index.
+	}
+	for _, c := range conditions {
+		if c.kind != exprCompare || c.op != "=" || len(c.norm) > maxNamespaceWalks || (c.name != "ns" && c.name != "src.ns" && c.name != "dst.ns") {
+			continue
+		}
+		namespaces := make([]any, 0, len(c.norm))
+		for _, v := range c.norm {
+			if v.text != "" {
+				namespaces = append(namespaces, v.text)
+			}
+		}
+		if len(namespaces) < len(c.norm) {
+			continue // Unset namespaces are not in the indexes' useful part.
+		}
+		var parts []eventsPart
+		for _, namespace := range namespaces {
+			if c.name != "dst.ns" {
+				parts = append(parts, eventsPart{"idx_src_namespace_time", "src_namespace = ?", []any{namespace}})
+			}
+			switch c.name {
+			case "dst.ns":
+				parts = append(parts, eventsPart{"idx_dst_namespace_time", "dst_namespace = ?", []any{namespace}})
+			case "ns":
+				// Either end: events whose source is listed came from the
+				// source walks.
+				parts = append(parts, eventsPart{"idx_dst_namespace_time", "dst_namespace = ? AND COALESCE(src_namespace, '') NOT IN (" + placeholders(len(namespaces)) + ")",
+					append([]any{namespace}, namespaces...)})
+			}
+		}
+		return parts
+	}
+	return []eventsPart{{index: "idx_network_events_timestamp"}}
 }
 
 // eventsSlice selects one time slice of a page, newest first, before position.
-func eventsSlice(db *gorm.DB, query url.Values, sliceStart time.Time, position cursor, limit int) *gorm.DB {
-	index := eventsIndex(query)
-	if namespace := query.Get("namespace"); namespace != "" && index == "idx_network_events_timestamp" {
-		// Events from or to a namespace: walking all events by time reads a
-		// quiet namespace's whole window. Each side's index lists only its
-		// events, by time; the newest of both make the page.
-		others := url.Values{}
-		for key, values := range query {
-			if key != "namespace" {
-				others[key] = values
-			}
-		}
-		// Each part starts its own statement on the caller's connection.
-		part := func() *gorm.DB { return db.Session(&gorm.Session{NewDB: true}) }
-		from := eventsWalk(eventsFilter(others, part().Table("network_events INDEXED BY idx_src_namespace_time")).
-			Where("src_namespace = ?", namespace), sliceStart, position, limit)
-		to := eventsWalk(eventsFilter(others, part().Table("network_events INDEXED BY idx_dst_namespace_time")).
-			Where("dst_namespace = ? AND src_namespace != ?", namespace, namespace), sliceStart, position, limit)
-		return part().Table("(SELECT * FROM (?) UNION ALL SELECT * FROM (?)) AS network_events", from, to).
-			Order("timestamp DESC, id DESC").Limit(limit)
+func eventsSlice(db *gorm.DB, filter *expr, sliceStart time.Time, position cursor, limit int) *gorm.DB {
+	var where string
+	var args []any
+	if filter != nil {
+		where, args = filter.sql()
 	}
-	return eventsWalk(eventsFilter(query, db.Table("network_events INDEXED BY "+index)), sliceStart, position, limit)
+	walk := func(tx *gorm.DB, part eventsPart) *gorm.DB {
+		tx = tx.Table("network_events INDEXED BY " + part.index)
+		if part.where != "" {
+			tx = tx.Where(part.where, part.args...)
+		}
+		if where != "" {
+			tx = tx.Where(where, args...)
+		}
+		return eventsWalk(tx, sliceStart, position, limit)
+	}
+	parts := eventsParts(filter)
+	if len(parts) == 1 {
+		return walk(db, parts[0])
+	}
+	// Each part starts its own statement on the caller's connection; the
+	// newest of all make the page.
+	session := func() *gorm.DB { return db.Session(&gorm.Session{NewDB: true}) }
+	selects := make([]string, len(parts))
+	walks := make([]any, len(parts))
+	for i, part := range parts {
+		selects[i], walks[i] = "SELECT * FROM (?)", walk(session(), part)
+	}
+	return session().Table("("+strings.Join(selects, " UNION ALL ")+") AS network_events", walks...).Order("timestamp DESC, id DESC").Limit(limit)
 }
 
 func eventsWalk(db *gorm.DB, sliceStart time.Time, position cursor, limit int) *gorm.DB {
@@ -257,54 +333,4 @@ var interfaceRoles = map[string]struct{ match, except []string }{
 	"uplink":       {match: []string{"en*", "eth*", "bond*"}, except: []string{"eni*"}},
 	"tunnel":       {match: []string{"tun*", "tap*"}},
 	"loopback":     {match: []string{"lo"}},
-}
-
-func globClause(patterns []string, join string) string {
-	clauses := make([]string, len(patterns))
-	for i := range patterns {
-		clauses[i] = "interface GLOB ?"
-	}
-	return "(" + strings.Join(clauses, join) + ")"
-}
-
-func globArgs(patterns []string) []interface{} {
-	args := make([]interface{}, len(patterns))
-	for i, pattern := range patterns {
-		args[i] = pattern
-	}
-	return args
-}
-
-var routes = map[string]bool{"exit-node": true, "subnet-router": true, "via-tailnet": true, "any": true}
-
-var endpointKinds = map[string]bool{"pod": true, "node": true, "service": true, "endpoint": true, "none": true}
-
-// validateEventFilters rejects filter values that would silently match
-// nothing, so a typo is not mistaken for "no such traffic".
-func validateEventFilters(query url.Values) error {
-	if value := query.Get("ifaceRole"); value != "" {
-		if _, ok := interfaceRoles[value]; !ok {
-			return fmt.Errorf("unknown ifaceRole %q", value)
-		}
-	}
-	if value := query.Get("ipVersion"); value != "" && value != "4" && value != "6" {
-		return fmt.Errorf("ipVersion must be 4 or 6")
-	}
-	if value := query.Get("withProcess"); value != "" && value != "yes" && value != "no" {
-		return fmt.Errorf("withProcess must be yes or no")
-	}
-	for _, key := range []string{"srcKind", "dstKind"} {
-		if value := query.Get(key); value != "" && !endpointKinds[value] {
-			return fmt.Errorf("%s must be pod, node, service, endpoint or none", key)
-		}
-	}
-	if value := query.Get("route"); value != "" && !routes[value] {
-		return fmt.Errorf("route must be exit-node, subnet-router, via-tailnet or any")
-	}
-	if value := query.Get("port"); value != "" {
-		if port, err := strconv.Atoi(value); err != nil || port < 0 || port > 65535 {
-			return fmt.Errorf("port must be 0..65535")
-		}
-	}
-	return nil
 }

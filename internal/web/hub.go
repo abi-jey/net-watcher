@@ -3,6 +3,7 @@ package web
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"sync"
 	"time"
@@ -24,12 +25,22 @@ type Client struct {
 	hub  *Hub
 	conn *websocket.Conn
 	send chan []byte
+	// filter selects the events this client receives (nil: all), from the
+	// same query parameters as /api/events.
+	filter *expr
+}
+
+// hubMessage is one message for clients; an event goes only to clients
+// whose filter matches it.
+type hubMessage struct {
+	data  []byte
+	event *database.NetworkEvent
 }
 
 // Hub maintains the set of active clients and broadcasts messages
 type Hub struct {
 	clients      map[*Client]bool
-	broadcast    chan []byte
+	broadcast    chan hubMessage
 	register     chan *Client
 	unregister   chan *Client
 	mutex        sync.RWMutex
@@ -44,7 +55,7 @@ type Hub struct {
 func NewHub(logger *log.Logger, db *database.DB) *Hub {
 	hub := &Hub{
 		clients:      make(map[*Client]bool),
-		broadcast:    make(chan []byte, 256),
+		broadcast:    make(chan hubMessage, 1024),
 		register:     make(chan *Client),
 		unregister:   make(chan *Client),
 		logger:       logger,
@@ -89,17 +100,22 @@ func (h *Hub) Run() {
 			h.logger.Info("[WS] Client disconnected", "total_clients", clientCount)
 
 		case message := <-h.broadcast:
-			h.mutex.RLock()
+			// The write lock: a client that cannot keep up is removed while
+			// ClientCount may be reading the map.
+			h.mutex.Lock()
 			for client := range h.clients {
+				if message.event != nil && !client.filter.matches(message.event) {
+					continue
+				}
 				select {
-				case client.send <- message:
+				case client.send <- message.data:
 				default:
 					// Client buffer full, disconnect
 					close(client.send)
 					delete(h.clients, client)
 				}
 			}
-			h.mutex.RUnlock()
+			h.mutex.Unlock()
 		}
 	}
 }
@@ -147,8 +163,9 @@ func (h *Hub) pollLoop() {
 
 // livePollLimit bounds each poll. The live view is a tail, not an audit
 // trail: when more events arrived than fit, the newest are sent and the gap is
-// announced, so the view never falls further behind the capture rate.
-const livePollLimit = 200
+// announced, so the view never falls further behind the capture rate. A
+// busy two-node cluster stores 40-100 events a second.
+const livePollLimit = 1000
 
 // pollNewEvents sends the newest events after lastEventID.
 func (h *Hub) pollNewEvents() {
@@ -166,7 +183,17 @@ func (h *Hub) pollNewEvents() {
 		h.publish(map[string]interface{}{"type": "skipped", "count": oldest - h.lastEventID - 1, "timestamp": time.Now().UnixMilli()})
 	}
 	for i := len(events) - 1; i >= 0; i-- {
-		h.PublishEvent(&events[i])
+		message, err := eventMessage(&events[i])
+		if err != nil {
+			continue
+		}
+		// This goroutine only polls, so it waits for room instead of
+		// dropping events.
+		select {
+		case h.broadcast <- message:
+		case <-h.stopChan:
+			return
+		}
 	}
 	h.lastEventID = newest
 }
@@ -177,38 +204,52 @@ func (h *Hub) publish(message map[string]interface{}) {
 		return
 	}
 	select {
-	case h.broadcast <- data:
+	case h.broadcast <- hubMessage{data: data}:
 	default:
 		h.logger.Warn("[WS] Broadcast channel full, dropping message")
 	}
 }
 
-// PublishEvent sends an event to all connected clients
+// PublishEvent sends an event to the clients whose filter matches it.
 // Implements database.EventPublisher interface
 func (h *Hub) PublishEvent(event interface{}) {
 	if h.ClientCount() == 0 {
 		return
 	}
-
-	data, err := json.Marshal(map[string]interface{}{
-		"type":      "event",
-		"data":      event,
-		"timestamp": time.Now().UnixMilli(),
-	})
+	var stored *database.NetworkEvent
+	switch e := event.(type) {
+	case *database.NetworkEvent:
+		stored = e
+	case database.NetworkEvent:
+		stored = &e
+	default:
+		h.logger.Error("Cannot broadcast event", "type", fmt.Sprintf("%T", event))
+		return
+	}
+	message, err := eventMessage(stored)
 	if err != nil {
 		h.logger.Error("Failed to marshal event for broadcast", "error", err)
 		return
 	}
-
 	select {
-	case h.broadcast <- data:
+	case h.broadcast <- message:
 	default:
 		h.logger.Warn("[WS] Broadcast channel full, dropping event")
 	}
 }
 
+func eventMessage(event *database.NetworkEvent) (hubMessage, error) {
+	data, err := json.Marshal(map[string]interface{}{"type": "event", "data": event, "timestamp": time.Now().UnixMilli()})
+	return hubMessage{data: data, event: event}, err
+}
+
 // ServeWs handles WebSocket requests from clients
 func (h *Hub) ServeWs(w http.ResponseWriter, r *http.Request) {
+	filter, err := eventsRequestFilter(r.URL.Query())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		h.logger.Error("WebSocket upgrade failed", "error", err)
@@ -216,9 +257,10 @@ func (h *Hub) ServeWs(w http.ResponseWriter, r *http.Request) {
 	}
 
 	client := &Client{
-		hub:  h,
-		conn: conn,
-		send: make(chan []byte, 256),
+		hub:    h,
+		conn:   conn,
+		send:   make(chan []byte, 1024),
+		filter: filter,
 	}
 
 	h.register <- client
@@ -276,7 +318,7 @@ func (c *Client) writePump() {
 			}
 			_, _ = w.Write(message)
 
-			// Batch pending messages
+			// Queued messages share the frame, one JSON message per line.
 			n := len(c.send)
 			for i := 0; i < n; i++ {
 				_, _ = w.Write([]byte("\n"))
