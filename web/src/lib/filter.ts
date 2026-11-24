@@ -61,7 +61,7 @@ export const fields: Field[] = [
   ...sided('kind', 'kind', 'enum', 'Kubernetes kind', kinds),
   ...sided('ns', 'namespace', 'string', 'Kubernetes namespace'),
   ...sided('name', 'name', 'string', 'Pod, node or service name'),
-  ...sided('workload', 'workload', 'string', 'Workload (namespace/name)'),
+  ...sided('workload', 'workload', 'string', 'Workload as Kind/name, such as Deployment/coredns'),
   { name: 'process', label: 'process', group: 'Process', kind: 'string', help: 'Command of the process that owns the socket.' },
   { name: 'process.pod', label: 'process pod', group: 'Process', kind: 'string', help: 'Pod of that process (namespace/name); none for host processes.' },
   { name: 'process.container', label: 'process container', group: 'Process', kind: 'string', help: 'Container of that process.' },

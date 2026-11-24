@@ -32,14 +32,14 @@ export function TimelineChart({ points, metric }: { points: TimelinePoint[]; met
   );
 }
 
-export function HostBars({ hosts, metric }: { hosts: HostTotal[]; metric: 'events' | 'traffic' }) {
+export function HostBars({ hosts, metric, link }: { hosts: HostTotal[]; metric: 'events' | 'traffic'; link?: (host: string) => string }) {
   const value = (host: HostTotal) => metric === 'events' ? host.eventCount : host.byteCount;
   const peak = Math.max(1, ...hosts.map(value));
   return (
     <div className="hbar">
       {hosts.map(host => (
         <div key={host.host} style={{ display: 'contents' }}>
-          <span className="name mono" title={host.host}>{host.host}</span>
+          {link ? <a className="name mono" title={`Show events for ${host.host}`} href={link(host.host)}>{host.host}</a> : <span className="name mono" title={host.host}>{host.host}</span>}
           <span className="muted small">{metric === 'events' ? count(host.eventCount) : bytes(host.byteCount)}</span>
           <span className="track"><span style={{ width: `${(value(host) / peak) * 100}%` }} /></span>
         </div>

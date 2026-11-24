@@ -1,5 +1,6 @@
 import { useMemo, useState } from 'react';
-import { ApiError, url, type PodsWarming, type ProcessesResponse, type ProcessSummary } from '../lib/api.ts';
+import { ApiError, url, type PodsResponse, type PodsWarming, type ProcessesResponse } from '../lib/api.ts';
+import { rollupProcesses, splitWorkload, type ProcessRow } from '../lib/rollup.ts';
 import { href, setQuery, useResource } from '../lib/hooks.ts';
 import { windowRange } from '../lib/window.ts';
 import { allOf, format, is } from '../lib/filter.ts';
@@ -12,8 +13,9 @@ function percent(part: number, whole: number): string {
   return `${value >= 10 ? Math.round(value) : value.toFixed(1)}%`;
 }
 
-function eventsLink(process: ProcessSummary, window: string): string {
-  const conditions = [is('process', process.command), is('process.pod', process.pod || 'none'), is('process.container', process.container || 'none')];
+function eventsLink(process: ProcessRow, window: string): string {
+  const pods = process.pods.length ? process.pods : ['none'];
+  const conditions = [is('process', process.command), is('process.pod', ...pods), is('process.container', process.container || 'none')];
   if (process.collector) conditions.push(is('node', process.collector));
   return href(['events'], { w: window, f: format(allOf(conditions)) });
 }
@@ -23,23 +25,26 @@ export function Processes({ query }: { query: URLSearchParams }) {
   const [filter, setFilter] = useState(query.get('f') ?? '');
   const result = useResource<ProcessesResponse>(`processes:${window}`, 60_000, () => url('/api/processes', windowRange(window)));
   const warming = result.error instanceof ApiError && result.error.status === 503 ? (result.error.body as PodsWarming) : undefined;
+  // Pods of the same window name each pod's workload, so restarts share a row.
+  const pods = useResource<PodsResponse>(`pods:${window}`, 60_000, () => url('/api/pods', windowRange(window)));
+  const workloadOf = useMemo(() => new Map((pods.data?.pods ?? []).filter(pod => pod.workload).map(pod => [`${pod.namespace}/${pod.name}`, pod.workload])), [pods.data]);
 
   // Grouped by node: a process identity is only meaningful on its node.
   const groups = useMemo(() => {
     const needle = filter.trim().toLowerCase();
-    const map = new Map<string, ProcessSummary[]>();
-    for (const process of result.data?.processes ?? []) {
-      if (needle && ![process.command, process.container, process.pod, process.collector].some(value => value.toLowerCase().includes(needle))) continue;
+    const map = new Map<string, ProcessRow[]>();
+    for (const process of rollupProcesses(result.data?.processes ?? [], workloadOf)) {
+      if (needle && ![process.command, process.container, process.workload, process.collector, ...process.pods].some(value => value.toLowerCase().includes(needle))) continue;
       map.set(process.collector, [...(map.get(process.collector) ?? []), process]);
     }
     return [...map.entries()].sort(([a], [b]) => a.localeCompare(b));
-  }, [result.data, filter]);
+  }, [result.data, workloadOf, filter]);
   const totals = useMemo(() => {
     const sum = { processes: 0, opened: 0, accepted: 0, openedBytes: 0, acceptedBytes: 0, host: 0 };
     for (const [, items] of groups) for (const process of items) {
       sum.processes++; sum.opened += process.opened; sum.accepted += process.accepted;
       sum.openedBytes += process.openedBytes; sum.acceptedBytes += process.acceptedBytes;
-      if (!process.pod) sum.host++;
+      if (!process.pods.length) sum.host++;
     }
     return sum;
   }, [groups]);
@@ -90,7 +95,7 @@ export function Processes({ query }: { query: URLSearchParams }) {
           Processes running as a non-root user keep their descriptors private. For those, the socket's owner is matched against the pod's processes:
           when all processes of that user in the pod share one container and command, they are named without a PID; otherwise the connection stays unattributed.
         </p>
-        <p className="muted small">The kernel's command name (up to 15 characters) is recorded, never command-line arguments. A process is identified by node, pod, container and command, so restarts with new PIDs stay one row.</p>
+        <p className="muted small">The kernel's command name (up to 15 characters) is recorded, never command-line arguments. A process is identified by node, workload (or pod, when its workload is unknown), container and command, so restarts with new PIDs and new pods of the same workload stay one row.</p>
       </details>
       {result.data?.granularity === 'hour' && <p className="muted small">Totals cover whole hours from {dateTime(result.data.from)} to {dateTime(result.data.to)}.</p>}
       {result.data?.truncated && <Banner tone="warn">Only the 2,000 busiest processes are listed. Narrow the window.</Banner>}
@@ -113,11 +118,14 @@ export function Processes({ query }: { query: URLSearchParams }) {
               {items.map(process => {
                 const link = eventsLink(process, window);
                 return (
-                  <tr key={`${process.pod}|${process.container}|${process.command}`} className="clickable" onClick={() => { location.hash = link; }}>
+                  <tr key={process.key} className="clickable" onClick={() => { location.hash = link; }}>
                     <td><a href={link} className="cell-main mono">{process.command || 'unknown'}</a>{process.container && <div className="cell-sub">container {process.container}</div>}</td>
                     <td>
-                      {process.pod
-                        ? <><Badge tone="info">pod</Badge> <span className="cell-main">{process.pod.slice(process.namespace.length + 1)}</span><div className="cell-sub">namespace {process.namespace}</div></>
+                      {process.pods.length
+                        ? <><Badge tone="info">pod</Badge> <span className="cell-main">{process.workload ? splitWorkload(process.workload).name : process.pods[0].slice(process.namespace.length + 1)}</span>
+                          <div className="cell-sub" title={process.pods.join('\n')}>
+                            {process.namespace}{process.workload ? ` · ${splitWorkload(process.workload).kind}` : ''}{process.pods.length > 1 ? ` · ${process.pods.length} pods` : ''}
+                          </div></>
                         : <><Badge tone="muted">host</Badge> <span className="muted small">node process outside any pod</span></>}
                     </td>
                     <td className="num">{process.opened ? <><div className="cell-main">{count(process.opened)}</div><div className="cell-sub">{bytes(process.openedBytes)}</div></> : <span className="muted">—</span>}</td>
