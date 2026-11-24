@@ -23,8 +23,11 @@ func TestProcessListSummaryMatchesRawEvents(t *testing.T) {
 		Processes []ProcessSummary
 	}
 	var results [2]result
+	// Each fixture reads the clock; the two can fall in different seconds.
+	var nows [2]time.Time
 	for i, summaries := range []bool{true, false} {
 		f := newPodFixtureWith(t, summaries)
+		nows[i] = f.now
 		var events []database.NetworkEvent
 		for n := 0; n < 20; n++ {
 			at := f.now.Add(-time.Duration(n+1) * time.Minute)
@@ -70,7 +73,8 @@ func TestProcessListSummaryMatchesRawEvents(t *testing.T) {
 	for i, got := range summary.Processes {
 		want := raw.Processes[i]
 		if got.Command != want.Command || got.Opened != want.Opened || got.Accepted != want.Accepted || got.OpenedBytes != want.OpenedBytes ||
-			got.AcceptedBytes != want.AcceptedBytes || got.Events != want.Events || got.Namespace != want.Namespace || !got.FirstSeen.Equal(want.FirstSeen) || !got.LastSeen.Equal(want.LastSeen) {
+			got.AcceptedBytes != want.AcceptedBytes || got.Events != want.Events || got.Namespace != want.Namespace ||
+			got.FirstSeen.Sub(nows[0]) != want.FirstSeen.Sub(nows[1]) || got.LastSeen.Sub(nows[0]) != want.LastSeen.Sub(nows[1]) {
 			t.Fatalf("row %d: summary %+v raw %+v", i, got, want)
 		}
 	}
