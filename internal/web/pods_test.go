@@ -216,8 +216,11 @@ func TestPodConnectionsIncludeDNSEvidenceGapsAndBounds(t *testing.T) {
 // counts; without a summary, long windows are refused instead of scanning.
 func TestPodListSummaryMatchesRawEvents(t *testing.T) {
 	var results [2]map[string]PodSummary
+	// Both stores get the same events: byte counts derive from timestamps.
+	now := time.Now().UTC().Truncate(time.Second)
 	for i, summaries := range []bool{true, false} {
 		f := newPodFixtureWith(t, summaries)
+		f.now = now
 		var events []database.NetworkEvent
 		for n := 0; n < 30; n++ {
 			at := f.now.Add(-time.Duration(n) * time.Minute) // Within the last 30 minutes.
