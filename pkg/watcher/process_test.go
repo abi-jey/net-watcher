@@ -395,7 +395,10 @@ func TestHostSocketsAreQueriedFromTheKernel(t *testing.T) {
 			sockets: []string{fmt.Sprint(socketInode(t, listener.(*net.TCPListener)))}},
 	})
 	events := make(chan database.NetworkEvent, 4)
-	a := &processAttributor{root: root, logger: log.Default(),
+	// This tests which lookups run, not how fast: a shared CI runner under the
+	// race detector has taken 47ms for one, past the default deadline and the
+	// host's budget.
+	a := &processAttributor{root: root, logger: log.Default(), budget: time.Second, deadline: time.Second,
 		addresses:  func() map[string]bool { return map[string]bool{"127.0.0.1": true} },
 		containers: func(string) (string, string, string, bool) { return "", "", "", false },
 		onEvent:    func(event database.NetworkEvent) { events <- event }}

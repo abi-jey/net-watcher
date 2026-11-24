@@ -23,11 +23,13 @@ func TestProcessListSummaryMatchesRawEvents(t *testing.T) {
 		Processes []ProcessSummary
 	}
 	var results [2]result
-	// Each fixture reads the clock; the two can fall in different seconds.
-	var nows [2]time.Time
+	// Both stores get the same events: summaries are hourly, coverage starts
+	// at the earliest one, and fixtures reading the clock separately can fall
+	// in different seconds.
+	now := time.Now().UTC().Truncate(time.Second)
 	for i, summaries := range []bool{true, false} {
 		f := newPodFixtureWith(t, summaries)
-		nows[i] = f.now
+		f.now = now
 		var events []database.NetworkEvent
 		for n := 0; n < 20; n++ {
 			at := f.now.Add(-time.Duration(n+1) * time.Minute)
@@ -74,7 +76,7 @@ func TestProcessListSummaryMatchesRawEvents(t *testing.T) {
 		want := raw.Processes[i]
 		if got.Command != want.Command || got.Opened != want.Opened || got.Accepted != want.Accepted || got.OpenedBytes != want.OpenedBytes ||
 			got.AcceptedBytes != want.AcceptedBytes || got.Events != want.Events || got.Namespace != want.Namespace ||
-			got.FirstSeen.Sub(nows[0]) != want.FirstSeen.Sub(nows[1]) || got.LastSeen.Sub(nows[0]) != want.LastSeen.Sub(nows[1]) {
+			!got.FirstSeen.Equal(want.FirstSeen) || !got.LastSeen.Equal(want.LastSeen) {
 			t.Fatalf("row %d: summary %+v raw %+v", i, got, want)
 		}
 	}
