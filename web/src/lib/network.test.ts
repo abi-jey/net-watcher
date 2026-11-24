@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { family, interfaceRole, ipScope } from './network.ts';
+import { deviceName, family, interfaceRole, ipScope, routeInfo } from './network.ts';
 
 test('classifies IPv4 and IPv6 scopes', () => {
   const cases: [string, string][] = [
@@ -27,4 +27,19 @@ test('groups event types into families', () => {
   assert.equal(family('UDP_START'), 'udp');
   assert.equal(family('TLS_SNI'), 'tls');
   assert.equal(family('GAP'), 'gap');
+});
+
+test('interface role ids match the server filter', () => {
+  assert.equal(interfaceRole('lxced27c086af56').id, 'pod');
+  assert.equal(interfaceRole('eni77').id, 'pod'); // Not an uplink, though it starts with "en".
+  assert.equal(interfaceRole('enp0s25').id, 'uplink');
+  assert.equal(interfaceRole('wlp2s0').id, 'wifi');
+  assert.equal(interfaceRole('ts0').id, 'tailscale');
+  assert.equal(interfaceRole('cilium_host').id, 'cluster-host');
+});
+
+test('Tailscale routes and device names', () => {
+  assert.equal(routeInfo('exit-node')?.label, 'exit node');
+  assert.equal(routeInfo(''), undefined);
+  assert.equal(deviceName('pixel-8a.tailfb4030.ts.net'), 'pixel-8a');
 });

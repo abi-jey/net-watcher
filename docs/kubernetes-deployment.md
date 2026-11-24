@@ -339,9 +339,67 @@ for 15 minutes so buffered events are still attributed correctly.
 | `service` | A Service virtual IP; the backend is not determined. |
 | empty | Not a known cluster address. Events from before this change have empty columns (shown as `legacy` in the API when only JSON context exists). |
 
+A collector's own interface addresses are attributed to its node (`node`) even
+when Kubernetes does not list them: node objects carry internal IPs, not
+temporary public IPv6 or Wi-Fi addresses. The collector re-reads its addresses
+every 30 seconds, so a node's own connections over its public address show as
+`node` rather than as internet-to-internet traffic.
+
 If the watch is unavailable (missing RBAC, API errors), collector health reports
 `pod watch disconnected` and attribution falls back to the list interval, where
 reuse within those 30 seconds is reported as `ambiguous` rather than guessed.
+
+### Tailscale exit nodes and subnet routers
+
+A Tailscale interface carries only tunnel traffic, decrypted. When a remote
+tailnet device (100.64.0.0/10 or fd7a:115c:a1e0::/48, not one of the node's own
+addresses) exchanges packets there with an address that is neither a tailnet
+device nor the node, the node is forwarding for that device. Events record the
+classification in `route`:
+
+| `route` | Meaning |
+| --- | --- |
+| `exit-node` | The node is the device's exit node: the other end is a public address. |
+| `subnet-router` | The node routes the device into a private network it advertises. |
+| `via-tailnet` | The node's own traffic leaves through the tailnet, toward another device's exit node or subnet route. |
+
+`tailnet_peer` is the device's tailnet address and `tailnet_peer_name` its
+MagicDNS name at capture time. Names are looked up in the background through
+Tailscale's resolver on the node (`100.100.100.100`, reverse lookup; IPv6
+addresses fall back to matching the forward records of devices already named)
+and cached for an hour, ten minutes after a failure. Packets never wait for a
+lookup, so a device's first events may carry only its address. Failed lookups
+are logged at most every ten minutes.
+
+The forwarded copy on the uplink (after the node's NAT) is a separate event
+with the node's address as source; linking the two requires conntrack and is
+not done. DNS queries the device sends to a public resolver appear as ordinary
+`DNS` events with `route=exit-node`; queries answered by MagicDNS on the device
+itself never reach the node.
+
+### Filtering events
+
+`GET /api/events` accepts, besides `from`, `to`, `limit`, `cursor`, `eventType`,
+`srcIP`, `dstIP` (substring) and `q` (substring over addresses, names, DNS, SNI,
+processes and tailnet peers):
+
+| Parameter | Matches |
+| --- | --- |
+| `collector` | Node that captured the packet. |
+| `iface` | Exact interface name. |
+| `ifaceRole` | `pod`, `uplink`, `wifi`, `tailscale`, `overlay`, `cluster-host`, `bridge`, `wireguard`, `tunnel`, `loopback` (by interface name pattern). |
+| `ipVersion` | `4` or `6`. |
+| `withProcess` | `yes` or `no`: whether a process was identified. |
+| `srcKind`, `dstKind` | `pod`, `node`, `service`, `endpoint`, or `none` for addresses outside the cluster. |
+| `namespace` | Kubernetes namespace of either end. |
+| `port` | Source or destination port. |
+| `route` | `exit-node`, `subnet-router`, `via-tailnet`, or `any`. |
+| `process`, `processPod`, `processContainer` | One exact process identity (with `collector`). |
+
+Invalid values are rejected with 400. A process or a single route walks a
+partial index of only those events, so rare matches return quickly over long
+windows. In the UI, every tag in an event row (interface type, IP version, node,
+process, namespace, kind, route) applies its filter when selected.
 
 ### Inspecting a pod
 

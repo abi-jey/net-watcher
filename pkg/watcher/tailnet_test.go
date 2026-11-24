@@ -3,6 +3,7 @@ package watcher
 import (
 	"context"
 	"errors"
+	"net/netip"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -75,4 +76,36 @@ func TestTailnetNamesAreLookedUpInTheBackground(t *testing.T) {
 	if calls.Load() != 2 {
 		t.Fatalf("lookups: %d, want 2", calls.Load())
 	}
+}
+
+// Some Tailscale versions answer reverse lookups only for IPv4; an IPv6
+// address is then named by resolving known devices forward.
+func TestTailnetIPv6NamedThroughKnownDevices(t *testing.T) {
+	names := newTailnetNames()
+	names.lookup = func(_ context.Context, ip string) (string, error) {
+		if ip == "100.67.31.108" {
+			return "pixel-8a.tailnet.ts.net", nil
+		}
+		return "", errors.New("NXDOMAIN")
+	}
+	names.addresses = func(_ context.Context, name string) ([]netip.Addr, error) {
+		if name == "pixel-8a.tailnet.ts.net" {
+			return []netip.Addr{netip.MustParseAddr("fd7a:115c:a1e0::401:1f73")}, nil
+		}
+		return nil, errors.New("NXDOMAIN")
+	}
+	wait := func(ip, want string) {
+		t.Helper()
+		deadline := time.Now().Add(2 * time.Second)
+		for names.cached(ip) != want {
+			if time.Now().After(deadline) {
+				t.Fatalf("%s: cached %q, want %q", ip, names.cached(ip), want)
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+	names.name("100.67.31.108")
+	wait("100.67.31.108", "pixel-8a.tailnet.ts.net")
+	names.name("fd7a:115c:a1e0::401:1f73")
+	wait("fd7a:115c:a1e0::401:1f73", "pixel-8a.tailnet.ts.net")
 }

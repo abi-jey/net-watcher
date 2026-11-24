@@ -295,3 +295,15 @@ details.explain ul { padding-left: 20px; }
 /* Active process filter on the events page */
 .filter-chip { display: inline-flex; align-items: center; gap: 8px; padding: 6px 10px; border-radius: 8px; background: var(--info-bg); color: var(--info); font-size: 13px; margin-bottom: 12px; }
 .filter-chip button { padding: 0 6px; min-height: 0; line-height: 18px; }
+.active-filters { display: flex; flex-wrap: wrap; gap: 6px 8px; align-items: center; margin-bottom: 12px; }
+.active-filters .filter-chip { margin-bottom: 0; padding: 4px 6px 4px 10px; }
+.more-filters { flex-basis: 100%; display: flex; flex-wrap: wrap; gap: 10px 12px; align-items: flex-end; padding-top: 12px; border-top: 1px solid var(--border-light); }
+.more-filters select { max-width: 200px; }
+/* Row tags that narrow the search when selected. */
+button.filterable { font: inherit; min-height: 0; cursor: pointer; text-align: left; }
+button.tag.filterable { font-size: 10px; font-weight: 700; padding: 0 5px; background: transparent; border: 1px solid currentColor; line-height: 16px; }
+button.ctx.filterable { font-size: 11px; padding: 0 6px; border: 1px solid transparent; line-height: 18px; }
+button.ns.filterable { font-size: 11px; padding: 0 5px; background: transparent; line-height: 16px; }
+button.filterable:hover:not(:disabled) { border-color: var(--accent-work); }
+button.filterable:focus-visible { outline: 2px solid var(--accent-work); outline-offset: 1px; }
+.ctx.route { color: var(--info); background: var(--info-bg); }

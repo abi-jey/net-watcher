@@ -2,6 +2,7 @@ package watcher
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"net/netip"
 	"strings"
@@ -118,6 +119,9 @@ type tailnetNames struct {
 	names    map[string]tailnetName
 	inFlight chan struct{}
 	lookup   func(ctx context.Context, ip string) (string, error)
+	// addresses resolves a device name forward, for IPv6 addresses whose
+	// reverse lookup fails (some Tailscale versions answer only IPv4).
+	addresses func(ctx context.Context, name string) ([]netip.Addr, error)
 	// failed reports a failed lookup at most every tailnetMissTTL.
 	failed     func(ip string, err error)
 	lastFailed time.Time
@@ -141,13 +145,18 @@ func newTailnetNames() *tailnetNames {
 		var dialer net.Dialer
 		return dialer.DialContext(ctx, "udp", tailnetResolver)
 	}}
-	return &tailnetNames{names: map[string]tailnetName{}, inFlight: make(chan struct{}, 4), lookup: func(ctx context.Context, ip string) (string, error) {
-		names, err := resolver.LookupAddr(ctx, ip)
-		if err != nil || len(names) == 0 {
-			return "", err
-		}
-		return strings.TrimSuffix(names[0], "."), nil
-	}}
+	return &tailnetNames{names: map[string]tailnetName{}, inFlight: make(chan struct{}, 4),
+		lookup: func(ctx context.Context, ip string) (string, error) {
+			names, err := resolver.LookupAddr(ctx, ip)
+			if err != nil || len(names) == 0 {
+				return "", err
+			}
+			return strings.TrimSuffix(names[0], "."), nil
+		},
+		addresses: func(ctx context.Context, name string) ([]netip.Addr, error) {
+			return resolver.LookupNetIP(ctx, "ip6", name+".")
+		},
+	}
 }
 
 // name returns the cached name of a tailnet address, starting a lookup when
@@ -176,6 +185,9 @@ func (t *tailnetNames) name(ip string) string {
 		ctx, cancel := context.WithTimeout(context.Background(), tailnetLookupFor)
 		defer cancel()
 		name, err := t.lookup(ctx, ip)
+		if (err != nil || name == "") && strings.Contains(ip, ":") {
+			name, err = t.matchKnown(ctx, ip)
+		}
 		ttl := tailnetNameTTL
 		if err != nil || name == "" {
 			name, ttl = entry.name, tailnetMissTTL // Keep a known name through resolver hiccups.
@@ -196,4 +208,33 @@ func (t *tailnetNames) cached(ip string) string {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return t.names[ip].name
+}
+
+// matchKnown names an IPv6 tailnet address by resolving the devices already
+// named (usually through their IPv4 address) forward.
+func (t *tailnetNames) matchKnown(ctx context.Context, ip string) (string, error) {
+	want, err := netip.ParseAddr(ip)
+	if err != nil || t.addresses == nil {
+		return "", err
+	}
+	t.mu.Lock()
+	known := map[string]bool{}
+	for _, entry := range t.names {
+		if entry.name != "" && len(known) < 64 {
+			known[entry.name] = true
+		}
+	}
+	t.mu.Unlock()
+	for name := range known {
+		addresses, err := t.addresses(ctx, name)
+		if err != nil {
+			continue
+		}
+		for _, address := range addresses {
+			if address == want {
+				return name, nil
+			}
+		}
+	}
+	return "", fmt.Errorf("no reverse record, and no known tailnet device has address %s", ip)
 }

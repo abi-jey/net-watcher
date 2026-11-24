@@ -15,6 +15,8 @@ export interface NetworkEvent {
   ProcessPID: number; ProcessCommand: string; EventCount: number; CollectorID: string;
   /** 'src' or 'dst': whose socket the process owns. Empty when not attributed. */
   ProcessSide: string; ProcessPod: string; ProcessContainer: string;
+  /** Tailscale route: 'exit-node', 'subnet-router' or 'via-tailnet'; empty otherwise. */
+  Route: string; TailnetPeer: string; TailnetPeerName: string;
 }
 
 export interface EventsResponse {
