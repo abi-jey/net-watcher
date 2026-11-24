@@ -119,6 +119,7 @@ type processAttributor struct {
 	onEvent    func(database.NetworkEvent)
 	logger     *log.Logger
 	budget     time.Duration // CPU time per second; DefaultProcessBudget when zero.
+	deadline   time.Duration // Per lookup; processLookupDeadline when zero.
 
 	jobsMu  sync.RWMutex
 	closed  bool
@@ -212,6 +213,9 @@ func (a *processAttributor) start() error {
 		budget = DefaultProcessBudget
 	}
 	a.podWork, a.hostWork = newWorkBudget(budget*2/3, time.Now()), newWorkBudget(budget/3, time.Now())
+	if a.deadline <= 0 {
+		a.deadline = processLookupDeadline
+	}
 	a.refresh(time.Now())
 	if a.snapshot.hostNetns == "" || len(a.snapshot.host) == 0 {
 		return fmt.Errorf("cannot read process namespaces under %s; process attribution needs CAP_SYS_PTRACE", a.root)
@@ -491,7 +495,7 @@ func (a *processAttributor) attribute(event *database.NetworkEvent, queuedAt, no
 		}
 		a.attempted.Add(1)
 		started := time.Now()
-		identity, ok := a.lookup(*event, c, started.Add(processLookupDeadline))
+		identity, ok := a.lookup(*event, c, started.Add(a.deadline))
 		spent := time.Since(started)
 		budget.spend(spent)
 		a.work.Add(int64(spent))
