@@ -57,9 +57,10 @@ func New(dbPath string) (*DB, error) {
 			}
 		}
 	}
-	// Superseded by idx_*_workload_time, which also serves the time range and
-	// order of workload queries instead of reading the workload's full history.
-	for _, index := range []string{"idx_network_events_src_workload", "idx_network_events_dst_workload"} {
+	// Superseded by idx_*_workload_time and idx_*_namespace_time, which also
+	// serve the time range and order of workload and namespace queries
+	// instead of reading their full history.
+	for _, index := range []string{"idx_network_events_src_workload", "idx_network_events_dst_workload", "idx_network_events_src_namespace", "idx_network_events_dst_namespace"} {
 		if err := db.Exec("DROP INDEX IF EXISTS " + index).Error; err != nil {
 			_ = sqlDB.Close()
 			return nil, err

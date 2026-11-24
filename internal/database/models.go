@@ -29,7 +29,7 @@ const (
 // NetworkEvent represents a captured network event
 type NetworkEvent struct {
 	ID        uint      `gorm:"primaryKey"`
-	Timestamp time.Time `gorm:"index;not null;index:idx_src_uid_time,priority:2;index:idx_dst_uid_time,priority:2;index:idx_src_workload_time,priority:3;index:idx_dst_workload_time,priority:3"`
+	Timestamp time.Time `gorm:"index;not null;index:idx_src_uid_time,priority:2;index:idx_dst_uid_time,priority:2;index:idx_src_workload_time,priority:3;index:idx_dst_workload_time,priority:3;index:idx_src_namespace_time,priority:2;index:idx_dst_namespace_time,priority:2"`
 	EventType EventType `gorm:"index;not null"`
 	Interface string    `gorm:"index"`
 	IPVersion uint8     `gorm:"index"` // 4 or 6
@@ -84,13 +84,13 @@ type NetworkEvent struct {
 	// address was not a known cluster address. Events captured before these
 	// columns existed have them empty and only the JSON context.
 	SrcKind        string
-	SrcNamespace   string `gorm:"index;index:idx_src_workload_time,priority:1"`
+	SrcNamespace   string `gorm:"index:idx_src_namespace_time,priority:1;index:idx_src_workload_time,priority:1"`
 	SrcName        string
 	SrcUID         string `gorm:"index:idx_src_uid_time,priority:1"`
 	SrcWorkload    string `gorm:"index:idx_src_workload_time,priority:2"`
 	SrcAttribution string
 	DstKind        string
-	DstNamespace   string `gorm:"index;index:idx_dst_workload_time,priority:1"`
+	DstNamespace   string `gorm:"index:idx_dst_namespace_time,priority:1;index:idx_dst_workload_time,priority:1"`
 	DstName        string
 	DstUID         string `gorm:"index:idx_dst_uid_time,priority:1"`
 	DstWorkload    string `gorm:"index:idx_dst_workload_time,priority:2"`
