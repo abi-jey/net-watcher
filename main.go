@@ -191,6 +191,12 @@ func main() {
 
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
+		// Times stored in a local zone by earlier versions are rewritten once.
+		go func() {
+			if err := db.NormalizeStoredTimes(ctx); err != nil && ctx.Err() == nil {
+				log.Error("Could not convert stored times to UTC", "error", err)
+			}
+		}()
 		if *ingestURL == "" {
 			if err := db.EnableSummaries(ctx); err != nil {
 				log.Error("Could not initialize hourly summaries", "error", err)

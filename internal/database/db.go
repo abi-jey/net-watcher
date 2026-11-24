@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/charmbracelet/log"
-	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
 )
@@ -19,7 +18,7 @@ type DB struct {
 
 // New creates a new database connection
 func New(dbPath string) (*DB, error) {
-	db, err := gorm.Open(sqlite.Open(dbPath), &gorm.Config{
+	db, err := gorm.Open(dialector(dbPath), &gorm.Config{
 		Logger: logger.Default.LogMode(logger.Silent),
 	})
 	if err != nil {
@@ -41,7 +40,7 @@ func New(dbPath string) (*DB, error) {
 	// Pod summaries written before byte totals existed must be rebuilt, or
 	// their hours would report zero traffic.
 	rebuildPods := db.Migrator().HasTable(&HourlyPod{}) && !db.Migrator().HasColumn(&HourlyPod{}, "ByteCount")
-	if err := db.AutoMigrate(&NetworkEvent{}, &DNSResolution{}, &IngestedEvent{}, &IngestedResolution{}, &IngestCursor{}, &HourlyEvent{}, &HourlyHost{}, &AggregateState{}, &HourlyPod{}, &HourlyProcess{}, &CollectorStatus{}); err != nil {
+	if err := db.AutoMigrate(storedModels()...); err != nil {
 		_ = sqlDB.Close()
 		return nil, err
 	}
@@ -87,7 +86,7 @@ func New(dbPath string) (*DB, error) {
 // OpenReadOnly uses a separate SQLite WAL reader pool so long-running queries
 // cannot queue behind the single ingest writer connection.
 func OpenReadOnly(dbPath string) (*DB, error) {
-	db, err := gorm.Open(sqlite.Open("file:"+dbPath+"?mode=ro&_busy_timeout=5000"), &gorm.Config{
+	db, err := gorm.Open(dialector("file:"+dbPath+"?mode=ro&_busy_timeout=5000"), &gorm.Config{
 		Logger: logger.Default.LogMode(logger.Silent),
 	})
 	if err != nil {
