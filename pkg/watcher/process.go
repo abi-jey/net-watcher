@@ -676,7 +676,7 @@ func (a *processAttributor) holdsSocket(pid int, target string, deadline time.Ti
 	if err != nil {
 		return false, false
 	}
-	defer fds.Close()
+	defer func() { _ = fds.Close() }()
 	// Links that cannot be read (as opposed to descriptors closed meanwhile)
 	// make the process as unreadable as a private directory.
 	links, denied := 0, 0
@@ -704,7 +704,7 @@ func (a *processAttributor) holdsSocket(pid int, target string, deadline time.Ti
 			break
 		}
 	}
-	return false, !(links > 0 && denied == links)
+	return false, links == 0 || denied != links
 }
 
 var (
@@ -899,7 +899,7 @@ func (a *processAttributor) socketTable(c candidate, procDir, name string, deadl
 	if err != nil {
 		return nil, false
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 	data := make([]byte, 0, 64<<10)
 	for {
 		if time.Now().After(deadline) {
