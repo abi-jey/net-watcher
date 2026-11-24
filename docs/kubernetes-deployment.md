@@ -14,13 +14,14 @@ is supplied because the UI does not include authentication.
 
 ## Deploy
 
-Build and push an image first. The manifest uses
-`ghcr.io/abi-jey/net-watcher:map-k8s`; change that tag to an immutable image
-digest before applying it in a durable environment.
+The manifests track `ghcr.io/abi-jey/net-watcher:latest`, which every `v*`
+release pushes after its vulnerability scan, and pull it on each pod start
+(`imagePullPolicy: Always`); a rollout restart picks up the newest release.
+To run your own build, push it and point the manifests at it:
 
 ```bash
-docker build -t ghcr.io/abi-jey/net-watcher:map-k8s .
-docker push ghcr.io/abi-jey/net-watcher:map-k8s
+docker build --pull -t ghcr.io/<you>/net-watcher:latest .
+docker push ghcr.io/<you>/net-watcher:latest
 kubectl apply -f deploy/kubernetes/net-watcher.yaml
 kubectl -n net-watcher rollout status daemonset/net-watcher
 ```

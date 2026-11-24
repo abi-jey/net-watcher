@@ -127,7 +127,7 @@ spec:
           type: RuntimeDefault
       initContainers:
         - name: prepare-data-directory
-          image: busybox:1.37
+          image: busybox:latest
           command: ["sh", "-ec", "mkdir -p /var/lib/net-watcher && chown -R 65532:65532 /var/lib/net-watcher"]
           securityContext:
             allowPrivilegeEscalation: false
@@ -143,7 +143,7 @@ spec:
               mountPath: /var/lib/net-watcher
       containers:
         - name: ingest
-          image: ghcr.io/abi-jey/net-watcher:map-k8s
+          image: ghcr.io/abi-jey/net-watcher:latest
           args:
             - start
             - --capture=false
@@ -224,7 +224,7 @@ spec:
           type: RuntimeDefault
       initContainers:
         - name: prepare-data-directory
-          image: busybox:1.37.0
+          image: busybox:latest
           # The desktop ingester is mounted below this hostPath. Never chown it.
           command:
             - sh
@@ -247,7 +247,7 @@ spec:
               mountPath: /var/lib/net-watcher
       containers:
         - name: collector
-          image: ghcr.io/abi-jey/net-watcher:map-k8s
+          image: ghcr.io/abi-jey/net-watcher:latest
           args:
             - start
             - --kubernetes

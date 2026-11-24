@@ -82,7 +82,7 @@ spec:
           type: RuntimeDefault
       initContainers:
         - name: prepare-data-directory
-          image: busybox:1.37.0
+          image: busybox:latest
           command: ["sh", "-ec", "mkdir -p /var/lib/net-watcher && chown 65532:65532 /var/lib/net-watcher"]
           securityContext:
             allowPrivilegeEscalation: false
@@ -97,7 +97,7 @@ spec:
               mountPath: /var/lib/net-watcher
       containers:
         - name: net-watcher
-          image: ghcr.io/abi-jey/net-watcher:map-k8s
+          image: ghcr.io/abi-jey/net-watcher:latest
           imagePullPolicy: Always
           args:
             - start

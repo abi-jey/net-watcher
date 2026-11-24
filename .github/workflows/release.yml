@@ -69,6 +69,9 @@ jobs:
         echo "$GH_TOKEN" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
         docker tag net-watcher:ci "$IMAGE:${GITHUB_REF_NAME}"
         docker push "$IMAGE:${GITHUB_REF_NAME}"
+        # The manifests track latest; only scanned release images get it.
+        docker tag net-watcher:ci "$IMAGE:latest"
+        docker push "$IMAGE:latest"
 
   release:
     name: Create GitHub Release
