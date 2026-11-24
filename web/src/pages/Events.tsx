@@ -109,8 +109,10 @@ export function Events({ query }: { query: URLSearchParams }) {
     setPage(undefined);
     void load(undefined, fixed);
     return () => controller.current?.abort();
+    // An older link is rewritten to the same filter text: search once the
+    // URL no longer carries the older parameters.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [key]);
+  }, [key, search.legacy]);
 
   const liveTail = useLiveTail(live && !search.legacy, search.text, expanded !== undefined, setEvents);
 
