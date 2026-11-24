@@ -138,3 +138,33 @@ func TestContainerIDsNameContainersIncludingHostNetworkPods(t *testing.T) {
 		t.Error("empty container ID must not match")
 	}
 }
+
+// A collector's own interface addresses that Kubernetes does not list, such
+// as a temporary public IPv6 address, belong to its node.
+func TestLocalAddressesBelongToTheCollectorsNode(t *testing.T) {
+	var objects []Object
+	body := `[
+	 {"kind":"Node","metadata":{"name":"node-a","uid":"node1"},"status":{"addresses":[{"address":"192.0.2.10","type":"InternalIP"}]}},
+	 {"kind":"Node","metadata":{"name":"node-b","uid":"node2"},"status":{"addresses":[{"address":"192.0.2.11","type":"InternalIP"}]}}]`
+	if err := json.Unmarshal([]byte(body), &objects); err != nil {
+		t.Fatal(err)
+	}
+	index := New(nil)
+	index.Replace(objects, time.Now())
+	if got := index.Attribute("2001:db8::7", 54670, "TCP", time.Now()); got.Kind != "" {
+		t.Fatalf("unknown public address attributed before tracking: %+v", got)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	index.TrackLocalAddresses(ctx, "node-a", func() []string { return []string{"2001:db8::7", "192.0.2.11"} }, time.Hour)
+	if got := index.Attribute("2001:db8::7", 54670, "TCP", time.Now()); got.Kind != "node" || got.Name != "node-a" || got.Confidence != ConfidenceNode {
+		t.Fatalf("own address: %+v", got)
+	}
+	// An address Kubernetes lists for another node keeps that node.
+	if got := index.Attribute("192.0.2.11", 22, "TCP", time.Now()); got.Name != "node-b" {
+		t.Fatalf("listed address: %+v", got)
+	}
+	if got := index.Attribute("2001:db8::8", 443, "TCP", time.Now()); got.Kind != "" {
+		t.Fatalf("other public address: %+v", got)
+	}
+}

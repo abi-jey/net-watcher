@@ -48,6 +48,9 @@ type SessionManager struct {
 	mutex    sync.RWMutex
 	logger   *log.Logger
 	db       *database.DB
+	// This host's addresses and tailnet device names, for Tailscale routes.
+	hostAddrs *hostAddresses
+	tailnet   *tailnetNames
 	// Configuration
 	cleanupInterval time.Duration
 	sessionTimeout  time.Duration
@@ -156,6 +159,8 @@ func NewSessionManager(logger *log.Logger, db *database.DB, onlyFilter, excludeF
 	}
 
 	sm := &SessionManager{
+		hostAddrs:        newHostAddresses(localAddresses),
+		tailnet:          newTailnetNames(),
 		sessions:         make(map[string]*Session),
 		logger:           logger,
 		db:               db,
@@ -395,6 +400,14 @@ func (sm *SessionManager) queueEvent(event database.NetworkEvent) {
 		event.SourceContext, event.DestinationContext = src.Context, dst.Context
 		event.SrcKind, event.SrcNamespace, event.SrcName, event.SrcUID, event.SrcWorkload, event.SrcAttribution = src.Kind, src.Namespace, src.Name, src.UID, src.Workload, src.Confidence
 		event.DstKind, event.DstNamespace, event.DstName, event.DstUID, event.DstWorkload, event.DstAttribution = dst.Kind, dst.Namespace, dst.Name, dst.UID, dst.Workload, dst.Confidence
+	}
+	if event.EventType != database.EventGap {
+		if route, peer := tailnetRoute(event.Interface, event.SrcIP, event.DstIP, sm.hostAddrs.has); route != "" {
+			event.Route, event.TailnetPeer = route, peer
+			if peer != "" {
+				event.TailnetPeerName = sm.tailnet.name(peer)
+			}
+		}
 	}
 	if event.EventType == database.EventTCPStart || event.EventType == database.EventUDPStart || event.EventType == database.EventTLSSNI {
 		matches := sm.dns.lookup(event.SrcIP, event.DstIP, event.Timestamp)

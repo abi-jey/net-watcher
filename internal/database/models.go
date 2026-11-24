@@ -105,6 +105,15 @@ type NetworkEvent struct {
 	ProcessPod       string
 	ProcessContainer string // Container name from the pod's status.
 
+	// Route marks traffic on a Tailscale interface that is not between two
+	// tailnet devices: "exit-node" (this node forwarded a tailnet device's
+	// traffic to the internet), "subnet-router" (to a private network), or
+	// "via-tailnet" (this node's own traffic sent into the tailnet, toward
+	// another device's exit node or subnet route). Empty otherwise.
+	Route           string
+	TailnetPeer     string // Address of the tailnet device this node forwarded for.
+	TailnetPeerName string // Its MagicDNS name at capture time, when resolvable.
+
 	// Compaction metadata
 	Compacted   bool   // Whether this is a compacted record
 	OriginalIDs string // Comma-separated original event IDs (for audit)

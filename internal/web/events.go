@@ -41,8 +41,10 @@ type EventsResponse struct {
 
 // handleEvents pages through events in a bounded time window (default 24 h,
 // at most 7 days) with keyset pagination. Filters: eventType (comma list),
-// srcIP, dstIP and q (substring of addresses, names, Kubernetes identity or
-// process), from, to, limit and cursor.
+// srcIP, dstIP and q (substrings of addresses, names, Kubernetes identity or
+// process); collector, iface, ifaceRole, ipVersion, withProcess, srcKind,
+// dstKind, namespace, port and route (exact; route "any" for every Tailscale
+// route); an exact process identity; from, to, limit and cursor.
 func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	query := r.URL.Query()
 	from, to, err := timeWindow(r, eventsDefaultWindow)
@@ -57,6 +59,10 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, fmt.Sprintf("limit must be 1..%d", eventsMaxLimit), http.StatusBadRequest)
 			return
 		}
+	}
+	if err := validateEventFilters(query); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
 	}
 	position := cursor{at: to}
 	if after, err := parseCursor(query.Get("cursor")); err != nil {
@@ -139,9 +145,49 @@ func eventsFilter(query url.Values, db *gorm.DB) *gorm.DB {
 	if value := query.Get("collector"); value != "" {
 		db = db.Where("collector_id = ?", value)
 	}
+	if value := query.Get("iface"); value != "" {
+		db = db.Where("interface = ?", value)
+	}
+	if role, ok := interfaceRoles[query.Get("ifaceRole")]; ok {
+		db = db.Where(globClause(role.match, " OR "), globArgs(role.match)...)
+		if len(role.except) > 0 {
+			db = db.Where("NOT "+globClause(role.except, " OR "), globArgs(role.except)...)
+		}
+	}
+	if value := query.Get("ipVersion"); value != "" {
+		db = db.Where("ip_version = ?", value)
+	}
+	switch query.Get("withProcess") {
+	case "yes":
+		db = db.Where("process_side > ''")
+	case "no":
+		db = db.Where("COALESCE(process_side, '') = ''")
+	}
+	for _, side := range []string{"src", "dst"} {
+		switch value := query.Get(side + "Kind"); value {
+		case "":
+		case "none":
+			db = db.Where("COALESCE(" + side + "_kind, '') = ''")
+		default:
+			db = db.Where(side+"_kind = ?", value)
+		}
+	}
+	if value := query.Get("namespace"); value != "" {
+		db = db.Where("(src_namespace = ? OR dst_namespace = ?)", value, value)
+	}
+	if value := query.Get("port"); value != "" {
+		db = db.Where("(src_port = ? OR dst_port = ?)", value, value)
+	}
+	switch value := query.Get("route"); value {
+	case "":
+	case "any":
+		db = db.Where("route > ''")
+	default:
+		db = db.Where("route = ? AND route > ''", value) // The second term lets SQLite use the partial index.
+	}
 	if value := query.Get("q"); value != "" {
 		like := "%" + value + "%"
-		columns := []string{"src_ip", "dst_ip", "hostname", "dns_query", "tls_sni", "src_name", "dst_name", "src_namespace", "dst_namespace", "src_workload", "dst_workload", "process_command", "process_pod", "process_container"}
+		columns := []string{"src_ip", "dst_ip", "hostname", "dns_query", "tls_sni", "src_name", "dst_name", "src_namespace", "dst_namespace", "src_workload", "dst_workload", "process_command", "process_pod", "process_container", "tailnet_peer", "tailnet_peer_name"}
 		clauses := make([]string, len(columns))
 		args := make([]interface{}, len(columns))
 		for i, column := range columns {
@@ -153,11 +199,14 @@ func eventsFilter(query url.Values, db *gorm.DB) *gorm.DB {
 }
 
 // eventsIndex is the index a page walks, newest first. A process drill-down
-// walks the partial index of attributed events, which holds only that
-// identity's rows in time order; other filters walk all events by time.
+// or one Tailscale route walks a partial index holding only those rows in
+// time order; other filters walk all events by time.
 func eventsIndex(query url.Values) string {
 	if query.Get("process") != "" {
 		return "idx_process_time"
+	}
+	if route := query.Get("route"); route != "" && route != "any" {
+		return "idx_route_time"
 	}
 	return "idx_network_events_timestamp"
 }
@@ -169,4 +218,69 @@ func eventsSlice(db *gorm.DB, query url.Values, sliceStart time.Time, position c
 		// as a multi-index union and sorts the whole slice before LIMIT.
 		Where("timestamp >= ? AND (timestamp, id) < (?, ?)", sliceStart, position.at, position.id).
 		Order("timestamp DESC, id DESC").Limit(limit)
+}
+
+// interfaceRoles groups interface names by what they connect, as the UI
+// labels them (web/src/lib/network.ts): GLOB patterns, minus exceptions.
+var interfaceRoles = map[string]struct{ match, except []string }{
+	"pod":          {match: []string{"lxc*", "veth*", "cali*", "azv*", "eni*"}},
+	"overlay":      {match: []string{"cilium_vxlan*", "cilium_geneve*", "flannel.*", "vxlan*", "genev*"}},
+	"cluster-host": {match: []string{"cilium_host*", "cilium_net*"}},
+	"tailscale":    {match: []string{"tailscale*", "ts[0-9]*"}},
+	"wireguard":    {match: []string{"wg*"}},
+	"bridge":       {match: []string{"docker*", "br-*", "cni*", "virbr*", "kube-bridge*"}},
+	"wifi":         {match: []string{"wl*"}},
+	"uplink":       {match: []string{"en*", "eth*", "bond*"}, except: []string{"eni*"}},
+	"tunnel":       {match: []string{"tun*", "tap*"}},
+	"loopback":     {match: []string{"lo"}},
+}
+
+func globClause(patterns []string, join string) string {
+	clauses := make([]string, len(patterns))
+	for i := range patterns {
+		clauses[i] = "interface GLOB ?"
+	}
+	return "(" + strings.Join(clauses, join) + ")"
+}
+
+func globArgs(patterns []string) []interface{} {
+	args := make([]interface{}, len(patterns))
+	for i, pattern := range patterns {
+		args[i] = pattern
+	}
+	return args
+}
+
+var routes = map[string]bool{"exit-node": true, "subnet-router": true, "via-tailnet": true, "any": true}
+
+var endpointKinds = map[string]bool{"pod": true, "node": true, "service": true, "endpoint": true, "none": true}
+
+// validateEventFilters rejects filter values that would silently match
+// nothing, so a typo is not mistaken for "no such traffic".
+func validateEventFilters(query url.Values) error {
+	if value := query.Get("ifaceRole"); value != "" {
+		if _, ok := interfaceRoles[value]; !ok {
+			return fmt.Errorf("unknown ifaceRole %q", value)
+		}
+	}
+	if value := query.Get("ipVersion"); value != "" && value != "4" && value != "6" {
+		return fmt.Errorf("ipVersion must be 4 or 6")
+	}
+	if value := query.Get("withProcess"); value != "" && value != "yes" && value != "no" {
+		return fmt.Errorf("withProcess must be yes or no")
+	}
+	for _, key := range []string{"srcKind", "dstKind"} {
+		if value := query.Get(key); value != "" && !endpointKinds[value] {
+			return fmt.Errorf("%s must be pod, node, service, endpoint or none", key)
+		}
+	}
+	if value := query.Get("route"); value != "" && !routes[value] {
+		return fmt.Errorf("route must be exit-node, subnet-router, via-tailnet or any")
+	}
+	if value := query.Get("port"); value != "" {
+		if port, err := strconv.Atoi(value); err != nil || port < 0 || port > 65535 {
+			return fmt.Errorf("port must be 0..65535")
+		}
+	}
+	return nil
 }
