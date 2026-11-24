@@ -186,6 +186,9 @@ func NewSessionManager(logger *log.Logger, db *database.DB, onlyFilter, excludeF
 	}
 	go sm.cleanupLoop()
 	go sm.flushLoop()
+	sm.tailnet.failed = func(ip string, err error) {
+		logger.Warn("Tailnet device name lookup failed; events keep its address only", "address", ip, "resolver", tailnetResolver, "error", err)
+	}
 	return sm
 }
 

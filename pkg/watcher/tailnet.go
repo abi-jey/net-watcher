@@ -118,6 +118,9 @@ type tailnetNames struct {
 	names    map[string]tailnetName
 	inFlight chan struct{}
 	lookup   func(ctx context.Context, ip string) (string, error)
+	// failed reports a failed lookup at most every tailnetMissTTL.
+	failed     func(ip string, err error)
+	lastFailed time.Time
 }
 
 type tailnetName struct {
@@ -178,6 +181,10 @@ func (t *tailnetNames) name(ip string) string {
 			name, ttl = entry.name, tailnetMissTTL // Keep a known name through resolver hiccups.
 		}
 		t.mu.Lock()
+		if (err != nil || name == "") && t.failed != nil && time.Since(t.lastFailed) > tailnetMissTTL {
+			t.lastFailed = time.Now()
+			go t.failed(ip, err)
+		}
 		t.names[ip] = tailnetName{name: name, until: time.Now().Add(ttl)}
 		t.mu.Unlock()
 	}()
