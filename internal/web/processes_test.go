@@ -2,10 +2,12 @@ package web
 
 import (
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/abja/net-watcher/internal/database"
+	"gorm.io/gorm"
 )
 
 func processFlow(at time.Time, eventType database.EventType, collector, side, pod, container, command string, bytes int64) database.NetworkEvent {
@@ -88,5 +90,34 @@ func TestProcessListSummaryMatchesRawEvents(t *testing.T) {
 	summary.Coverage.Since, raw.Coverage.Since = nil, nil
 	if summary.Coverage != raw.Coverage || summary.Coverage.FlowStarts != 65 || summary.Coverage.AttributedFlows != 45 {
 		t.Fatalf("coverage summary %+v raw %+v", summary.Coverage, raw.Coverage)
+	}
+}
+
+// The events page query a process drill-down runs walks the partial index of
+// attributed events in order, without sorting; other searches walk time.
+func TestEventsPageQueryPlans(t *testing.T) {
+	f := newPodFixtureWith(t, false)
+	plan := func(query url.Values) string {
+		sql := f.server.db.ToSQL(func(tx *gorm.DB) *gorm.DB {
+			var rows []database.NetworkEvent
+			return eventsSlice(tx, query, f.now.Add(-time.Hour), cursor{at: f.now}, 50).Find(&rows)
+		})
+		var steps []struct{ Detail string }
+		if err := f.server.db.Raw("EXPLAIN QUERY PLAN " + sql).Scan(&steps).Error; err != nil {
+			t.Fatal(err)
+		}
+		var details []string
+		for _, step := range steps {
+			details = append(details, step.Detail)
+		}
+		return strings.Join(details, "; ")
+	}
+	drill := plan(url.Values{"process": {"python3"}, "processPod": {"demo/api-1"}, "processContainer": {"api"}, "collector": {"node-a"}})
+	if !strings.Contains(drill, "idx_process_time") || strings.Contains(drill, "TEMP B-TREE") {
+		t.Fatalf("process drill-down plan: %s", drill)
+	}
+	search := plan(url.Values{"q": {"api"}})
+	if !strings.Contains(search, "idx_network_events_timestamp") || strings.Contains(search, "TEMP B-TREE") {
+		t.Fatalf("search plan: %s", search)
 	}
 }
