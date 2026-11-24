@@ -197,6 +197,15 @@ func (t *tailnetNames) name(ip string) string {
 			t.lastFailed = time.Now()
 			go t.failed(ip, err)
 		}
+		if name != "" && name != entry.name {
+			// A newly named device may own IPv6 addresses that failed before
+			// any device was known: let them retry on their next packet.
+			for other, cached := range t.names {
+				if cached.name == "" && strings.Contains(other, ":") {
+					t.names[other] = tailnetName{}
+				}
+			}
+		}
 		t.names[ip] = tailnetName{name: name, until: time.Now().Add(ttl)}
 		t.mu.Unlock()
 	}()
@@ -208,6 +217,14 @@ func (t *tailnetNames) cached(ip string) string {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return t.names[ip].name
+}
+
+// settled reports whether a lookup finished and its result is cached for
+// longer than a running lookup's mark.
+func (t *tailnetNames) settled(ip string) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return time.Until(t.names[ip].until) > tailnetLookupFor+time.Second
 }
 
 // matchKnown names an IPv6 tailnet address by resolving the devices already

@@ -104,8 +104,18 @@ func TestTailnetIPv6NamedThroughKnownDevices(t *testing.T) {
 			time.Sleep(5 * time.Millisecond)
 		}
 	}
+	// The IPv6 address is seen first, before any device is named: it fails.
+	names.name("fd7a:115c:a1e0::401:1f73")
+	deadline := time.Now().Add(2 * time.Second)
+	for !names.settled("fd7a:115c:a1e0::401:1f73") {
+		if time.Now().After(deadline) {
+			t.Fatal("IPv6 lookup did not finish")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 	names.name("100.67.31.108")
 	wait("100.67.31.108", "pixel-8a.tailnet.ts.net")
+	// Naming the device lets the failed IPv6 address retry at once.
 	names.name("fd7a:115c:a1e0::401:1f73")
 	wait("fd7a:115c:a1e0::401:1f73", "pixel-8a.tailnet.ts.net")
 }
