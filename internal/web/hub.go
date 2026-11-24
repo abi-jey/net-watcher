@@ -66,16 +66,22 @@ func NewHub(logger *log.Logger, db *database.DB) *Hub {
 	// Register as the global event publisher
 	database.SetEventPublisher(hub)
 
-	// Initialize lastEventID from the database
 	if db != nil {
-		var maxID uint
-		if err := db.Raw("SELECT COALESCE(MAX(id), 0) FROM network_events").Scan(&maxID).Error; err == nil {
-			hub.lastEventID = maxID
-			hub.logger.Debug("[WS] Initialized lastEventID", "id", maxID)
-		}
+		hub.tailFromNow()
 	}
-
 	return hub
+}
+
+// tailFromNow starts the live tail after the newest stored event: events
+// stored while nobody watched are history, for searching, not a backlog to
+// replay or report as skipped.
+func (h *Hub) tailFromNow() {
+	var maxID uint
+	if err := h.db.Raw("SELECT COALESCE(MAX(id), 0) FROM network_events").Scan(&maxID).Error; err != nil {
+		h.logger.Error("[WS] Failed to read the newest event", "error", err)
+		return
+	}
+	h.lastEventID = maxID
 }
 
 // Run starts the hub's main loop
@@ -147,6 +153,7 @@ func (h *Hub) pollLoop() {
 	ticker := time.NewTicker(h.pollInterval)
 	defer ticker.Stop()
 
+	idle := false
 	for {
 		select {
 		case <-h.stopChan:
@@ -154,7 +161,12 @@ func (h *Hub) pollLoop() {
 			return
 		case <-ticker.C:
 			if h.ClientCount() == 0 {
-				continue // No clients, skip polling
+				idle = true
+				continue
+			}
+			if idle {
+				idle = false
+				h.tailFromNow()
 			}
 			h.pollNewEvents()
 		}

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -85,5 +86,71 @@ func TestLiveTailSendsEachClientItsMatches(t *testing.T) {
 		if got := fmt.Sprint(read(test.conn, strings.Count(test.want, " ")+1)); got != test.want {
 			t.Errorf("%s: got %s, want %s", name, got, test.want)
 		}
+	}
+}
+
+// A live tail starts at the newest event: events stored while nobody watched
+// are neither replayed nor reported as skipped.
+func TestLiveTailStartsAfterIdleWithoutSkips(t *testing.T) {
+	db, err := database.New(filepath.Join(t.TempDir(), "live.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	insert := func(n int) {
+		events := make([]database.NetworkEvent, n)
+		for i := range events {
+			events[i] = database.NetworkEvent{Timestamp: time.Now().UTC(), EventType: "DNS", DstPort: 53}
+		}
+		if err := db.InsertBatch(events); err != nil {
+			t.Fatal(err)
+		}
+	}
+	insert(5)
+	hub := NewHub(log.Default(), db)
+	hub.pollInterval = 20 * time.Millisecond
+	go hub.Run()
+	hub.StartPolling()
+	defer hub.StopPolling()
+
+	// Far more than one poll's limit arrives while nobody watches.
+	insert(livePollLimit + 200)
+	time.Sleep(100 * time.Millisecond)
+
+	server := httptest.NewServer(http.HandlerFunc(hub.ServeWs))
+	defer server.Close()
+	conn, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }()
+	for deadline := time.Now().Add(5 * time.Second); hub.ClientCount() < 1; time.Sleep(5 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("client did not register")
+		}
+	}
+	time.Sleep(100 * time.Millisecond)
+	insert(3)
+
+	var types []string
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	for count := 0; count < 3; {
+		_, frame, err := conn.ReadMessage()
+		if err != nil {
+			t.Fatalf("after %v: %v", types, err)
+		}
+		for _, line := range strings.Split(string(frame), "\n") {
+			var message struct{ Type string }
+			if err := json.Unmarshal([]byte(line), &message); err != nil {
+				t.Fatalf("line %q: %v", line, err)
+			}
+			types = append(types, message.Type)
+			if message.Type == "event" {
+				count++
+			}
+		}
+	}
+	if fmt.Sprint(types) != "[event event event]" {
+		t.Fatalf("got %v, want only the three new events", types)
 	}
 }
