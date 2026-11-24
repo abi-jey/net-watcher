@@ -52,5 +52,7 @@
   { "input": "bytes > lots", "error": "is not a number with a unit", "serverOnly": true },
   { "input": "port > (1, 2)", "error": "needs one number", "serverOnly": true },
   { "input": "port ~ 44", "error": "cannot use ~", "serverOnly": true },
-  { "input": "ns = \"\"", "error": "use none", "serverOnly": true }
+  { "input": "ns = \"\"", "error": "use none", "serverOnly": true },
+  { "input": "rcode = nxdomainx", "error": "is not one of badvers, formerr, noerror, none", "serverOnly": true },
+  { "input": "rcode = (NXDOMAIN, \"Server Failure\")", "canonical": "rcode = (NXDOMAIN, \"Server Failure\")" }
 ]

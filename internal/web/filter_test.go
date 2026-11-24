@@ -77,7 +77,7 @@ func filterEvents(t *testing.T, db *gorm.DB, now time.Time, n int, seed uint64) 
 			SrcNamespace: pick("default", "kube-system", "Monitoring", ""), DstNamespace: pick("default", "kube-system", ""),
 			SrcName: pick("api-1", "coredns-x", "abja", ""), DstName: pick("db-0", "desktop", ""), SrcWorkload: pick("default/api", ""), DstWorkload: pick("kube-system/coredns", ""),
 			Route: pick("exit-node", "subnet-router", "via-tailnet", ""), TailnetPeer: pick("100.101.1.2", ""), TailnetPeerName: pick("phone.tail.ts.net.", ""),
-			Hostname: pick(names...), DNSQuery: pick(names...), TLSSNI: pick(names...), DNSResponseCode: pick("NOERROR", "NXDOMAIN", ""),
+			Hostname: pick(names...), DNSQuery: pick(names...), TLSSNI: pick(names...), DNSResponseCode: pick("No Error", "Non-Existent Domain", "Server Failure ", ""),
 			ByteCount: number(0, 100, 1500, 2<<20), Duration: number(0, 250, 5000, 120_000),
 		}
 		// Process fields are set together, as the collector sets them.
@@ -241,24 +241,26 @@ func difference(a, b []uint) []uint {
 func TestFilterMeanings(t *testing.T) {
 	podToNode := database.NetworkEvent{EventType: "TCP_START", SrcKind: "pod", SrcNamespace: "default", SrcIP: "10.0.1.5", DstKind: "node", DstIP: "100.64.1.1", DstPort: 443, Interface: "lxc1"}
 	external := database.NetworkEvent{EventType: "TLS_SNI", SrcKind: "node", SrcIP: "192.168.1.5", DstIP: "142.250.1.1", DstPort: 443, TLSSNI: "api.Example.com.", ByteCount: 3000, Interface: "enp0s25"}
-	dns := database.NetworkEvent{EventType: "DNS", SrcKind: "pod", SrcNamespace: "kube-system", SrcName: "coredns-1", DstIP: "1.1.1.1", DstPort: 53, DNSQuery: "notexample.com", DNSResponseCode: "NXDOMAIN"}
+	dns := database.NetworkEvent{EventType: "DNS", SrcKind: "pod", SrcNamespace: "kube-system", SrcName: "coredns-1", DstIP: "1.1.1.1", DstPort: 53, DNSQuery: "notexample.com", DNSResponseCode: "Non-Existent Domain"}
 	events := map[string]*database.NetworkEvent{"podToNode": &podToNode, "external": &external, "dns": &dns}
 	for _, test := range []struct {
 		filter string
 		want   string
 	}{
-		{"kind != pod", "external"},                          // Neither end a pod.
-		{"src.kind != pod", "external"},                      // The source is not a pod.
-		{"kind = node", "external podToNode"},                // Either end a node.
-		{"dst.kind = none", "dns external"},                  // The destination is outside the cluster.
-		{"ip = 100.64.0.0/10", "podToNode"},                  // Either address in the tailnet range.
-		{"domain = example.com", "external"},                 // The name or a subdomain, in any case.
-		{"domain ~ example", "dns external"},                 // Contains.
-		{"bytes > 2k", "external"},                           // Units in powers of 1024.
-		{"port = 50-500", "dns external podToNode"},          // A range.
-		{"port = 53 or iface.type = uplink", "dns external"}, // Mixed conditions.
-		{"-coredns", "external podToNode"},                   // A negated word.
-		{"rcode = NXDOMAIN and not ns = default", "dns"},     // Negated comparison.
+		{"kind != pod", "external"},                           // Neither end a pod.
+		{"src.kind != pod", "external"},                       // The source is not a pod.
+		{"kind = node", "external podToNode"},                 // Either end a node.
+		{"dst.kind = none", "dns external"},                   // The destination is outside the cluster.
+		{"ip = 100.64.0.0/10", "podToNode"},                   // Either address in the tailnet range.
+		{"domain = example.com", "external"},                  // The name or a subdomain, in any case.
+		{"domain ~ example", "dns external"},                  // Contains.
+		{"bytes > 2k", "external"},                            // Units in powers of 1024.
+		{"port = 50-500", "dns external podToNode"},           // A range.
+		{"port = 53 or iface.type = uplink", "dns external"},  // Mixed conditions.
+		{"-coredns", "external podToNode"},                    // A negated word.
+		{"rcode = NXDOMAIN and not ns = default", "dns"},      // Negated comparison.
+		{`rcode = "non-existent domain"`, "dns"},              // As stored.
+		{"rcode != (noerror, servfail) and port = 53", "dns"}, // Standard names.
 		{"(kind = pod or port = 443) and -ns=kube-system", "external podToNode"},
 		{"ns = none", "dns external podToNode"}, // At least one end outside a namespace.
 		{"src.ns = none", "external"},

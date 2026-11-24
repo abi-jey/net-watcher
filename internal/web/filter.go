@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/abja/net-watcher/internal/database"
+	"github.com/google/gopacket/layers"
 )
 
 // Event filter expressions select events by any mix of conditions:
@@ -95,6 +96,7 @@ type filterField struct {
 	// they are the two ends of a connection.
 	entity bool
 	values map[string]string // enumField: accepted input (lower case) -> stored
+	shown  []string          // enumField: the values errors suggest, when not all of values
 	unit   func(string) (int64, error)
 }
 
@@ -103,6 +105,31 @@ var endpointKinds = map[string]string{"pod": "pod", "node": "node", "service": "
 var routeValues = map[string]string{"exit-node": "exit-node", "subnet-router": "subnet-router", "via-tailnet": "via-tailnet", "none": ""}
 
 var sideValues = map[string]string{"src": "src", "dst": "dst", "none": ""}
+
+// rcodeNames are the standard names of DNS response codes. The collector
+// stores gopacket's descriptions instead ("Non-Existent Domain", and "Server
+// Failure " with a trailing space), so filters accept either and compare the
+// stored text.
+var rcodeNames = map[string]layers.DNSResponseCode{
+	"noerror": layers.DNSResponseCodeNoErr, "formerr": layers.DNSResponseCodeFormErr, "servfail": layers.DNSResponseCodeServFail,
+	"nxdomain": layers.DNSResponseCodeNXDomain, "notimp": layers.DNSResponseCodeNotImp, "refused": layers.DNSResponseCodeRefused,
+	"yxdomain": layers.DNSResponseCodeYXDomain, "yxrrset": layers.DNSResponseCodeYXRRSet, "nxrrset": layers.DNSResponseCodeNXRRSet,
+	"notauth": layers.DNSResponseCodeNotAuth, "notzone": layers.DNSResponseCodeNotZone, "badvers": layers.DNSResponseCodeBadVers,
+	"none": 0,
+}
+
+var rcodeValues = func() map[string]string {
+	values := map[string]string{}
+	for name, code := range rcodeNames {
+		if name == "none" {
+			values[name] = ""
+			continue
+		}
+		values[name] = code.String()
+		values[strings.ToLower(strings.TrimSpace(code.String()))] = code.String()
+	}
+	return values
+}()
 
 var eventTypeValues = func() map[string]string {
 	values := map[string]string{}
@@ -134,7 +161,7 @@ var filterFields, filterAliases = func() (map[string]*filterField, map[string]st
 		"route":             {kind: enumField, columns: []string{"route"}, values: routeValues},
 		"peer":              {kind: stringField, columns: []string{"tailnet_peer", "tailnet_peer_name"}, entity: true},
 		"domain":            {kind: domainField, columns: []string{"hostname", "dns_query", "tls_sni"}, entity: true},
-		"rcode":             {kind: stringField, columns: []string{"dns_response_code"}},
+		"rcode":             {kind: enumField, columns: []string{"dns_response_code"}, values: rcodeValues, shown: sortedKeys(rcodeNames)},
 		"bytes":             {kind: numberField, columns: []string{"byte_count"}, unit: byteCount},
 		"duration":          {kind: numberField, columns: []string{"duration"}, unit: milliseconds},
 	}
@@ -492,9 +519,13 @@ func (f *filterField) normalize(text string, contains bool) (value, error) {
 	none := strings.EqualFold(text, "none")
 	switch f.kind {
 	case enumField:
-		stored, ok := f.values[strings.ToLower(text)]
+		stored, ok := f.values[strings.ToLower(strings.TrimSpace(text))]
 		if !ok {
-			return value{}, fmt.Errorf("%q is not one of %s", text, strings.Join(enumNames(f.values), ", "))
+			names := f.shown
+			if names == nil {
+				names = enumNames(f.values)
+			}
+			return value{}, fmt.Errorf("%q is not one of %s", text, strings.Join(names, ", "))
 		}
 		return value{text: stored}, nil
 	case roleField:
