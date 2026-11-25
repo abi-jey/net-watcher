@@ -15,6 +15,11 @@ export interface NetworkEvent {
   ProcessPID: number; ProcessCommand: string; EventCount: number; CollectorID: string;
   /** 'src' or 'dst': whose socket the process owns. Empty when not attributed. */
   ProcessSide: string; ProcessPod: string; ProcessContainer: string;
+  /**
+   * The process at the other end, when both ends were on the collector's
+   * node (a kubelet health check, two pods on one node). Absent otherwise.
+   */
+  PeerProcessPID?: number; PeerProcessCommand?: string; PeerProcessPod?: string; PeerProcessContainer?: string;
   /** Tailscale route: 'exit-node', 'subnet-router' or 'via-tailnet'; empty otherwise. */
   Route: string; TailnetPeer: string; TailnetPeerName: string;
 }
