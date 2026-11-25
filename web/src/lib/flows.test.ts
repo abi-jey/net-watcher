@@ -108,6 +108,7 @@ test('one opener reaching one destination again and again is one repeat row', ()
   const repeat = (rows[1] as Extract<Row, { kind: 'repeat' }>).repeat;
   assert.equal(repeat.flows.length, 4);
   assert.equal(repeat.every, 10_000);
+  assert.equal(repeat.bursts, 4);
   assert.equal(repeat.sent, 1200);
   assert.equal(repeat.received, 2000);
   assert.ok(repeat.flows.every(flow => !flow.open));
@@ -129,4 +130,16 @@ test('records from before flow IDs still pair by their ends', () => {
   assert.equal(flow.records.length, 2);
   assert.equal(flow.merged.ByteCount, 4096);
   assert.equal(flow.sent, 0);
+});
+
+test('lookups at once are a burst, and bursts set the pace', () => {
+  // Each scrape looks a name up for every search domain within milliseconds.
+  const burst = (start: number) => [0, 0.002, 0.004].map((offset, i) => record({ EventType: 'DNS', DNSType: 'RESPONSE', DNSID: start * 10 + i, DNSQuery: 'api.test',
+    DNSQuestionType: 'A', Protocol: 'UDP', Timestamp: at(start + offset), SrcIP: '10.0.0.20', SrcPort: 53, DstIP: '10.0.1.84', DstPort: 50000 + start * 10 + i }));
+  const rows = groupRecords([0, 15, 30, 45].flatMap(burst));
+  assert.equal(rows.length, 1);
+  const repeat = (rows[0] as Extract<Row, { kind: 'repeat' }>).repeat;
+  assert.equal(repeat.flows.length, 12);
+  assert.equal(repeat.bursts, 4);
+  assert.equal(repeat.every, 15_000);
 });

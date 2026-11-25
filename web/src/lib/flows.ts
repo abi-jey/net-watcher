@@ -36,7 +36,12 @@ export interface Repeat {
   last: string;
   sent: number;
   received: number;
-  /** Median time between the flows' starts, in milliseconds; 0 with fewer than three. */
+  /**
+   * Bursts of flows: starts less than burstGap apart, such as a name looked
+   * up for each search domain, or both address families, at once.
+   */
+  bursts: number;
+  /** Median time between the bursts' starts, in milliseconds; 0 with fewer than three bursts. */
   every: number;
 }
 
@@ -47,6 +52,7 @@ export type Row =
 
 /** How far apart two nodes' records of one flow may be and still join. */
 const sameFlowSlack = 2 * 60_000;
+const burstGap = 1000;
 
 const flowTypes = new Set(['TCP_START', 'TCP_UPDATE', 'TCP_END', 'UDP_START', 'UDP_UPDATE', 'UDP_END', 'TLS_SNI']);
 
@@ -242,7 +248,8 @@ export function groupRecords(events: NetworkEvent[]): Row[] {
       continue;
     }
     const starts = flows.map(flow => time(flow.first)).sort((a, b) => a - b);
-    const gaps = starts.slice(1).map((start, i) => start - starts[i]);
+    const bursts = starts.filter((start, i) => i === 0 || start - starts[i - 1] >= burstGap);
+    const gaps = bursts.slice(1).map((start, i) => start - bursts[i]);
     rows.push({
       kind: 'repeat', key: `repeat|${key}`, last: flows[0].last,
       repeat: {
@@ -250,7 +257,8 @@ export function groupRecords(events: NetworkEvent[]): Row[] {
         first: flows.map(flow => flow.first).sort()[0], last: flows[0].last,
         sent: flows.reduce((sum, flow) => sum + flow.sent, 0),
         received: flows.reduce((sum, flow) => sum + flow.received, 0),
-        every: flows.length >= 3 ? median(gaps) : 0,
+        bursts: bursts.length,
+        every: bursts.length >= 3 ? median(gaps) : 0,
       },
     });
   }

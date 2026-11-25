@@ -419,7 +419,7 @@ export function RepeatRow({ repeat, expanded, onToggle, onFilter, fresh, openFlo
   const n = repeat.flows.length;
   const nodes = [...new Set(repeat.flows.flatMap(flow => flow.nodes))].sort();
   const open = repeat.flows.filter(flow => flow.open).length;
-  const facts = [`${n} ${lookup ? 'lookups' : 'flows'}`, repeat.every ? `every ~${duration(repeat.every)}` : '',
+  const facts = [`${n} ${lookup ? 'lookups' : 'flows'}${repeat.bursts < n ? ` in ${repeat.bursts} burst${repeat.bursts === 1 ? '' : 's'}` : ''}`, repeat.every ? `every ~${duration(repeat.every)}` : '',
     directions({ SrcBytes: repeat.sent, DstBytes: repeat.received }), open ? `${open} open` : ''].filter(Boolean);
   return (
     <li className={`ev ev-repeat ${kind} ${expanded ? 'open' : ''} ${fresh ? 'fresh' : ''}`}>
