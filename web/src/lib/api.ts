@@ -6,7 +6,7 @@ export interface AggregationStatus { enabled: boolean; ready: boolean; cursor: n
 export interface NetworkEvent {
   ID: number; Timestamp: string; EventType: string; Interface: string; IPVersion: number;
   SrcIP: string; SrcPort: number; DstIP: string; DstPort: number;
-  DNSType: string; DNSQuery: string; DNSAnswers: string; DNSCNAMEs: string; DNSResponseCode: string;
+  DNSType: string; DNSQuery: string; DNSAnswers: string; DNSCNAMEs: string; DNSResponseCode: string; DNSID: number; DNSQuestionType: string;
   DNSResolutionIDs: string; DNSEvidenceMissing: number;
   TLSSNI: string; Hostname: string; Duration: number; ByteCount: number; Reason: string; EndTime: string;
   ICMPDesc: string; Protocol: string;
@@ -22,6 +22,15 @@ export interface NetworkEvent {
   PeerProcessPID?: number; PeerProcessCommand?: string; PeerProcessPod?: string; PeerProcessContainer?: string;
   /** Pod probes a TCP connection from the pod's node matches: "container:kind[,kind]", several joined by "; ". */
   Probe?: string;
+  /** Links one collector's records of one flow (open, updates, close, TLS name). */
+  FlowID?: string;
+  /**
+   * The flow's totals so far by the address that sent them: Src* by the
+   * source (the end that opened it), Dst* by the destination. On a DNS
+   * lookup, the query and the response. ByteCount on a flow's update or end
+   * is what it carried since its previous record.
+   */
+  SrcBytes?: number; DstBytes?: number; SrcPackets?: number; DstPackets?: number;
   /** Tailscale route: 'exit-node', 'subnet-router' or 'via-tailnet'; empty otherwise. */
   Route: string; TailnetPeer: string; TailnetPeerName: string;
 }

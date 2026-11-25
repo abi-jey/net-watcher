@@ -27,8 +27,8 @@ const (
 	maxEvents     = 250
 	maxBatchBytes = 5 << 20
 	// Keep INSERTs within SQLite's 999-bind-variable compatibility limit:
-	// events have about 60 columns, resolutions 20, and ingest keys 4.
-	eventInsertSize      = 15
+	// events have 70 columns (a test checks it), resolutions 20, and ingest keys 4.
+	eventInsertSize      = 14
 	resolutionInsertSize = 40
 	keyInsertSize        = 200
 )
@@ -166,7 +166,7 @@ func (r *Receiver) handleBatch(w http.ResponseWriter, request *http.Request) {
 		http.Error(w, "could not store ingest batch", http.StatusInternalServerError)
 		return
 	}
-	w.Header().Set(acceptsHeader, acceptsAddresses+", "+acceptsPeerProcesses+", "+acceptsProbes)
+	w.Header().Set(acceptsHeader, acceptsAddresses+", "+acceptsPeerProcesses+", "+acceptsProbes+", "+acceptsFlows)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -390,6 +390,8 @@ type Forwarder struct {
 	// ingester accepts.
 	acceptsPeers, acceptsProbes, accepted bool
 	warnedPeers, warnedProbes             bool
+	// acceptsFlows: the ingester stores flow IDs and totals.
+	acceptsFlows, warnedFlows bool
 }
 
 // heartbeatInterval keeps the central view of an idle collector fresh.
@@ -497,6 +499,13 @@ func (f *Forwarder) send(ctx context.Context) (bool, error) {
 			f.Logger.Warn("Ingester does not store probe matches; forwarding events without them", "url", f.URL)
 		}
 	}
+	if !f.acceptsFlows {
+		withoutFlows(events)
+		if !f.warnedFlows {
+			f.warnedFlows = true
+			f.Logger.Warn("Ingester does not store flow IDs and totals; forwarding events without them", "url", f.URL)
+		}
+	}
 	var body []byte
 	var missing int64
 	for {
@@ -544,6 +553,16 @@ func withoutPeers(events []database.NetworkEvent) {
 	}
 }
 
+// withoutFlows clears the flow ID and totals, which an ingester that predates
+// them rejects as unknown. Its records stay consistent: a flow's updates and
+// end each carry the bytes since its previous record, whatever stores them.
+func withoutFlows(events []database.NetworkEvent) {
+	for i := range events {
+		events[i].FlowID = ""
+		events[i].SrcBytes, events[i].DstBytes, events[i].SrcPackets, events[i].DstPackets = 0, 0, 0, 0
+	}
+}
+
 // skip permanently passes over one event the ingester cannot accept, replacing
 // it with a GAP event so the omission is itself forwarded and auditable.
 func (f *Forwarder) skip(event database.NetworkEvent, reason string) (bool, error) {
@@ -588,6 +607,7 @@ func (f *Forwarder) postBody(ctx context.Context, body []byte) (bool, error) {
 		accepts := response.Header.Get(acceptsHeader)
 		f.acceptsAddresses = strings.Contains(accepts, acceptsAddresses)
 		f.acceptsPeers, f.acceptsProbes, f.accepted = strings.Contains(accepts, acceptsPeerProcesses), strings.Contains(accepts, acceptsProbes), true
+		f.acceptsFlows = strings.Contains(accepts, acceptsFlows)
 		return false, nil
 	}
 	err = fmt.Errorf("ingest endpoint returned HTTP %d", response.StatusCode)

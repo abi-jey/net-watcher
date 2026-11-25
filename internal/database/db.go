@@ -132,8 +132,8 @@ func (db *DB) InsertEvent(event *NetworkEvent) error {
 }
 
 // eventInsertBatch keeps multi-row INSERTs under SQLite's 999 bind-variable
-// compatibility limit (network_events has about 60 columns).
-const eventInsertBatch = 15
+// compatibility limit (network_events has 70 columns; a test checks it).
+const eventInsertBatch = 14
 
 // InsertBatch inserts multiple events in batches
 func (db *DB) InsertBatch(events []NetworkEvent) error {

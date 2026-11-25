@@ -1,7 +1,9 @@
 package watcher
 
 import (
+	"crypto/rand"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -36,6 +38,17 @@ type Session struct {
 	LastSeen  time.Time
 	ByteCount int64
 	Hostname  string // Cached hostname for this connection
+	// FlowID links the flow's records; the totals count what each end sent.
+	FlowID                                     string
+	SrcBytes, DstBytes, SrcPackets, DstPackets int64
+	Service                                    string // UDP service name, such as DNS or VXLAN.
+	// reported is the part of ByteCount earlier records accounted for, as of
+	// lastRecord.
+	reported   int64
+	lastRecord time.Time
+	// tunnel: a kernel tunnel's flow between two hosts, whatever source
+	// ports the kernel picks; its ends are told apart by address.
+	tunnel bool
 	// DNS specific
 	DNSQueries []string
 	// TLS specific
@@ -54,8 +67,17 @@ type SessionManager struct {
 	// Configuration
 	cleanupInterval time.Duration
 	sessionTimeout  time.Duration
-	stopChan        chan struct{}
-	cleanupDone     chan struct{}
+	// updateInterval: an open flow that carried traffic since its last
+	// record gets a progress record this often.
+	updateInterval time.Duration
+	// tunnels are this host's kernel tunnel ports (see tunnelPorts).
+	tunnels atomic.Pointer[map[uint16]string]
+	// dnsHeld are DNS queries waiting for their response, which records the
+	// lookup; by lookup key (dnsLookupKey).
+	dnsHoldMu   sync.Mutex
+	dnsHeld     map[string]heldQuery
+	stopChan    chan struct{}
+	cleanupDone chan struct{}
 	// Filters - which protocols/events to log
 	filters      map[string]bool
 	exclusions   map[string]bool
@@ -171,6 +193,8 @@ func NewSessionManager(logger *log.Logger, db *database.DB, onlyFilter, excludeF
 		db:               db,
 		cleanupInterval:  30 * time.Second,
 		sessionTimeout:   2 * time.Minute,
+		updateInterval:   flowUpdateInterval,
+		dnsHeld:          map[string]heldQuery{},
 		stopChan:         make(chan struct{}),
 		cleanupDone:      make(chan struct{}),
 		filters:          filters,
@@ -189,6 +213,7 @@ func NewSessionManager(logger *log.Logger, db *database.DB, onlyFilter, excludeF
 			logger.Warn("Could not restore DNS evidence cache", "error", err)
 		}
 	}
+	sm.refreshTunnels()
 	go sm.cleanupLoop()
 	go sm.flushLoop()
 	sm.tailnet.failed = func(ip string, err error) {
@@ -200,12 +225,16 @@ func NewSessionManager(logger *log.Logger, db *database.DB, onlyFilter, excludeF
 // flushLoop writes full batches off the packet path.
 func (sm *SessionManager) flushLoop() {
 	defer close(sm.flushDone)
+	sweep := time.NewTicker(dnsSweepInterval)
+	defer sweep.Stop()
 	for {
 		select {
 		case <-sm.stopChan:
 			return
 		case <-sm.flushSignal:
 			sm.flushEvents()
+		case now := <-sweep.C:
+			sm.releaseQueries(now.Add(-dnsAnswerWait))
 		}
 	}
 }
@@ -365,6 +394,7 @@ func (sm *SessionManager) Stop() {
 	if lookup := sm.currentProcessLookup(); lookup != nil {
 		lookup.stop()
 	}
+	sm.releaseQueries(time.Now()) // Unanswered: recorded as queries.
 	// Flush any remaining buffered events
 	sm.flushEvents()
 }
@@ -443,8 +473,16 @@ func (sm *SessionManager) queueEvent(event database.NetworkEvent) {
 	sm.appendEvent(event)
 }
 
-// appendEvent buffers an event and signals a flush when the batch is full.
+// appendEvent buffers an event and signals a flush when the batch is full;
+// a DNS query waits for its response instead (holdQuery).
 func (sm *SessionManager) appendEvent(event database.NetworkEvent) {
+	if sm.holdQuery(&event) {
+		return
+	}
+	sm.bufferEvent(event)
+}
+
+func (sm *SessionManager) bufferEvent(event database.NetworkEvent) {
 	sm.eventBufferMux.Lock()
 	sm.eventBuffer = append(sm.eventBuffer, event)
 	shouldFlush := len(sm.eventBuffer) >= sm.batchSize
@@ -547,18 +585,22 @@ func (sm *SessionManager) TrackTCP(iface, src, dst string, isSyn, isFin, isRst b
 		dstIP := extractIPFromAddr(dst)
 		hostname, dnsAge := sm.lookupDNSCache(extractIPFromAddr(src), dstIP)
 
-		sm.sessions[key] = &Session{
-			ID:        key,
-			Protocol:  ProtoTCP,
-			Src:       src,
-			Dst:       dst,
-			Iface:     iface,
-			IPVersion: ipVersion,
-			Hostname:  hostname,
-			StartTime: time.Now(),
-			LastSeen:  time.Now(),
-			ByteCount: int64(length),
+		now := time.Now()
+		session = &Session{
+			ID:         key,
+			Protocol:   ProtoTCP,
+			Src:        src,
+			Dst:        dst,
+			Iface:      iface,
+			IPVersion:  ipVersion,
+			Hostname:   hostname,
+			StartTime:  now,
+			LastSeen:   now,
+			FlowID:     newFlowID(),
+			lastRecord: now,
 		}
+		session.count(true, length)
+		sm.sessions[key] = session
 
 		srcIP, srcPortNum := parseAddr(src)
 		dstIPParsed, dstPortNum := parseAddr(dst)
@@ -583,6 +625,7 @@ func (sm *SessionManager) TrackTCP(iface, src, dst string, isSyn, isFin, isRst b
 				DstPort:   dstPortNum,
 				Hostname:  hostname,
 				DNSAge:    dnsAge.Milliseconds(),
+				FlowID:    session.FlowID, SrcBytes: session.SrcBytes, SrcPackets: session.SrcPackets,
 			})
 		} else {
 			sm.logger.Debug("[TCP START]",
@@ -599,6 +642,7 @@ func (sm *SessionManager) TrackTCP(iface, src, dst string, isSyn, isFin, isRst b
 				SrcPort:   srcPortNum,
 				DstIP:     dstIPParsed,
 				DstPort:   dstPortNum,
+				FlowID:    session.FlowID, SrcBytes: session.SrcBytes, SrcPackets: session.SrcPackets,
 			})
 		}
 		return
@@ -607,7 +651,7 @@ func (sm *SessionManager) TrackTCP(iface, src, dst string, isSyn, isFin, isRst b
 	// CASE B: Existing Connection (Update)
 	if exists {
 		session.LastSeen = time.Now()
-		session.ByteCount += int64(length)
+		session.count(src == session.Src, length)
 
 		// CASE C: End of Connection (FIN or RST)
 		if isFin || isRst {
@@ -627,7 +671,7 @@ func (sm *SessionManager) TrackTCP(iface, src, dst string, isSyn, isFin, isRst b
 
 			srcIP, srcPortNum := parseAddr(session.Src)
 			dstIP, dstPortNum := parseAddr(session.Dst)
-			sm.queueEvent(database.NetworkEvent{
+			end := database.NetworkEvent{
 				Timestamp: time.Now(),
 				EventType: database.EventTCPEnd,
 				Interface: session.Iface,
@@ -638,15 +682,21 @@ func (sm *SessionManager) TrackTCP(iface, src, dst string, isSyn, isFin, isRst b
 				DstPort:   dstPortNum,
 				Hostname:  session.Hostname,
 				Duration:  duration.Milliseconds(),
-				ByteCount: session.ByteCount,
 				Reason:    endReason,
-			})
+			}
+			session.account(&end, end.Timestamp)
+			sm.queueEvent(end)
 			delete(sm.sessions, key)
 		}
 	}
 }
 
-// TrackUDP handles UDP "connections" using timeout-based tracking
+// TrackUDP tracks UDP flows: packets between two addresses and ports, in
+// either direction, until neither has sent for the session timeout. A
+// kernel tunnel's traffic (VXLAN, Geneve) is one flow per pair of hosts: the
+// kernel sends each connection it carries from a source port of its own,
+// which would make each of them a tunnel flow too, and they are recorded as
+// flows of their own on the tunnel device.
 func (sm *SessionManager) TrackUDP(iface, src, dst string, srcPort, dstPort uint16, length int, isIPv6 bool) {
 	if !sm.shouldLog("udp") {
 		return
@@ -662,9 +712,25 @@ func (sm *SessionManager) TrackUDP(iface, src, dst string, srcPort, dstPort uint
 		ipVersion = 6
 	}
 
-	// For UDP, we create bi-directional session keys
+	sender := src
+	service, tunnel := "", false
 	key := fmt.Sprintf("UDP:%s<->%s", src, dst)
 	reverseKey := fmt.Sprintf("UDP:%s<->%s", dst, src)
+	if kind, port, ok := sm.tunnelEnd(srcPort, dstPort); ok {
+		// The end at the tunnel port is the destination.
+		from, to := hostOf(src), hostOf(dst)
+		if dstPort != port {
+			from, to = to, from
+		}
+		low, high := from, to
+		if high < low {
+			low, high = high, low
+		}
+		key = fmt.Sprintf("UDP-TUNNEL:%s<->%s:%d", low, high, port)
+		reverseKey = key
+		src, dst, srcPort, dstPort = from+":0", fmt.Sprintf("%s:%d", to, port), 0, port
+		service, tunnel = kind, true
+	}
 
 	sm.mutex.Lock()
 	defer sm.mutex.Unlock()
@@ -678,57 +744,162 @@ func (sm *SessionManager) TrackUDP(iface, src, dst string, srcPort, dstPort uint
 		}
 	}
 
-	if !exists {
-		// Identify service based on port
-		service := identifyUDPService(srcPort, dstPort)
-
-		// New UDP "connection"
-		sm.sessions[key] = &Session{
-			ID:        key,
-			Protocol:  ProtoUDP,
-			Src:       src,
-			Dst:       dst,
-			Iface:     iface,
-			IPVersion: ipVersion,
-			StartTime: time.Now(),
-			LastSeen:  time.Now(),
-			ByteCount: int64(length),
-		}
-
-		srcIP, srcPortNum := parseAddr(src)
-		dstIP, dstPortNum := parseAddr(dst)
-
-		if service != "" {
-			sm.logger.Debug("[UDP START]",
-				"iface", iface,
-				"src", src,
-				"dst", dst,
-				"service", service,
-			)
-		} else {
-			sm.logger.Debug("[UDP START]",
-				"iface", iface,
-				"src", src,
-				"dst", dst,
-			)
-		}
-
-		sm.queueEvent(database.NetworkEvent{
-			Timestamp: time.Now(),
-			EventType: database.EventUDPStart,
-			Interface: iface,
-			IPVersion: ipVersion,
-			SrcIP:     srcIP,
-			SrcPort:   srcPortNum,
-			DstIP:     dstIP,
-			DstPort:   dstPortNum,
-			Protocol:  service,
-		})
-	} else {
-		// Update existing session
+	if exists {
 		session.LastSeen = time.Now()
-		session.ByteCount += int64(length)
+		fromSrc := sender == session.Src
+		if session.tunnel {
+			fromSrc = hostOf(sender) == hostOf(session.Src)
+		}
+		session.count(fromSrc, length)
+		return
 	}
+
+	if service == "" {
+		service = identifyUDPService(srcPort, dstPort)
+	}
+	now := time.Now()
+	session = &Session{
+		ID:         key,
+		Protocol:   ProtoUDP,
+		Src:        src,
+		Dst:        dst,
+		Iface:      iface,
+		IPVersion:  ipVersion,
+		StartTime:  now,
+		LastSeen:   now,
+		FlowID:     newFlowID(),
+		Service:    service,
+		lastRecord: now,
+		tunnel:     tunnel,
+	}
+	session.count(true, length)
+	sm.sessions[key] = session
+
+	srcIP, srcPortNum := parseAddr(src)
+	dstIP, dstPortNum := parseAddr(dst)
+	sm.logger.Debug("[UDP START]", "iface", iface, "src", src, "dst", dst, "service", service)
+	sm.queueEvent(database.NetworkEvent{
+		Timestamp:  now,
+		EventType:  database.EventUDPStart,
+		Interface:  iface,
+		IPVersion:  ipVersion,
+		SrcIP:      srcIP,
+		SrcPort:    srcPortNum,
+		DstIP:      dstIP,
+		DstPort:    dstPortNum,
+		Protocol:   service,
+		FlowID:     session.FlowID,
+		SrcBytes:   session.SrcBytes,
+		SrcPackets: session.SrcPackets,
+	})
+}
+
+// flowUpdateInterval: how often an open flow that carries traffic gets a
+// progress record, so its volume shows while it lasts.
+const flowUpdateInterval = 5 * time.Minute
+
+func newFlowID() string {
+	var id [8]byte
+	_, _ = rand.Read(id[:]) // Never fails on Linux.
+	return hex.EncodeToString(id[:])
+}
+
+// count adds a packet to the flow's totals, by the end that sent it.
+func (s *Session) count(fromSrc bool, length int) {
+	s.ByteCount += int64(length)
+	if fromSrc {
+		s.SrcBytes += int64(length)
+		s.SrcPackets++
+	} else {
+		s.DstBytes += int64(length)
+		s.DstPackets++
+	}
+}
+
+// account fills a flow's update or end record: its totals, and as
+// ByteCount the bytes since the flow's previous record.
+func (s *Session) account(event *database.NetworkEvent, at time.Time) {
+	event.ByteCount = s.ByteCount - s.reported
+	s.reported, s.lastRecord = s.ByteCount, at
+	if s.FlowID == "" {
+		return
+	}
+	event.FlowID = s.FlowID
+	event.SrcBytes, event.DstBytes, event.SrcPackets, event.DstPackets = s.SrcBytes, s.DstBytes, s.SrcPackets, s.DstPackets
+}
+
+// record is a flow's update, or its end when it expired.
+func (s *Session) record(at time.Time, ended bool) database.NetworkEvent {
+	srcIP, srcPort := parseAddr(s.Src)
+	dstIP, dstPort := parseAddr(s.Dst)
+	event := database.NetworkEvent{
+		Timestamp: at,
+		Interface: s.Iface,
+		IPVersion: s.IPVersion,
+		SrcIP:     srcIP,
+		SrcPort:   srcPort,
+		DstIP:     dstIP,
+		DstPort:   dstPort,
+		Duration:  s.LastSeen.Sub(s.StartTime).Milliseconds(),
+	}
+	switch {
+	case s.Protocol == ProtoUDP && ended:
+		event.EventType, event.Protocol = database.EventUDPEnd, s.Service
+	case s.Protocol == ProtoUDP:
+		event.EventType, event.Protocol = database.EventUDPUpdate, s.Service
+	case ended:
+		event.EventType, event.Protocol = database.EventTimeout, string(s.Protocol)
+	default:
+		event.EventType, event.Hostname = database.EventTCPUpdate, s.Hostname
+	}
+	s.account(&event, at)
+	return event
+}
+
+// hostOf is an address without its port: "[192.0.2.1]" of "[192.0.2.1]:53".
+func hostOf(address string) string {
+	if i := strings.LastIndexByte(address, ':'); i >= 0 {
+		return address[:i]
+	}
+	return address
+}
+
+// tunnelEnd reports whether either port is one of this host's kernel
+// tunnel ports, with the tunnel's kind.
+func (sm *SessionManager) tunnelEnd(srcPort, dstPort uint16) (kind string, port uint16, ok bool) {
+	ports := sm.tunnels.Load()
+	if ports == nil {
+		return "", 0, false
+	}
+	for _, port := range []uint16{dstPort, srcPort} {
+		if device, found := (*ports)[port]; found {
+			return tunnelService(device), port, true
+		}
+	}
+	return "", 0, false
+}
+
+// tunnelService names a tunnel's protocol from tunnelPorts' "kind device".
+func tunnelService(device string) string {
+	kind, _, _ := strings.Cut(device, " ")
+	switch kind {
+	case "vxlan":
+		return "VXLAN"
+	case "geneve":
+		return "Geneve"
+	}
+	return kind
+}
+
+// refreshTunnels reads this host's kernel tunnel ports; devices come and go
+// with the network plugin.
+func (sm *SessionManager) refreshTunnels() {
+	ports, err := tunnelPorts()
+	if err != nil {
+		sm.logger.Debug("Could not list tunnel devices", "error", err)
+		return
+	}
+	sm.tunnels.Store(&ports)
 }
 
 // TrackICMP handles ICMP packets
@@ -909,8 +1080,18 @@ func (sm *SessionManager) TrackTLSHandshake(iface, src, dst, sni string, isIPv6 
 
 	srcIP, srcPort := parseAddr(src)
 	dstIP, dstPort := parseAddr(dst)
+	flowID := ""
+	sm.mutex.Lock()
+	for _, key := range []string{"TCP:" + src + "->" + dst, "TCP:" + dst + "->" + src} {
+		if session, ok := sm.sessions[key]; ok {
+			flowID = session.FlowID
+			break
+		}
+	}
+	sm.mutex.Unlock()
 
 	sm.queueEvent(database.NetworkEvent{
+		FlowID:    flowID,
 		Timestamp: time.Now(),
 		EventType: database.EventTLSSNI,
 		Interface: iface,
@@ -921,6 +1102,29 @@ func (sm *SessionManager) TrackTLSHandshake(iface, src, dst, sni string, isIPv6 
 		DstPort:   dstPort,
 		TLSSNI:    sni,
 	})
+}
+
+// recordFlows ends the flows idle for the session timeout and records the
+// progress of open ones due an update. It expires under the lock, but
+// enriches and queues the records after releasing it: every capture
+// goroutine waits for this mutex.
+func (sm *SessionManager) recordFlows(now time.Time) {
+	var records []database.NetworkEvent
+	sm.mutex.Lock()
+	threshold := now.Add(-sm.sessionTimeout)
+	for key, session := range sm.sessions {
+		switch {
+		case session.LastSeen.Before(threshold):
+			records = append(records, session.record(now, true))
+			delete(sm.sessions, key)
+		case session.FlowID != "" && now.Sub(session.lastRecord) >= sm.updateInterval && session.ByteCount > session.reported:
+			records = append(records, session.record(now, false))
+		}
+	}
+	sm.mutex.Unlock()
+	for _, record := range records {
+		sm.queueEvent(record)
+	}
 }
 
 // cleanupLoop removes stale connections (the "Ghost" problem solution)
@@ -937,70 +1141,8 @@ func (sm *SessionManager) cleanupLoop() {
 			if lookup := sm.currentProcessLookup(); lookup != nil {
 				lookup.report()
 			}
-			// Expire under the lock, but enrich and queue the end events after
-			// releasing it: every capture goroutine waits for this mutex.
-			var expired []database.NetworkEvent
-			sm.mutex.Lock()
-			threshold := time.Now().Add(-sm.sessionTimeout)
-			for key, session := range sm.sessions {
-				if session.LastSeen.Before(threshold) {
-					duration := session.LastSeen.Sub(session.StartTime)
-					srcIP, srcPort := parseAddr(session.Src)
-					dstIP, dstPort := parseAddr(session.Dst)
-
-					// Log as UDP END for UDP sessions, TIMEOUT for others
-					if session.Protocol == ProtoUDP {
-						sm.logger.Debug("[UDP END]",
-							"iface", session.Iface,
-							"src", session.Src,
-							"dst", session.Dst,
-							"duration", duration.Round(time.Millisecond),
-							"bytes", session.ByteCount,
-						)
-
-						expired = append(expired, database.NetworkEvent{
-							Timestamp: time.Now(),
-							EventType: database.EventUDPEnd,
-							Interface: session.Iface,
-							IPVersion: session.IPVersion,
-							SrcIP:     srcIP,
-							SrcPort:   srcPort,
-							DstIP:     dstIP,
-							DstPort:   dstPort,
-							Duration:  int64(duration.Milliseconds()),
-							ByteCount: session.ByteCount,
-						})
-					} else {
-						sm.logger.Debug("[TIMEOUT]",
-							"protocol", session.Protocol,
-							"iface", session.Iface,
-							"src", session.Src,
-							"dst", session.Dst,
-							"duration", duration.Round(time.Millisecond),
-							"bytes", session.ByteCount,
-						)
-
-						expired = append(expired, database.NetworkEvent{
-							Timestamp: time.Now(),
-							EventType: database.EventTimeout,
-							Interface: session.Iface,
-							IPVersion: session.IPVersion,
-							SrcIP:     srcIP,
-							SrcPort:   srcPort,
-							DstIP:     dstIP,
-							DstPort:   dstPort,
-							Protocol:  string(session.Protocol),
-							Duration:  int64(duration.Milliseconds()),
-							ByteCount: session.ByteCount,
-						})
-					}
-					delete(sm.sessions, key)
-				}
-			}
-			sm.mutex.Unlock()
-			for _, event := range expired {
-				sm.queueEvent(event)
-			}
+			sm.refreshTunnels()
+			sm.recordFlows(time.Now())
 
 			sm.dns.mu.Lock()
 			sm.dns.prune(time.Now())

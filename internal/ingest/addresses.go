@@ -32,6 +32,9 @@ const (
 	acceptsPeerProcesses = "peer-process"
 	// acceptsProbes: events may carry the Probe field.
 	acceptsProbes = "probe"
+	// acceptsFlows: events may carry FlowID and the flow totals (SrcBytes,
+	// DstBytes, SrcPackets, DstPackets).
+	acceptsFlows = "flows"
 
 	maxReportedAddresses = 256
 	// An address is credited to its node from addressBefore its first report

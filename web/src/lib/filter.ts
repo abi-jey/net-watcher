@@ -32,7 +32,7 @@ export interface Field {
 }
 
 const kinds = [{ id: 'pod', label: 'pod' }, { id: 'node', label: 'node' }, { id: 'service', label: 'service' }, { id: 'endpoint', label: 'endpoint' }, { id: 'none', label: 'outside the cluster' }];
-export const eventTypes = ['TCP_START', 'TCP_END', 'UDP_START', 'UDP_END', 'DNS', 'TLS_SNI', 'ICMP', 'TIMEOUT', 'GAP'];
+export const eventTypes = ['TCP_START', 'TCP_UPDATE', 'TCP_END', 'UDP_START', 'UDP_UPDATE', 'UDP_END', 'DNS', 'TLS_SNI', 'ICMP', 'TIMEOUT', 'GAP'];
 const roles = [
   { id: 'pod', label: 'pod link' }, { id: 'overlay', label: 'overlay' }, { id: 'cluster-host', label: 'cluster host' }, { id: 'tailscale', label: 'Tailscale' },
   { id: 'wireguard', label: 'WireGuard' }, { id: 'bridge', label: 'bridge' }, { id: 'wifi', label: 'Wi-Fi' }, { id: 'uplink', label: 'uplink' },
@@ -58,7 +58,10 @@ function processFields(name: string, label: string, help: string): Field[] {
 
 export const fields: Field[] = [
   { name: 'type', label: 'type', group: 'Event', kind: 'enum', help: 'Event type.', values: [...eventTypes, 'TCP', 'UDP', 'HOURLY'].map(id => ({ id, label: id })) },
-  { name: 'bytes', label: 'bytes', group: 'Event', kind: 'number', help: 'Bytes transferred: 1500, 1.5k, 2M (powers of 1024).' },
+  { name: 'bytes', label: 'bytes', group: 'Event', kind: 'number', help: 'Bytes this record accounts for (a flow\'s update or end: since its previous record): 1500, 1.5k, 2M (powers of 1024).' },
+  { name: 'src.bytes', label: 'bytes sent by source', group: 'Event', kind: 'number', help: 'Bytes the source (the end that opened the flow) sent in the flow so far: 1500, 1.5k, 2M.' },
+  { name: 'dst.bytes', label: 'bytes sent by destination', group: 'Event', kind: 'number', help: 'Bytes the destination sent in the flow so far: 1500, 1.5k, 2M.' },
+  { name: 'flow', label: 'flow', group: 'Event', kind: 'string', help: 'Flow ID: the records of one flow (open, updates, close, TLS name) on one node.' },
   { name: 'duration', label: 'duration', group: 'Event', kind: 'number', help: 'Duration: 250ms, 2s, 5m.' },
   { name: 'ipv', label: 'IP version', group: 'Event', kind: 'number', help: '4 or 6.' },
   { name: 'domain', label: 'domain', group: 'Event', kind: 'domain', help: 'Host name, DNS query or TLS SNI; "is" includes subdomains.' },

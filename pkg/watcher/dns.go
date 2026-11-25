@@ -19,6 +19,17 @@ const dnsWindow = 30 * time.Second
 const maxDNSState = 16384
 const dnsPruneInterval = time.Second
 
+// One DNS lookup is one record on each node. The same packet crosses several
+// interfaces of a node (a pod's, the tunnel's, the resolver pod's): a copy
+// seen on another interface within dnsCopyWindow is not recorded again. The
+// response records the lookup with its query; a query waits for it up to
+// dnsAnswerWait, then is recorded unanswered.
+const (
+	dnsCopyWindow    = time.Second
+	dnsAnswerWait    = 10 * time.Second
+	dnsSweepInterval = 2 * time.Second
+)
+
 // DNSRecord retains answer ownership as well as its value: unrelated answers cannot
 // establish a binding for the question's name.
 type DNSRecord struct {
@@ -44,6 +55,19 @@ type dnsStream struct {
 type dnsQuery struct {
 	At            time.Time
 	ClientContext string
+	// The query's size and packets, retransmissions included.
+	Bytes, Packets int64
+}
+
+// dnsCopyKey is a DNS message's identity on the wire, query or response.
+type dnsCopyKey struct {
+	dnsKey
+	Response bool
+}
+
+type dnsCopy struct {
+	Interface string
+	At        time.Time
 }
 
 func contextIdentity(raw string) string {
@@ -58,10 +82,24 @@ type dnsTracker struct {
 	pending   map[dnsKey]dnsQuery
 	bindings  map[string][]database.DNSResolution
 	streams   map[string]*dnsStream
+	copies    map[dnsCopyKey]dnsCopy
 }
 
 func newDNSTracker() *dnsTracker {
-	return &dnsTracker{pending: make(map[dnsKey]dnsQuery), bindings: make(map[string][]database.DNSResolution), streams: make(map[string]*dnsStream)}
+	return &dnsTracker{pending: make(map[dnsKey]dnsQuery), bindings: make(map[string][]database.DNSResolution), streams: make(map[string]*dnsStream), copies: make(map[dnsCopyKey]dnsCopy)}
+}
+
+// copied reports whether a message was already seen on another interface
+// of this node moments ago, and remembers it otherwise. The same message
+// again on the same interface was sent again: a retransmission.
+func (d *dnsTracker) copied(key dnsCopyKey, iface string, at time.Time) bool {
+	if seen, ok := d.copies[key]; ok && seen.Interface != iface && at.Sub(seen.At) <= dnsCopyWindow && !at.Before(seen.At.Add(-dnsCopyWindow)) {
+		return true
+	}
+	if len(d.copies) < maxDNSState {
+		d.copies[key] = dnsCopy{Interface: iface, At: at}
+	}
+	return false
 }
 
 func (d *dnsTracker) restore(db *database.DB) error {
@@ -113,6 +151,11 @@ func (d *dnsTracker) prune(now time.Time) {
 			delete(d.streams, key)
 		}
 	}
+	for key, seen := range d.copies {
+		if now.Sub(seen.At) > dnsCopyWindow {
+			delete(d.copies, key)
+		}
+	}
 }
 
 func (d *dnsTracker) lookup(client, ip string, at time.Time) []database.DNSResolution {
@@ -130,13 +173,16 @@ func (d *dnsTracker) lookup(client, ip string, at time.Time) []database.DNSResol
 
 // TrackDNSPacket accepts a complete DNS message, preserving failed and unmatched
 // responses as observations but creating bindings only for matched successful answers.
-func (sm *SessionManager) TrackDNSPacket(iface, src, dst, transport string, payload []byte, at time.Time, ipv6 bool) {
+// It reports whether the message was DNS on port 53, which then needs no UDP
+// flow: the lookup's record counts its packets. length is the packet's size
+// over UDP, zero over TCP (whose connection counts its bytes).
+func (sm *SessionManager) TrackDNSPacket(iface, src, dst, transport string, payload []byte, at time.Time, ipv6 bool, length int) bool {
 	if !sm.shouldLog("dns") {
-		return
+		return false
 	}
 	var message layers.DNS
 	if err := message.DecodeFromBytes(payload, gopacket.NilDecodeFeedback); err != nil || message.OpCode != layers.DNSOpCodeQuery {
-		return
+		return false
 	}
 	client, resolver := src, dst
 	if message.QR {
@@ -145,12 +191,12 @@ func (sm *SessionManager) TrackDNSPacket(iface, src, dst, transport string, payl
 	clientIP, clientPort := parseAddr(client)
 	resolverIP, resolverPort := parseAddr(resolver)
 	if resolverPort != 53 {
-		return
+		return false
 	}
 	sourceIP, sourcePort := parseAddr(src)
 	destinationIP, destinationPort := parseAddr(dst)
 	if sm.shouldExclude(src, dst, sourcePort, destinationPort) {
-		return
+		return true
 	}
 	version := uint8(4)
 	if ipv6 {
@@ -180,9 +226,16 @@ func (sm *SessionManager) TrackDNSPacket(iface, src, dst, transport string, payl
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.prune(at)
-	for _, question := range message.Questions {
+	size := int64(length)
+	for index, question := range message.Questions {
 		name := dnsName(question.Name)
 		key := dnsKey{client, resolver, name, transport, message.ID, question.Type, question.Class}
+		if d.copied(dnsCopyKey{key, message.QR}, iface, at) {
+			continue
+		}
+		if index > 0 {
+			size = 0 // The message's size is counted once.
+		}
 		event := database.NetworkEvent{Timestamp: at, EventType: database.EventDNS, Interface: iface, IPVersion: version,
 			SrcIP: sourceIP, SrcPort: sourcePort, DstIP: destinationIP, DstPort: destinationPort,
 			DNSVersion: 1, DNSID: message.ID, DNSQuery: name, DNSQuestionType: question.Type.String(), Protocol: transport,
@@ -191,14 +244,22 @@ func (sm *SessionManager) TrackDNSPacket(iface, src, dst, transport string, payl
 			if old, exists := d.pending[key]; exists && at.Sub(old.At) > dnsWindow {
 				delete(d.pending, key)
 			}
+			if old, exists := d.pending[key]; exists {
+				// Sent again: the same lookup, whose response records it.
+				old.Bytes += size
+				old.Packets++
+				d.pending[key] = old
+				continue
+			}
 			if len(d.pending) < maxDNSState {
-				if _, exists := d.pending[key]; !exists {
-					query := dnsQuery{At: at}
-					if sm.contextLookup != nil {
-						query.ClientContext = sm.contextLookup(clientIP, clientPort, transport, at).Context
-					}
-					d.pending[key] = query
+				query := dnsQuery{At: at, Bytes: size, Packets: 1}
+				if sm.contextLookup != nil {
+					query.ClientContext = sm.contextLookup(clientIP, clientPort, transport, at).Context
 				}
+				d.pending[key] = query
+			}
+			if size > 0 {
+				event.ByteCount, event.SrcBytes, event.SrcPackets = size, size, 1
 			}
 			sm.queueEvent(event)
 			continue
@@ -209,6 +270,14 @@ func (sm *SessionManager) TrackDNSPacket(iface, src, dst, transport string, payl
 		query, matched := d.pending[key]
 		queryTime := query.At
 		delete(d.pending, key)
+		if size > 0 || query.Bytes > 0 {
+			// The response's source is the resolver; its destination asked.
+			event.SrcBytes, event.DstBytes, event.DstPackets = size, query.Bytes, query.Packets
+			if size > 0 {
+				event.SrcPackets = 1
+			}
+			event.ByteCount = event.SrcBytes + event.DstBytes
+		}
 		event.DNSMatched = matched && !at.Before(queryTime) && at.Sub(queryTime) <= dnsWindow
 		if sm.contextLookup != nil && contextIdentity(query.ClientContext) != contextIdentity(sm.contextLookup(clientIP, clientPort, transport, at).Context) {
 			event.DNSMatched = false
@@ -262,6 +331,73 @@ func (sm *SessionManager) TrackDNSPacket(iface, src, dst, transport string, payl
 			}
 		}
 		sm.queueEvent(event)
+	}
+	return true
+}
+
+// heldQuery is a DNS query's record, after its process lookup, waiting for
+// the response that records the lookup.
+type heldQuery struct {
+	event database.NetworkEvent
+	at    time.Time
+}
+
+// dnsLookupKey identifies a lookup in its query's and its response's records.
+func dnsLookupKey(event database.NetworkEvent) string {
+	client, clientPort, resolver, resolverPort := event.SrcIP, event.SrcPort, event.DstIP, event.DstPort
+	if event.DNSType == "RESPONSE" {
+		client, clientPort, resolver, resolverPort = event.DstIP, event.DstPort, event.SrcIP, event.SrcPort
+	}
+	return fmt.Sprintf("%s|%s|%d|%s|%d|%d|%s|%s", event.Protocol, client, clientPort, resolver, resolverPort, event.DNSID, event.DNSQuery, event.DNSQuestionType)
+}
+
+// holdQuery keeps a captured DNS query's record until its response, and
+// reports whether it did. The response gives the query's processes to the
+// lookup's record when it found none itself, and the query's record is
+// dropped: the response holds the question, its time and its size.
+func (sm *SessionManager) holdQuery(event *database.NetworkEvent) bool {
+	if event.EventType != database.EventDNS || event.DNSVersion == 0 {
+		return false
+	}
+	key := dnsLookupKey(*event)
+	sm.dnsHoldMu.Lock()
+	defer sm.dnsHoldMu.Unlock()
+	if sm.dnsHeld == nil {
+		sm.dnsHeld = map[string]heldQuery{}
+	}
+	switch event.DNSType {
+	case "QUERY":
+		if _, exists := sm.dnsHeld[key]; exists || len(sm.dnsHeld) >= maxDNSState {
+			return false
+		}
+		sm.dnsHeld[key] = heldQuery{event: *event, at: time.Now()}
+		return true
+	case "RESPONSE":
+		if query, ok := sm.dnsHeld[key]; ok {
+			delete(sm.dnsHeld, key)
+			if event.ProcessSide == "" {
+				processesOf(query.event).reversed().apply(event)
+			}
+		}
+	}
+	return false
+}
+
+// releaseQueries records the held queries captured before a time: no
+// response came.
+func (sm *SessionManager) releaseQueries(before time.Time) {
+	sm.dnsHoldMu.Lock()
+	var released []database.NetworkEvent
+	for key, query := range sm.dnsHeld {
+		if query.at.Before(before) {
+			released = append(released, query.event)
+			delete(sm.dnsHeld, key)
+		}
+	}
+	sm.dnsHoldMu.Unlock()
+	sort.Slice(released, func(i, j int) bool { return released[i].Timestamp.Before(released[j].Timestamp) })
+	for _, event := range released {
+		sm.bufferEvent(event)
 	}
 }
 
@@ -374,6 +510,6 @@ func (sm *SessionManager) TrackDNSTCP(iface, src, dst string, tcp *layers.TCP, a
 	}
 	d.mu.Unlock()
 	for _, payload := range messages {
-		sm.TrackDNSPacket(iface, src, dst, "TCP", payload, at, ipv6)
+		sm.TrackDNSPacket(iface, src, dst, "TCP", payload, at, ipv6, 0)
 	}
 }

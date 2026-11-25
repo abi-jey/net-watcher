@@ -38,7 +38,7 @@ func TestOtherNodesAddressesAreAttributedAtIngest(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Millisecond)
 	response := postRecorded(t, receiver.Handler(), heartbeat("desktop", now,
 		"2001:db8::d1", "100.64.1.1", "2001:db8::99", "192.168.1.5", "172.17.0.1", "fe80::1", "127.0.0.1"))
-	if response.Code != http.StatusNoContent || response.Header().Get(acceptsHeader) != acceptsAddresses+", "+acceptsPeerProcesses+", "+acceptsProbes {
+	if response.Code != http.StatusNoContent || response.Header().Get(acceptsHeader) != acceptsAddresses+", "+acceptsPeerProcesses+", "+acceptsProbes+", "+acceptsFlows {
 		t.Fatalf("heartbeat: %d, accepts %q", response.Code, response.Header().Get(acceptsHeader))
 	}
 	if code := postRecorded(t, receiver.Handler(), heartbeat("abja", now, "2001:db8::99")).Code; code != http.StatusNoContent {
@@ -148,7 +148,8 @@ func TestForwarderSendsAddressesOnlyToIngesterThatAcceptsThem(t *testing.T) {
 }
 
 func TestForwarderSendsOptionalEventFieldsOnlyToIngesterThatAcceptsThem(t *testing.T) {
-	for _, accepts := range []string{"", acceptsAddresses + ", " + acceptsPeerProcesses, acceptsAddresses + ", " + acceptsPeerProcesses + ", " + acceptsProbes} {
+	for _, accepts := range []string{"", acceptsAddresses + ", " + acceptsPeerProcesses, acceptsAddresses + ", " + acceptsPeerProcesses + ", " + acceptsProbes,
+		acceptsAddresses + ", " + acceptsPeerProcesses + ", " + acceptsProbes + ", " + acceptsFlows} {
 		var bodies []string
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 			body, _ := io.ReadAll(request.Body)
@@ -161,7 +162,7 @@ func TestForwarderSendsOptionalEventFieldsOnlyToIngesterThatAcceptsThem(t *testi
 		local := testDB(t, "local.db")
 		check := database.NetworkEvent{Timestamp: time.Now().UTC(), EventType: database.EventTCPStart, SrcIP: "10.0.1.155", DstIP: "10.0.1.84", DstPort: 8081,
 			ProcessPID: 10, ProcessCommand: "kubelet", ProcessSide: "src", PeerProcessPID: 20, PeerProcessCommand: "keda", PeerProcessPod: "keda/keda-operator-1", PeerProcessContainer: "keda-operator",
-			Probe: "keda-operator:liveness"}
+			Probe: "keda-operator:liveness", FlowID: "5e1f0c2a9b3d4e6f", SrcBytes: 74, SrcPackets: 1}
 		if err := local.Create(&check).Error; err != nil {
 			t.Fatal(err)
 		}
@@ -183,6 +184,15 @@ func TestForwarderSendsOptionalEventFieldsOnlyToIngesterThatAcceptsThem(t *testi
 		}
 		if got, want := strings.Contains(bodies[1], `"Probe":"keda-operator:liveness"`), strings.Contains(accepts, acceptsProbes); got != want || !want && strings.Contains(bodies[1], "Probe") {
 			t.Fatalf("accepts %q: probe sent %t: %s", accepts, got, bodies[1])
+		}
+		flows := strings.Contains(accepts, acceptsFlows)
+		for _, field := range []string{`"FlowID":"5e1f0c2a9b3d4e6f"`, `"SrcBytes":74`, `"SrcPackets":1`} {
+			if strings.Contains(bodies[1], field) != flows {
+				t.Fatalf("accepts %q: %s sent %t: %s", accepts, field, !flows, bodies[1])
+			}
+		}
+		if !flows && (strings.Contains(bodies[1], "FlowID") || strings.Contains(bodies[1], "SrcBytes")) {
+			t.Fatalf("accepts %q: flow fields sent: %s", accepts, bodies[1])
 		}
 	}
 }

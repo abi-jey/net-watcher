@@ -111,6 +111,20 @@ func (f flowProcesses) apply(event *database.NetworkEvent) {
 	}
 }
 
+// processesOf reads back the processes apply recorded on an event.
+func processesOf(event database.NetworkEvent) flowProcesses {
+	var flow flowProcesses
+	if event.ProcessSide != "src" && event.ProcessSide != "dst" {
+		return flow
+	}
+	flow.set(event.ProcessSide, processIdentity{PID: event.ProcessPID, Command: event.ProcessCommand, Pod: event.ProcessPod, Container: event.ProcessContainer})
+	if event.PeerProcessCommand != "" || event.PeerProcessPID != 0 {
+		other := map[string]string{"src": "dst", "dst": "src"}[event.ProcessSide]
+		flow.set(other, processIdentity{PID: event.PeerProcessPID, Command: event.PeerProcessCommand, Pod: event.PeerProcessPod, Container: event.PeerProcessContainer})
+	}
+	return flow
+}
+
 // kubeletCommands are the command names the kubelet runs under: its own
 // binary, or a distribution's single binary that embeds it.
 var kubeletCommands = map[string]bool{"kubelet": true, "kubelite": true, "k3s-server": true, "k3s-agent": true}

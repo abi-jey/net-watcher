@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState, type MouseEvent, type ReactNode } from 'react';
 import type { NetworkEvent } from '../lib/api.ts';
-import { bytes, dateTime, endpoint, isSet } from '../lib/format.ts';
+import { bytes, count, dateTime, endpoint, isSet } from '../lib/format.ts';
 import { deviceName, eventLabel, family, interfaceRole, ipScope, rcodeName, routeInfo, scopeLabel, scopeTag } from '../lib/network.ts';
 import { describe, is, negate, type Term } from '../lib/filter.ts';
+import type { Flow, Repeat } from '../lib/flows.ts';
 import { describeProbe, endProcesses, healthCheckEvidence, healthChecks, isHealthCheck, isKernel, kernelHelp, splitPod, type EndProcess } from '../lib/process.ts';
 import { href } from '../lib/hooks.ts';
 import { Attribution } from './ui.tsx';
@@ -176,8 +177,22 @@ function Details({ event, onFilter }: { event: NetworkEvent; onFilter: OnFilter 
     case 'ICMP':
       return <span className="detail-main">{event.ICMPDesc}</span>;
   }
-  const facts = [event.ByteCount ? bytes(event.ByteCount) : '', event.Duration ? duration(event.Duration) : '', event.Reason].filter(Boolean);
-  return facts.length ? <span className="detail-main">{facts.join(' · ')}</span> : <span className="detail-main muted">{event.EventType.endsWith('_START') ? 'opened' : '—'}</span>;
+  if (event.EventType.endsWith('_START')) return <span className="detail-main muted">opened</span>;
+  const open = event.EventType.endsWith('_UPDATE');
+  const facts = [directions(event) || (event.ByteCount ? bytes(event.ByteCount) : ''), event.Duration ? duration(event.Duration) : '', open ? 'open' : event.Reason].filter(Boolean);
+  return facts.length ? <span className="detail-main" title={directionsHelp(event)}>{facts.join(' · ')}</span> : <span className="detail-main muted">—</span>;
+}
+
+/** "↑ 6.0 MB ↓ 2.9 KB": sent by the source, by the destination; empty when not counted. */
+function directions(event: { SrcBytes?: number; DstBytes?: number }): string {
+  return event.SrcBytes || event.DstBytes ? `↑ ${bytes(event.SrcBytes)} ↓ ${bytes(event.DstBytes)}` : '';
+}
+
+function directionsHelp(event: NetworkEvent): string | undefined {
+  if (!event.SrcBytes && !event.DstBytes) return undefined;
+  const since = event.EventType.endsWith('_UPDATE') || event.EventType.endsWith('_END') || event.EventType === 'TIMEOUT'
+    ? ` This record accounts for ${bytes(event.ByteCount)} since the flow's previous record.` : '';
+  return `↑ sent by the source (the end that opened the flow): ${bytes(event.SrcBytes)} in ${event.SrcPackets ?? 0} packets. ↓ sent by the destination: ${bytes(event.DstBytes)} in ${event.DstPackets ?? 0} packets.${since}`;
 }
 
 function duration(milliseconds: number): string {
@@ -263,10 +278,10 @@ function SideFacts({ title, side, which, process, event }: { title: string; side
   );
 }
 
-function EventDetails({ event }: { event: NetworkEvent }) {
+function EventDetails({ event, records }: { event: NetworkEvent; records?: NetworkEvent[] }) {
   const link = interfaceRole(event.Interface);
   const processes = endProcesses(event);
-  const fields = Object.entries(event).filter(([key, value]) => !rawSkip.has(key) && value !== '' && value !== 0 && value !== false && value !== null && (typeof value !== 'string' || isSet(value)));
+  const fields = storedFields(event);
   return (
     <div className="ev-details">
       <div className="facts">
@@ -285,19 +300,148 @@ function EventDetails({ event }: { event: NetworkEvent }) {
             {!event.ProcessSide && <><dt>Process</dt><dd>{event.ProcessCommand ? <>{event.ProcessCommand}{event.ProcessPID ? <span className="muted"> · host PID {event.ProcessPID}</span> : null}</> : (event.Route === 'exit-node' || event.Route === 'subnet-router')
               ? <span className="muted">none: forwarded for a tailnet device, not opened by a process on this node</span>
               : <span className="muted" title="See Processes for why some connections have no process">not attributed</span>}</dd></>}
-            {event.ByteCount > 0 && <><dt>Bytes</dt><dd>{bytes(event.ByteCount)} <span className="muted small">both directions</span></dd></>}
+            {event.SrcBytes || event.DstBytes
+              ? <><dt>Bytes</dt><dd>source sent {bytes(event.SrcBytes)} <span className="muted">({count(event.SrcPackets ?? 0)} packets)</span> · destination sent {bytes(event.DstBytes)} <span className="muted">({count(event.DstPackets ?? 0)} packets)</span>
+                <div className="muted small">{records ? 'The flow\'s totals.' : event.EventType === 'DNS' ? 'The query and the response.' : `The flow's totals so far.${event.EventType.endsWith('_START') ? '' : ` This record accounts for ${bytes(event.ByteCount)} since the flow's previous record.`}`}</div></dd></>
+              : event.ByteCount > 0 && <><dt>Bytes</dt><dd>{bytes(event.ByteCount)} <span className="muted small">both directions</span></dd></>}
           </dl>
         </section>
       </div>
-      <details className="raw">
-        <summary>All stored fields</summary>
-        <dl className="kv">
-          {fields.map(([key, value]) => (
-            <div key={key} style={{ display: 'contents' }}><dt>{key}</dt><dd className="mono">{typeof value === 'string' && /Context$/.test(key) ? <pre>{JSON.stringify(JSON.parse(value || '{}'), null, 2)}</pre> : String(value)}</dd></div>
-          ))}
-        </dl>
-      </details>
-      <p className="muted small">Event #{event.ID}. Captured packets are observations; they do not show whether a policy allowed or denied the connection.</p>
+      {records ? <Records records={records} /> : <StoredFields fields={fields} title="All stored fields" />}
+      <p className="muted small">{records ? `${records.length} record${records.length === 1 ? '' : 's'}` : `Event #${event.ID}`}. Captured packets are observations; they do not show whether a policy allowed or denied the connection.</p>
     </div>
+  );
+}
+
+function StoredFields({ fields, title }: { fields: [string, unknown][]; title: string }) {
+  return (
+    <details className="raw">
+      <summary>{title}</summary>
+      <dl className="kv">
+        {fields.map(([key, value]) => (
+          <div key={key} style={{ display: 'contents' }}><dt>{key}</dt><dd className="mono">{typeof value === 'string' && /Context$/.test(key) ? <pre>{JSON.stringify(JSON.parse(value || '{}'), null, 2)}</pre> : String(value)}</dd></div>
+        ))}
+      </dl>
+    </details>
+  );
+}
+
+function storedFields(event: NetworkEvent): [string, unknown][] {
+  return Object.entries(event).filter(([key, value]) => !rawSkip.has(key) && value !== '' && value !== 0 && value !== false && value !== null && value !== undefined && (typeof value !== 'string' || isSet(value)));
+}
+
+/** The stored records a row stands for, oldest first, each with its fields. */
+function Records({ records }: { records: NetworkEvent[] }) {
+  return (
+    <section className="flow-records">
+      <h3>Records</h3>
+      <ol>
+        {[...records].reverse().map(record => (
+          <li key={record.ID}>
+            <details className="raw">
+              <summary>
+                <span className="mono">{dateTime(record.Timestamp)}</span> · {eventLabel(record.EventType)}{record.DNSType ? ` ${record.DNSType.toLowerCase()}` : ''} · {record.CollectorID || 'local'} <span className="mono">{record.Interface}</span>
+                {(record.SrcBytes || record.DstBytes) ? <> · {directions(record)}</> : record.ByteCount ? <> · {bytes(record.ByteCount)}</> : null}
+                <span className="muted"> · #{record.ID}</span>
+              </summary>
+              <StoredFields fields={storedFields(record)} title="Stored fields" />
+            </details>
+          </li>
+        ))}
+      </ol>
+    </section>
+  );
+}
+
+/** Filter for the flow's records on each node that recorded it. */
+function flowCondition(flow: Flow): Term | undefined {
+  const ids = [...new Set(flow.records.map(record => record.FlowID).filter((id): id is string => !!id))];
+  return ids.length ? { kind: 'compare', field: 'flow', op: '=', values: ids } : undefined;
+}
+
+function nodesTag(nodes: string[], onFilter: OnFilter) {
+  return (
+    <Tag className="ctx node" title={nodes.length > 1 ? `Recorded by ${nodes.join(' and ')}: each node saw its end` : 'Collector (node) that captured the packets'}
+      condition={nodes.length === 1 && nodes[0] !== 'local' ? is('node', nodes[0]) : undefined} onFilter={onFilter}>{nodes.join(' + ')}</Tag>
+  );
+}
+
+function span(first: string, last: string): string {
+  return `First record ${dateTime(first)}, last ${dateTime(last)}`;
+}
+
+/**
+ * One flow, from all its records: its open, updates and close on every node
+ * that saw it, or a DNS lookup's query and response.
+ */
+export function FlowRow({ flow, expanded, onToggle, onFilter, fresh }: { flow: Flow; expanded: boolean; onToggle: () => void; onFilter?: OnFilter; fresh?: boolean }) {
+  const event = flow.merged;
+  const kind = flow.kind === 'lookup' ? 'dns' : family(event.EventType);
+  const processes = endProcesses(event);
+  const link = interfaceRole(event.Interface);
+  const route = routeInfo(event.Route);
+  const label = flow.kind === 'lookup' ? 'DNS lookup' : `${kind.toUpperCase()} ${flow.open ? 'open' : 'flow'}`;
+  const facts = [directions(event) || (event.ByteCount ? bytes(event.ByteCount) : ''), event.Duration ? duration(event.Duration) : '', flow.open ? 'open' : event.Reason].filter(Boolean);
+  return (
+    <li className={`ev ev-flow ${kind} ${expanded ? 'open' : ''} ${fresh ? 'fresh' : ''}`}>
+      <div className="ev-row" role="button" tabIndex={0} aria-expanded={expanded} onClick={onToggle}
+        onKeyDown={key => { if (key.key === 'Enter' || key.key === ' ') { key.preventDefault(); onToggle(); } }}>
+        <span className="ev-time mono" title={span(flow.first, flow.last)}>{rowTime(flow.last)}</span>
+        <span className="ev-type"><Tag className={`type ${kind}`} title={`${flow.records.length} record${flow.records.length === 1 ? '' : 's'} of one ${flow.kind === 'lookup' ? 'DNS lookup' : 'flow'}`} condition={flowCondition(flow)} label="this flow" onFilter={onFilter}>{label}</Tag></span>
+        <span className="ev-src"><Endpoint side={source(event)} which="src" process={processes.src} event={event} onFilter={onFilter} /></span>
+        <span className="ev-arrow" aria-label="to"><Icon name="arrow" size={14} /></span>
+        <span className="ev-dst"><Endpoint side={destination(event)} which="dst" name={event.DstKind ? undefined : remoteName(event)} process={processes.dst} event={event} onFilter={onFilter} /></span>
+        <span className="ev-detail">
+          {isHealthCheck(event) && <Tag className="ctx check" title={`Health check: ${describeProbe(event.Probe)}, port ${event.DstPort}. ${healthCheckEvidence(event)}`} condition={healthChecks} label="health checks" onFilter={onFilter}>health check</Tag>}
+          {flow.kind === 'lookup' ? <Details event={event} onFilter={onFilter} /> : <span className="detail-main" title={directionsHelp(event)}>{facts.join(' · ') || 'opened'}</span>}
+          {route && <Tag className="ctx route" title={route.help} condition={is('route', event.Route)} onFilter={onFilter}>{route.label}</Tag>}
+          <Tag className="ctx" title={`${event.Interface}: ${link.help}`} condition={link.id ? is('iface.type', link.id) : undefined} onFilter={onFilter}>{link.role}</Tag>
+          {nodesTag(flow.nodes, onFilter)}
+        </span>
+      </div>
+      {expanded && <EventDetails event={event} records={flow.records} />}
+    </li>
+  );
+}
+
+/**
+ * Flows one opener made to one destination again and again: health checks,
+ * a name looked up repeatedly, a port mapping renewed. Expands to the flows.
+ */
+export function RepeatRow({ repeat, expanded, onToggle, onFilter, fresh, openFlow, onToggleFlow }: {
+  repeat: Repeat; expanded: boolean; onToggle: () => void; onFilter?: OnFilter; fresh?: boolean; openFlow?: string; onToggleFlow: (key: string) => void;
+}) {
+  const newest = repeat.flows[0];
+  const event = newest.merged;
+  const lookup = newest.kind === 'lookup';
+  const kind = lookup ? 'dns' : family(event.EventType);
+  const processes = endProcesses(event);
+  const n = repeat.flows.length;
+  const nodes = [...new Set(repeat.flows.flatMap(flow => flow.nodes))].sort();
+  const open = repeat.flows.filter(flow => flow.open).length;
+  const facts = [`${n} ${lookup ? 'lookups' : 'flows'}`, repeat.every ? `every ~${duration(repeat.every)}` : '',
+    directions({ SrcBytes: repeat.sent, DstBytes: repeat.received }), open ? `${open} open` : ''].filter(Boolean);
+  return (
+    <li className={`ev ev-repeat ${kind} ${expanded ? 'open' : ''} ${fresh ? 'fresh' : ''}`}>
+      <div className="ev-row" role="button" tabIndex={0} aria-expanded={expanded} onClick={onToggle}
+        onKeyDown={key => { if (key.key === 'Enter' || key.key === ' ') { key.preventDefault(); onToggle(); } }}>
+        <span className="ev-time mono" title={span(repeat.first, repeat.last)}>{rowTime(repeat.last)}</span>
+        <span className="ev-type"><span className={`type ${kind}`} title={`${n} ${lookup ? 'lookups of one name' : 'flows'} by one ${event.ProcessSide === 'src' ? 'process' : 'source'} to one destination; select to list them`}>{n}× {lookup ? 'DNS' : kind.toUpperCase()}</span></span>
+        <span className="ev-src"><Endpoint side={source(event)} which="src" process={processes.src} event={event} onFilter={onFilter} /></span>
+        <span className="ev-arrow" aria-label="to"><Icon name="arrow" size={14} /></span>
+        <span className="ev-dst"><Endpoint side={destination(event)} which="dst" name={event.DstKind ? undefined : remoteName(event)} process={processes.dst} event={event} onFilter={onFilter} /></span>
+        <span className="ev-detail">
+          {isHealthCheck(event) && <Tag className="ctx check" title={`Health checks: ${describeProbe(event.Probe)}, port ${event.DstPort}. ${healthCheckEvidence(event)}`} condition={healthChecks} label="health checks" onFilter={onFilter}>health check</Tag>}
+          {lookup && <span className="detail-main"><strong>{event.DNSQuery}</strong></span>}
+          <span className="detail-main">{facts.join(' · ')}</span>
+          {nodesTag(nodes, onFilter)}
+        </span>
+      </div>
+      {expanded && (
+        <ol className="ev-children" aria-label={`${n} ${lookup ? 'lookups' : 'flows'}`}>
+          {repeat.flows.map(flow => <FlowRow key={flow.key} flow={flow} expanded={openFlow === flow.key} onToggle={() => onToggleFlow(flow.key)} onFilter={onFilter} />)}
+        </ol>
+      )}
+    </li>
   );
 }
