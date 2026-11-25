@@ -64,6 +64,7 @@ type SessionManager struct {
 	recentUDPRejects map[string]time.Time
 	dns              *dnsTracker
 	contextLookup    ContextLookup
+	probeLookup      ProbeLookup
 	processMux       sync.RWMutex
 	processLookup    *processAttributor
 	// Event batching. Packet handlers only append to the buffer; a separate
@@ -92,6 +93,10 @@ func (sm *SessionManager) retainLimit() int {
 
 // ContextLookup attributes an address to its Kubernetes identity at a time.
 type ContextLookup func(ip string, port uint16, protocol string, at time.Time) kube.Attribution
+
+// ProbeLookup names the probes of the pod holding ip at time at that target
+// port, when that pod runs on node (see kube.Index.Probe).
+type ProbeLookup func(ip string, port uint16, node string, at time.Time) string
 
 // maxRetainedEvents bounds memory used for events awaiting a successful write.
 const maxRetainedEvents = 50000
@@ -404,6 +409,10 @@ func (sm *SessionManager) queueEvent(event database.NetworkEvent) {
 		event.SourceContext, event.DestinationContext = src.Context, dst.Context
 		event.SrcKind, event.SrcNamespace, event.SrcName, event.SrcUID, event.SrcWorkload, event.SrcAttribution = src.Kind, src.Namespace, src.Name, src.UID, src.Workload, src.Confidence
 		event.DstKind, event.DstNamespace, event.DstName, event.DstUID, event.DstWorkload, event.DstAttribution = dst.Kind, dst.Namespace, dst.Name, dst.UID, dst.Workload, dst.Confidence
+		if sm.probeLookup != nil && protocol == "TCP" && src.Kind == "node" && dst.Kind == "pod" {
+			// Process attribution below clears it if another process opened the connection.
+			event.Probe = sm.probeLookup(event.DstIP, event.DstPort, src.Name, event.Timestamp)
+		}
 	}
 	if event.EventType != database.EventGap {
 		if route, peer := tailnetRoute(event.Interface, event.SrcIP, event.DstIP, sm.hostAddrs.has); route != "" {

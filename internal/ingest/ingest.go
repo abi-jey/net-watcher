@@ -166,7 +166,7 @@ func (r *Receiver) handleBatch(w http.ResponseWriter, request *http.Request) {
 		http.Error(w, "could not store ingest batch", http.StatusInternalServerError)
 		return
 	}
-	w.Header().Set(acceptsHeader, acceptsAddresses+", "+acceptsPeerProcesses)
+	w.Header().Set(acceptsHeader, acceptsAddresses+", "+acceptsPeerProcesses+", "+acceptsProbes)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -385,10 +385,11 @@ type Forwarder struct {
 	missingEvidence     int64
 	// acceptsAddresses: the ingester stores Health.Addresses.
 	acceptsAddresses bool
-	// acceptsPeers: the ingester stores events' peer process fields.
-	// accepted: a response has told what the ingester accepts.
-	acceptsPeers, accepted bool
-	warnedPeers            bool
+	// acceptsPeers, acceptsProbes: the ingester stores events' peer process
+	// fields and probe matches. accepted: a response has told what the
+	// ingester accepts.
+	acceptsPeers, acceptsProbes, accepted bool
+	warnedPeers, warnedProbes             bool
 }
 
 // heartbeatInterval keeps the central view of an idle collector fresh.
@@ -487,6 +488,15 @@ func (f *Forwarder) send(ctx context.Context) (bool, error) {
 			f.Logger.Warn("Ingester does not store a connection's second process; forwarding events without it", "url", f.URL)
 		}
 	}
+	if !f.acceptsProbes {
+		for i := range events {
+			events[i].Probe = ""
+		}
+		if !f.warnedProbes {
+			f.warnedProbes = true
+			f.Logger.Warn("Ingester does not store probe matches; forwarding events without them", "url", f.URL)
+		}
+	}
 	var body []byte
 	var missing int64
 	for {
@@ -577,7 +587,7 @@ func (f *Forwarder) postBody(ctx context.Context, body []byte) (bool, error) {
 	if response.StatusCode == http.StatusNoContent {
 		accepts := response.Header.Get(acceptsHeader)
 		f.acceptsAddresses = strings.Contains(accepts, acceptsAddresses)
-		f.acceptsPeers, f.accepted = strings.Contains(accepts, acceptsPeerProcesses), true
+		f.acceptsPeers, f.acceptsProbes, f.accepted = strings.Contains(accepts, acceptsPeerProcesses), strings.Contains(accepts, acceptsProbes), true
 		return false, nil
 	}
 	err = fmt.Errorf("ingest endpoint returned HTTP %d", response.StatusCode)

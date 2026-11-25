@@ -65,6 +65,7 @@ export const fields: Field[] = [
   { name: 'rcode', label: 'DNS result', group: 'Event', kind: 'enum', help: 'DNS response code of a DNS response; none on queries.', values: [
     { id: 'NOERROR', label: 'NOERROR (answered)' }, { id: 'NXDOMAIN', label: 'NXDOMAIN (no such name)' }, { id: 'SERVFAIL', label: 'SERVFAIL (server failure)' },
     { id: 'REFUSED', label: 'REFUSED' }, { id: 'FORMERR', label: 'FORMERR (malformed query)' }, { id: 'NOTIMP', label: 'NOTIMP (not implemented)' }, { id: 'none', label: 'none (queries)' }] },
+  { name: 'probe', label: 'health check probe', group: 'Event', kind: 'string', help: 'Pod probes a connection from the pod\'s node matches, as container:kinds (liveness, readiness, startup). probe != none selects health checks; probe = none hides them.' },
   ...sided('ip', 'address', 'ip', 'Address, or prefix such as 10.0.0.0/8,'),
   ...sided('port', 'port', 'number', 'Port, or range such as 1000-2000,'),
   ...sided('kind', 'kind', 'enum', 'Kubernetes kind', kinds),

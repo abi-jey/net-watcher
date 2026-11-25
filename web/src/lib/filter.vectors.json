@@ -57,5 +57,7 @@
   { "input": "rcode = (NXDOMAIN, \"Server Failure\")", "canonical": "rcode = (NXDOMAIN, \"Server Failure\")" },
   { "input": "src.command = kubelet and DST.Process.Pod = keda/keda-operator-1", "canonical": "src.process = kubelet and dst.process.pod = keda/keda-operator-1" },
   { "input": "-dst.process.container=keda-operator", "canonical": "not dst.process.container = keda-operator" },
-  { "input": "src.process.pod = none or process = (kubelet, keda)", "canonical": "src.process.pod = none or process = (kubelet, keda)" }
+  { "input": "src.process.pod = none or process = (kubelet, keda)", "canonical": "src.process.pod = none or process = (kubelet, keda)" },
+  { "input": "probe != none", "canonical": "probe != none" },
+  { "input": "probe ~ readiness or probe = none", "canonical": "probe ~ readiness or probe = none" }
 ]

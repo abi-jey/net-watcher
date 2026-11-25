@@ -97,7 +97,15 @@ func (f flowProcesses) apply(event *database.NetworkEvent) {
 	}
 	event.ProcessPID, event.ProcessCommand, event.ProcessSide = primary.PID, primary.Command, side
 	event.ProcessPod, event.ProcessContainer = primary.Pod, primary.Container
+	if f.hasSrc && !kubeletCommands[f.src.Command] {
+		// Another process opened it: whatever port it reached, not a probe.
+		event.Probe = ""
+	}
 }
+
+// kubeletCommands are the command names the kubelet runs under: its own
+// binary, or a distribution's single binary that embeds it.
+var kubeletCommands = map[string]bool{"kubelet": true, "kubelite": true, "k3s-server": true, "k3s-agent": true}
 
 type procEntry struct {
 	pid                 int

@@ -6,7 +6,7 @@
 // server accepting it.
 
 import type { NetworkEvent } from './api.ts';
-import { allOf, is, type Term } from './filter.ts';
+import type { Term } from './filter.ts';
 
 export interface EndProcess {
   command: string;
@@ -29,15 +29,49 @@ export function endProcesses(event: NetworkEvent): EndProcesses {
   return event.ProcessSide === 'src' ? { src: recorded, dst: peer } : { src: peer, dst: recorded };
 }
 
-/** Kubelet health checks: connections the kubelet opened to a pod (isHealthCheck as a filter). */
-export const healthChecks: Term = allOf([is('src.process', 'kubelet'), is('dst.kind', 'pod')])!;
+/** Health checks: connections matched to a pod's probes (isHealthCheck as a filter). */
+export const healthChecks: Term = { kind: 'compare', field: 'probe', op: '!=', values: ['none'] };
 
 /**
- * Whether the kubelet opened this connection to a pod: a liveness, readiness
- * or startup probe (or, rarely, a lifecycle hook) of a pod on its node.
+ * Whether this is a kubelet health check: a TCP connection from a pod's node
+ * to a port the pod's liveness, readiness or startup probe targets. The
+ * collector matches it from the pod's spec and drops the match when another
+ * process was seen opening the connection.
  */
 export function isHealthCheck(event: NetworkEvent): boolean {
-  return endProcesses(event).src?.command === 'kubelet' && event.DstKind === 'pod';
+  return !!event.Probe;
+}
+
+/** Command names the kubelet runs under, as the collector knows them. */
+const kubeletCommands = new Set(['kubelet', 'kubelite', 'k3s-server', 'k3s-agent']);
+
+export interface ProbeMatch { container: string; kinds: string[] }
+
+/** "a:liveness,readiness; b:startup" → the probes of each container. */
+export function probeMatches(probe: string | undefined): ProbeMatch[] {
+  if (!probe) return [];
+  return probe.split(';').map(part => part.trim()).filter(Boolean).map(part => {
+    const colon = part.indexOf(':');
+    const kinds = (colon < 0 ? part : part.slice(colon + 1)).split(',').filter(Boolean);
+    return { container: colon < 0 ? '' : part.slice(0, colon), kinds };
+  });
+}
+
+/** "liveness and readiness probes of keda-operator", for display. */
+export function describeProbe(probe: string | undefined): string {
+  return probeMatches(probe).map(({ container, kinds }) =>
+    `${words(kinds)} probe${kinds.length > 1 ? 's' : ''}${container ? ` of ${container}` : ''}`).join('; ');
+}
+
+/** How the health check was recognised: the kubelet seen, or matched from the probes alone. */
+export function healthCheckEvidence(event: NetworkEvent): string {
+  return kubeletCommands.has(endProcesses(event).src?.command ?? '')
+    ? 'The kubelet was seen opening it.'
+    : 'Matched from the pod\'s probes: the process that opened it was not identified (the kubelet\'s connections usually close before their socket can be looked up).';
+}
+
+function words(list: string[]): string {
+  return list.length < 2 ? list.join('') : `${list.slice(0, -1).join(', ')} and ${list[list.length - 1]}`;
 }
 
 /** "namespace/name" → { namespace, name }. */

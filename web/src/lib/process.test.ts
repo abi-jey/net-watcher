@@ -1,8 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { NetworkEvent } from './api.ts';
-import { format } from './filter.ts';
-import { endProcesses, healthChecks, isHealthCheck, splitPod } from './process.ts';
+import { format, negate } from './filter.ts';
+import { describeProbe, endProcesses, healthCheckEvidence, healthChecks, isHealthCheck, probeMatches, splitPod } from './process.ts';
 
 const event = (fields: Partial<NetworkEvent>): NetworkEvent => ({ ProcessSide: '', ProcessCommand: '', ProcessPID: 0, ProcessPod: '', ProcessContainer: '', DstKind: '', ...fields }) as NetworkEvent;
 
@@ -13,20 +13,32 @@ test('each end has its own process', () => {
     src: { command: 'kubelet', pid: 900, pod: '', container: '' },
     dst: { command: 'keda', pid: 4100, pod: 'keda/keda-operator-1', container: 'keda-operator' },
   });
-  assert.equal(isHealthCheck(check), true);
 
   // Only the accepting process known: nothing at the source.
   const accepted = event({ ProcessSide: 'dst', ProcessCommand: 'python', ProcessPod: 'base/base-server-1', ProcessContainer: 'base-server', DstKind: 'pod' });
   assert.deepEqual(endProcesses(accepted), { src: undefined, dst: { command: 'python', pid: 0, pod: 'base/base-server-1', container: 'base-server' } });
-  assert.equal(isHealthCheck(accepted), false);
-
   assert.deepEqual(endProcesses(event({})), {});
-  // The kubelet reaching a node address is not a pod health check.
-  assert.equal(isHealthCheck(event({ ProcessSide: 'src', ProcessCommand: 'kubelet', DstKind: 'node' })), false);
 });
 
-test('health checks as a filter', () => {
-  assert.equal(format(healthChecks), 'src.process = kubelet and dst.kind = pod');
+test('health checks are probe matches', () => {
+  const seen = event({ ProcessSide: 'src', ProcessCommand: 'kubelet', DstKind: 'pod', Probe: 'keda-operator:liveness,readiness' });
+  const matched = event({ ProcessSide: 'dst', ProcessCommand: 'keda', DstKind: 'pod', Probe: 'keda-operator:liveness,readiness' });
+  assert.equal(isHealthCheck(seen), true);
+  assert.equal(isHealthCheck(matched), true);
+  assert.match(healthCheckEvidence(seen), /kubelet was seen/);
+  assert.match(healthCheckEvidence(matched), /^Matched from the pod's probes/);
+  // The kubelet reaching a port no probe targets is not counted.
+  assert.equal(isHealthCheck(event({ ProcessSide: 'src', ProcessCommand: 'kubelet', DstKind: 'pod' })), false);
+  assert.equal(format(healthChecks), 'probe != none');
+  assert.equal(format(negate(healthChecks)), 'probe = none');
+});
+
+test('probe descriptions', () => {
+  assert.deepEqual(probeMatches('keda-operator:liveness,readiness; native-sidecar:readiness'), [
+    { container: 'keda-operator', kinds: ['liveness', 'readiness'] }, { container: 'native-sidecar', kinds: ['readiness'] }]);
+  assert.equal(describeProbe('keda-operator:liveness,readiness; sidecar:startup'), 'liveness and readiness probes of keda-operator; startup probe of sidecar');
+  assert.equal(describeProbe('api:liveness,readiness,startup'), 'liveness, readiness and startup probes of api');
+  assert.equal(describeProbe(''), '');
 });
 
 test('splitPod', () => {

@@ -30,6 +30,8 @@ const (
 	acceptsAddresses = "addresses"
 	// acceptsPeerProcesses: events may carry the PeerProcess* fields.
 	acceptsPeerProcesses = "peer-process"
+	// acceptsProbes: events may carry the Probe field.
+	acceptsProbes = "probe"
 
 	maxReportedAddresses = 256
 	// An address is credited to its node from addressBefore its first report

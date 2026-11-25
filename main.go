@@ -326,6 +326,7 @@ func main() {
 			return
 		}
 		w.SetContextLookup(inventory.Attribute)
+		w.SetProbeLookup(inventory.Probe)
 		if *kubernetes {
 			// The collector shares the host's network namespace: its interface
 			// addresses are this node's, including ones Kubernetes does not list.

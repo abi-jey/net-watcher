@@ -79,6 +79,7 @@ func filterEvents(t *testing.T, db *gorm.DB, now time.Time, n int, seed uint64) 
 			Route: pick("exit-node", "subnet-router", "via-tailnet", ""), TailnetPeer: pick("100.101.1.2", ""), TailnetPeerName: pick("phone.tail.ts.net.", ""),
 			Hostname: pick(names...), DNSQuery: pick(names...), TLSSNI: pick(names...), DNSResponseCode: pick("No Error", "Non-Existent Domain", "Server Failure ", ""),
 			ByteCount: number(0, 100, 1500, 2<<20), Duration: number(0, 250, 5000, 120_000),
+			Probe: pick("api:liveness", "api:liveness,readiness; sidecar:startup", ""),
 		}
 		// Process fields are set together, as the collector sets them.
 		if r.IntN(2) == 0 {
@@ -158,7 +159,7 @@ func randomFilter(r *rand.Rand, depth int) string {
 			pool = []string{"0", "53", "443", "40000", "1000-50000"}
 		}
 	default:
-		pool = []string{"abja", "desktop", "default", "kube-system", "Monitoring", "api-1", "curl", "demo/api-1", "api", "100.101.1.2", "phone.tail.ts.net.", "NXDOMAIN", "lxc12", "none"}
+		pool = []string{"abja", "desktop", "default", "kube-system", "Monitoring", "api-1", "curl", "demo/api-1", "api", "100.101.1.2", "phone.tail.ts.net.", "NXDOMAIN", "lxc12", "api:liveness", "none"}
 	}
 	ops := []string{"=", "!="}
 	if field.kind == numberField {
@@ -274,10 +275,11 @@ func TestFilterMeanings(t *testing.T) {
 	dns := database.NetworkEvent{EventType: "DNS", SrcKind: "pod", SrcNamespace: "kube-system", SrcName: "coredns-1", DstIP: "1.1.1.1", DstPort: 53, DNSQuery: "notexample.com", DNSResponseCode: "Non-Existent Domain"}
 	// The kubelet's health check of a pod on its node: both processes known.
 	probe := database.NetworkEvent{EventType: "TCP_START", SrcKind: "node", SrcIP: "10.0.1.155", DstKind: "pod", DstNamespace: "keda", DstIP: "10.0.1.84", DstPort: 8081,
-		ProcessCommand: "kubelet", ProcessSide: "src", PeerProcessCommand: "keda", PeerProcessPod: "keda/keda-operator-1", PeerProcessContainer: "keda-operator"}
-	// Only the accepting process known.
+		ProcessCommand: "kubelet", ProcessSide: "src", PeerProcessCommand: "keda", PeerProcessPod: "keda/keda-operator-1", PeerProcessContainer: "keda-operator",
+		Probe: "keda-operator:liveness,readiness"}
+	// Only the accepting process known; its port matches a probe.
 	accepted := database.NetworkEvent{EventType: "TCP_START", SrcIP: "10.0.0.31", DstKind: "pod", DstNamespace: "base", DstIP: "10.0.1.112", DstPort: 8000,
-		ProcessCommand: "python", ProcessSide: "dst", ProcessPod: "base/base-server-1", ProcessContainer: "base-server"}
+		ProcessCommand: "python", ProcessSide: "dst", ProcessPod: "base/base-server-1", ProcessContainer: "base-server", Probe: "base-server:readiness"}
 	for _, set := range []struct {
 		events map[string]*database.NetworkEvent
 		tests  [][2]string // Filter, the events it selects.
@@ -312,6 +314,10 @@ func TestFilterMeanings(t *testing.T) {
 			{"src.process.pod = none and src.process != none", "probe"}, // Opened by a process outside any pod.
 			{"process.side = src", "probe"},                             // The opener is known.
 			{"process.side = none", "external"},                         // No process known.
+			{"probe != none", "accepted probe"},                         // Health checks: probe matches.
+			{"probe = none", "external"},                                // Everything else.
+			{"probe ~ liveness", "probe"},                               // One kind of probe.
+			{"readiness", "accepted probe"},                             // Words search probe matches too.
 		}},
 	} {
 		for _, test := range set.tests {

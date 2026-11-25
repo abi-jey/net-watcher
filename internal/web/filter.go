@@ -157,6 +157,7 @@ var filterFields, filterAliases = func() (map[string]*filterField, map[string]st
 		"process.side": {kind: enumField, columns: []string{"process_side"}, values: sideValues},
 		"route":        {kind: enumField, columns: []string{"route"}, values: routeValues},
 		"peer":         {kind: stringField, columns: []string{"tailnet_peer", "tailnet_peer_name"}, entity: true},
+		"probe":        {kind: stringField, columns: []string{"probe"}},
 		"domain":       {kind: domainField, columns: []string{"hostname", "dns_query", "tls_sni"}, entity: true},
 		"rcode":        {kind: enumField, columns: []string{"dns_response_code"}, values: rcodeValues, shown: sortedKeys(rcodeNames)},
 		"bytes":        {kind: numberField, columns: []string{"byte_count"}, unit: byteCount},
@@ -197,7 +198,7 @@ func lookupField(name string) (string, *filterField, bool) {
 
 // textColumns are searched by a bare word.
 var textColumns = []string{"src_ip", "dst_ip", "hostname", "dns_query", "tls_sni", "src_name", "dst_name", "src_namespace", "dst_namespace", "src_workload", "dst_workload",
-	"process_command", "process_pod", "process_container", "peer_process_command", "peer_process_pod", "peer_process_container", "tailnet_peer", "tailnet_peer_name"}
+	"process_command", "process_pod", "process_container", "peer_process_command", "peer_process_pod", "peer_process_container", "tailnet_peer", "tailnet_peer_name", "probe"}
 
 // processEndColumns are virtual columns for the process at one end. An event
 // stores one process at process_side and, when both ends were on the
@@ -1042,6 +1043,8 @@ func eventText(e *database.NetworkEvent, column string) string {
 		return e.Route
 	case "tailnet_peer":
 		return e.TailnetPeer
+	case "probe":
+		return e.Probe
 	case "tailnet_peer_name":
 		return e.TailnetPeerName
 	case "hostname":

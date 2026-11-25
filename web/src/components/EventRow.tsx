@@ -3,7 +3,7 @@ import type { NetworkEvent } from '../lib/api.ts';
 import { bytes, dateTime, endpoint, isSet } from '../lib/format.ts';
 import { deviceName, eventLabel, family, interfaceRole, ipScope, rcodeName, routeInfo, scopeLabel, scopeTag } from '../lib/network.ts';
 import { describe, is, negate, type Term } from '../lib/filter.ts';
-import { endProcesses, healthChecks, isHealthCheck, splitPod, type EndProcess } from '../lib/process.ts';
+import { describeProbe, endProcesses, healthCheckEvidence, healthChecks, isHealthCheck, splitPod, type EndProcess } from '../lib/process.ts';
 import { href } from '../lib/hooks.ts';
 import { Attribution } from './ui.tsx';
 import { Icon } from './icons.tsx';
@@ -210,7 +210,7 @@ export function EventRow({ event, expanded, onToggle, onFilter, fresh }: { event
         <span className="ev-arrow" aria-label="to"><Icon name="arrow" size={14} /></span>
         <span className="ev-dst"><Endpoint side={dst} which="dst" name={dst.kind ? undefined : remoteName(event)} process={processes.dst} event={event} onFilter={onFilter} /></span>
         <span className="ev-detail">
-          {isHealthCheck(event) && <Tag className="ctx check" title={healthCheckHelp} condition={healthChecks} onFilter={onFilter}>health check</Tag>}
+          {isHealthCheck(event) && <Tag className="ctx check" title={`Health check: ${describeProbe(event.Probe)}, port ${event.DstPort}. ${healthCheckEvidence(event)} Select to show only or hide health checks.`} condition={healthChecks} onFilter={onFilter}>health check</Tag>}
           <Details event={event} onFilter={onFilter} />
           {route && <Tag className="ctx route" title={`${route.help}${event.TailnetPeer ? ` Device: ${event.TailnetPeerName || event.TailnetPeer}.` : ''}`} condition={is('route', event.Route)} onFilter={onFilter}>{route.label}{peer ? <span className="muted"> · {peer}</span> : null}</Tag>}
           <Tag className="ctx" title={`${event.Interface}: ${link.help}`} condition={link.id ? is('iface.type', link.id) : undefined} onFilter={onFilter}>{link.role}</Tag>
@@ -221,8 +221,6 @@ export function EventRow({ event, expanded, onToggle, onFilter, fresh }: { event
     </li>
   );
 }
-
-const healthCheckHelp = 'The kubelet opened this connection to a pod on its node: a liveness, readiness or startup probe (or a lifecycle hook). Select to show only or hide them.';
 
 function ProcessFacts({ process, which }: { process: EndProcess; which: 'src' | 'dst' }) {
   return <>
@@ -277,7 +275,7 @@ function EventDetails({ event }: { event: NetworkEvent }) {
             <dt>Collector</dt><dd>{event.CollectorID || 'local'}</dd>
             <dt>Interface</dt><dd><span className="mono">{event.Interface || '—'}</span> · {link.role}<div className="muted small">{link.help}</div></dd>
             {routeInfo(event.Route) && <><dt>Tailscale</dt><dd>{routeInfo(event.Route)!.label}{event.TailnetPeer ? ` for ${event.TailnetPeerName || event.TailnetPeer}` : ''}<div className="muted small">{routeInfo(event.Route)!.help}</div></dd></>}
-            {isHealthCheck(event) && <><dt>Purpose</dt><dd>Kubelet health check<div className="muted small">A liveness, readiness or startup probe the kubelet runs against a pod on its node (or a lifecycle hook).</div></dd></>}
+            {isHealthCheck(event) && <><dt>Purpose</dt><dd>Health check: {describeProbe(event.Probe)}, port {event.DstPort}<div className="muted small">{healthCheckEvidence(event)} The kubelet probes only pods on its own node, from the node's address.</div></dd></>}
             <dt>Protocol</dt><dd>{[event.Protocol, event.IPVersion ? `IPv${event.IPVersion}` : ''].filter(Boolean).join(' · ') || '—'}</dd>
             {!event.ProcessSide && <><dt>Process</dt><dd>{event.ProcessCommand ? <>{event.ProcessCommand}{event.ProcessPID ? <span className="muted"> · host PID {event.ProcessPID}</span> : null}</> : (event.Route === 'exit-node' || event.Route === 'subnet-router')
               ? <span className="muted">none: forwarded for a tailnet device, not opened by a process on this node</span>

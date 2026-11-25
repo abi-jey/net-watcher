@@ -6,11 +6,13 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/abja/net-watcher/internal/database"
+	"github.com/abja/net-watcher/internal/kube"
 	"github.com/charmbracelet/log"
 )
 
@@ -471,5 +473,68 @@ func TestHostSocketsAreQueriedFromTheKernel(t *testing.T) {
 	}
 	if a.tableReads.Load() != 0 || a.diagLookups.Load() < 3 {
 		t.Fatalf("tables read %d, kernel queries %d", a.tableReads.Load(), a.diagLookups.Load())
+	}
+}
+
+// Connections from a node to its pods' probe ports are matched against the
+// pods' probes; other connections are not looked up.
+func TestNodeToPodConnectionsAreMatchedToProbes(t *testing.T) {
+	sm := testManager(t)
+	sm.contextLookup = func(ip string, _ uint16, _ string, _ time.Time) kube.Attribution {
+		if ip == "10.0.1.155" {
+			return kube.Attribution{Kind: "node", Name: "abja"}
+		}
+		return kube.Attribution{Kind: "pod", Namespace: "keda", Name: ip}
+	}
+	var asked []string
+	sm.probeLookup = func(ip string, port uint16, node string, _ time.Time) string {
+		asked = append(asked, fmt.Sprintf("%s:%d from %s", ip, port, node))
+		if ip == "10.0.1.84" && port == 8081 && node == "abja" {
+			return "keda-operator:liveness,readiness"
+		}
+		return ""
+	}
+	sm.TrackTCP("lxc1", "[10.0.1.155]:44640", "[10.0.1.84]:8081", true, false, false, 60, false)
+	sm.TrackTCP("lxc1", "[10.0.1.155]:44650", "[10.0.1.84]:9999", true, false, false, 60, false)
+	sm.TrackTCP("lxc2", "[10.0.1.90]:5000", "[10.0.1.84]:8081", true, false, false, 60, false)
+	sm.flushEvents()
+	var events []database.NetworkEvent
+	if err := sm.db.Where("event_type = ?", database.EventTCPStart).Order("src_port").Find(&events).Error; err != nil {
+		t.Fatal(err)
+	}
+	probes := map[uint16]string{}
+	for _, e := range events {
+		probes[e.SrcPort] = e.Probe
+	}
+	if want := map[uint16]string{44640: "keda-operator:liveness,readiness", 44650: "", 5000: ""}; !reflect.DeepEqual(probes, want) {
+		t.Fatalf("probes by source port = %v, want %v", probes, want)
+	}
+	if want := []string{"10.0.1.84:8081 from abja", "10.0.1.84:9999 from abja"}; !reflect.DeepEqual(asked, want) {
+		t.Fatalf("looked up %v, want %v (pod to pod is not a probe)", asked, want)
+	}
+}
+
+// A probe match stands unless the connection's opener was identified as a
+// process other than the kubelet.
+func TestProbeMatchYieldsToAnotherObservedOpener(t *testing.T) {
+	kubelet := processIdentity{PID: 301, Command: "kubelet"}
+	server := processIdentity{PID: 200, Command: "python3", Pod: "demo/api-1", Container: "api"}
+	tunnel := processIdentity{PID: 900, Command: "cloudflared", Pod: "cloudflared/cloudflared-nrm9h", Container: "cloudflared"}
+	for _, c := range []struct {
+		name string
+		flow flowProcesses
+		keep bool
+	}{
+		{"the kubelet opened it", flowProcesses{src: kubelet, hasSrc: true, dst: server, hasDst: true}, true},
+		{"only the server is known", flowProcesses{dst: server, hasDst: true}, true},
+		{"no process known", flowProcesses{}, true},
+		{"a kubelet embedded in k3s", flowProcesses{src: processIdentity{PID: 7, Command: "k3s-agent"}, hasSrc: true}, true},
+		{"a host-network pod opened it", flowProcesses{src: tunnel, hasSrc: true, dst: server, hasDst: true}, false},
+	} {
+		event := database.NetworkEvent{Probe: "api:liveness"}
+		c.flow.apply(&event)
+		if kept := event.Probe != ""; kept != c.keep {
+			t.Errorf("%s: probe kept = %v, want %v", c.name, kept, c.keep)
+		}
 	}
 }

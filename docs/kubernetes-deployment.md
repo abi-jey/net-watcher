@@ -304,6 +304,22 @@ second's allowance left; otherwise it is skipped and counted as
 that lists `peer-process` in its `X-Net-Watcher-Accepts` response header, so
 an older ingester keeps receiving events it accepts (without them).
 
+The opener is the end most often missed: the source socket is looked up first,
+yet a kubelet health check typically lasts under a millisecond, and packets
+reach the collector in ring blocks up to 64 ms later, so the kubelet's socket
+has usually closed. The server's listener outlives the connection, so the
+accepting process is still found. Health checks are therefore recognised from
+the pods' specs instead: a TCP connection from a node to a port that the
+liveness, readiness or startup probe of a pod on that node targets (HTTP, TCP
+or gRPC; named ports resolved; probes of another host excluded) records
+`probe = container:kind[,kind]`. It is a match, not an observation: another
+process on the node reaching the same port looks the same on the wire, so the
+match is dropped when the opener is identified as a process other than the
+kubelet. Pods on the host network share the node's address and are not
+matched. The events page shows these as "health check", hidden with
+`probe = none`. Collectors send `probe` only to an ingester that lists `probe`
+in `X-Net-Watcher-Accepts`.
+
 A process running as another (non-root) user keeps `/proc/<pid>/fd` private to
 that user, which `CAP_SYS_PTRACE` does not override. For such sockets the
 socket table's owner uid is matched against the pod's processes: if every
@@ -433,7 +449,8 @@ processes and tailnet peers):
 The `f` parameter takes a filter expression combining any of these, with
 `src.`/`dst.` prefixes for one end; `src.process` is the process that opened
 the connection, `dst.process` the one that accepted it, and a bare `process`
-either. Invalid values are rejected with 400. A process identity (command, pod
+either; `probe != none` selects health checks and `probe = none` hides them.
+Invalid values are rejected with 400. A process identity (command, pod
 and container at one end) walks the partial indexes of recorded and peer
 processes, and a single route walks its own, so rare matches return quickly
 over long windows. In the UI, every tag in an event row (interface type, IP version, node,

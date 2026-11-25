@@ -114,6 +114,13 @@ type NetworkEvent struct {
 	PeerProcessCommand   string `json:",omitempty"`
 	PeerProcessPod       string `json:",omitempty"`
 	PeerProcessContainer string `json:",omitempty"`
+	// Probe marks a TCP connection from a node to a port that a pod on that
+	// node probes: "container:kind[,kind]" (liveness, readiness, startup),
+	// several containers joined by "; ". It is matched from the pod's spec,
+	// not observed: the kubelet's socket usually closes before it can be
+	// looked up. Cleared when the process that opened the connection was
+	// identified as another one. Omitted from JSON when unset.
+	Probe string `json:",omitempty"`
 
 	// Route marks traffic on a Tailscale interface that is not between two
 	// tailnet devices: "exit-node" (this node forwarded a tailnet device's
