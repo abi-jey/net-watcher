@@ -30,8 +30,10 @@ const (
 // observed, an upper bound whose precision depends on watch versus polling.
 type assignment struct {
 	endpoint Endpoint
-	start    time.Time
-	end      time.Time
+	// probes describes the pod's network probes by the port they connect to.
+	probes map[int]string
+	start  time.Time
+	end    time.Time
 }
 
 type podState struct {
@@ -175,6 +177,7 @@ func (h *podHistory) apply(object Object, deleted bool, owners map[string]Owner,
 		h.byUID[uid] = state
 	}
 	state.endpoint = podEndpoint(object, owners, at)
+	probes := podProbes(object)
 	state.lastSeen = at
 	current := map[string]bool{}
 	for _, ip := range ips {
@@ -190,10 +193,10 @@ func (h *podHistory) apply(object Object, deleted bool, owners map[string]Owner,
 		start = at
 	}
 	for _, ip := range ips {
-		if h.activeFor(uid, ip) == nil {
-			h.byIP[ip] = append(h.byIP[ip], &assignment{endpoint: state.endpoint, start: start})
+		if a := h.activeFor(uid, ip); a == nil {
+			h.byIP[ip] = append(h.byIP[ip], &assignment{endpoint: state.endpoint, probes: probes, start: start})
 		} else {
-			h.activeFor(uid, ip).endpoint = state.endpoint
+			a.endpoint, a.probes = state.endpoint, probes
 		}
 	}
 	state.ips = ips
@@ -273,16 +276,7 @@ func (h *podHistory) prune(now time.Time) {
 // resolve returns the pod holding ip at time at. With several candidates the
 // most recently started pod is returned as ambiguous with the others listed.
 func (h *podHistory) resolve(ip string, at time.Time) (Endpoint, string, bool) {
-	var matches []*assignment
-	for _, a := range h.byIP[ip] {
-		if a.start.After(at.Add(clockSkew)) {
-			continue
-		}
-		if !a.end.IsZero() && a.end.Add(clockSkew).Before(at) {
-			continue
-		}
-		matches = append(matches, a)
-	}
+	matches := h.holders(ip, at)
 	if len(matches) == 0 {
 		return Endpoint{}, "", false
 	}
@@ -295,6 +289,116 @@ func (h *podHistory) resolve(ip string, at time.Time) (Endpoint, string, bool) {
 		endpoint.Alternatives = append(endpoint.Alternatives, Candidate{Namespace: other.endpoint.Namespace, Name: other.endpoint.Name, UID: other.endpoint.UID})
 	}
 	return endpoint, ConfidenceAmbiguous, true
+}
+
+// holders are the pods that may have held ip at time at.
+func (h *podHistory) holders(ip string, at time.Time) []*assignment {
+	var matches []*assignment
+	for _, a := range h.byIP[ip] {
+		if a.start.After(at.Add(clockSkew)) {
+			continue
+		}
+		if !a.end.IsZero() && a.end.Add(clockSkew).Before(at) {
+			continue
+		}
+		matches = append(matches, a)
+	}
+	return matches
+}
+
+// Probe names the network probes that a connection from node to ip:port at
+// time at matches: the one pod holding ip then runs on node and probes that
+// port. The kubelet probes only its own node's pods, from the node's
+// addresses, so such a connection is likely one of its checks; another
+// process on the node reaching that port looks the same on the wire. The
+// result is "container:kind[,kind]" (liveness, readiness, startup), several
+// containers joined by "; ", or "" for no match, another node, or an address
+// that changed hands around that time.
+func (i *Index) Probe(ip string, port uint16, node string, at time.Time) string {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	holders := i.pods.holders(ip, at)
+	if node == "" || len(holders) != 1 || holders[0].endpoint.Node != node {
+		return ""
+	}
+	return holders[0].probes[int(port)]
+}
+
+// podProbes maps each port the pod's network probes connect to on its own
+// address to the containers and kinds of probe there.
+func podProbes(object Object) map[int]string {
+	byPort := map[int]map[string][]string{}
+	for _, container := range append(append([]Container{}, object.Spec.Containers...), object.Spec.InitContainers...) {
+		for _, probe := range []struct {
+			kind  string
+			probe *Probe
+		}{{"liveness", container.LivenessProbe}, {"readiness", container.ReadinessProbe}, {"startup", container.StartupProbe}} {
+			port := probePort(container, probe.probe)
+			if port <= 0 || port > 65535 {
+				continue
+			}
+			if byPort[port] == nil {
+				byPort[port] = map[string][]string{}
+			}
+			byPort[port][container.Name] = append(byPort[port][container.Name], probe.kind)
+		}
+	}
+	if len(byPort) == 0 {
+		return nil
+	}
+	probes := make(map[int]string, len(byPort))
+	for port, containers := range byPort {
+		var described []string
+		for _, name := range sortedNames(containers) {
+			described = append(described, name+":"+strings.Join(containers[name], ","))
+		}
+		probes[port] = strings.Join(described, "; ")
+	}
+	return probes
+}
+
+// probePort is the port a probe connects to on the pod's address; 0 for an
+// exec probe, a probe of another host, or a port name the container lacks
+// (the kubelet then fails the probe without connecting).
+func probePort(container Container, probe *Probe) int {
+	var target *ProbeTarget
+	switch {
+	case probe == nil:
+		return 0
+	case probe.GRPC != nil:
+		return probe.GRPC.Port
+	case probe.HTTPGet != nil:
+		target = probe.HTTPGet
+	case probe.TCPSocket != nil:
+		target = probe.TCPSocket
+	default:
+		return 0
+	}
+	if target.Host != "" {
+		return 0
+	}
+	var number int
+	if json.Unmarshal(target.Port, &number) == nil {
+		return number
+	}
+	var name string
+	if json.Unmarshal(target.Port, &name) == nil {
+		for _, port := range container.Ports {
+			if port.Name == name {
+				return port.ContainerPort
+			}
+		}
+	}
+	return 0
+}
+
+func sortedNames[V any](m map[string]V) []string {
+	names := make([]string, 0, len(m))
+	for name := range m {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }
 
 // PodWatcher is implemented by sources that can stream pod changes.

@@ -166,7 +166,7 @@ func (r *Receiver) handleBatch(w http.ResponseWriter, request *http.Request) {
 		http.Error(w, "could not store ingest batch", http.StatusInternalServerError)
 		return
 	}
-	w.Header().Set(acceptsHeader, acceptsAddresses)
+	w.Header().Set(acceptsHeader, acceptsAddresses+", "+acceptsPeerProcesses+", "+acceptsProbes)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -385,6 +385,11 @@ type Forwarder struct {
 	missingEvidence     int64
 	// acceptsAddresses: the ingester stores Health.Addresses.
 	acceptsAddresses bool
+	// acceptsPeers, acceptsProbes: the ingester stores events' peer process
+	// fields and probe matches. accepted: a response has told what the
+	// ingester accepts.
+	acceptsPeers, acceptsProbes, accepted bool
+	warnedPeers, warnedProbes             bool
 }
 
 // heartbeatInterval keeps the central view of an idle collector fresh.
@@ -469,6 +474,29 @@ func (f *Forwarder) send(ctx context.Context) (bool, error) {
 		}
 		return false, err
 	}
+	if !f.accepted {
+		// Learn what the ingester accepts before sending it events.
+		if _, err := f.post(ctx, Batch{CollectorID: f.CollectorID, Events: []database.NetworkEvent{}, Resolutions: []database.DNSResolution{}, Health: f.health()}); err != nil {
+			return false, err
+		}
+		f.lastHeartbeat = time.Now()
+	}
+	if !f.acceptsPeers {
+		withoutPeers(events)
+		if !f.warnedPeers {
+			f.warnedPeers = true
+			f.Logger.Warn("Ingester does not store a connection's second process; forwarding events without it", "url", f.URL)
+		}
+	}
+	if !f.acceptsProbes {
+		for i := range events {
+			events[i].Probe = ""
+		}
+		if !f.warnedProbes {
+			f.warnedProbes = true
+			f.Logger.Warn("Ingester does not store probe matches; forwarding events without them", "url", f.URL)
+		}
+	}
 	var body []byte
 	var missing int64
 	for {
@@ -506,6 +534,14 @@ func (f *Forwarder) send(ctx context.Context) (bool, error) {
 	f.consecutiveFailures, f.lastError = 0, ""
 	f.limit = min(maxEvents, f.limit*2)
 	return true, nil
+}
+
+// withoutPeers clears the peer process fields, which an ingester that
+// predates them rejects as unknown.
+func withoutPeers(events []database.NetworkEvent) {
+	for i := range events {
+		events[i].PeerProcessPID, events[i].PeerProcessCommand, events[i].PeerProcessPod, events[i].PeerProcessContainer = 0, "", "", ""
+	}
 }
 
 // skip permanently passes over one event the ingester cannot accept, replacing
@@ -549,7 +585,9 @@ func (f *Forwarder) postBody(ctx context.Context, body []byte) (bool, error) {
 	}
 	_ = response.Body.Close()
 	if response.StatusCode == http.StatusNoContent {
-		f.acceptsAddresses = strings.Contains(response.Header.Get(acceptsHeader), acceptsAddresses)
+		accepts := response.Header.Get(acceptsHeader)
+		f.acceptsAddresses = strings.Contains(accepts, acceptsAddresses)
+		f.acceptsPeers, f.acceptsProbes, f.accepted = strings.Contains(accepts, acceptsPeerProcesses), strings.Contains(accepts, acceptsProbes), true
 		return false, nil
 	}
 	err = fmt.Errorf("ingest endpoint returned HTTP %d", response.StatusCode)

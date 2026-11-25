@@ -104,6 +104,23 @@ type NetworkEvent struct {
 	// host-network pods; empty for host processes outside pods.
 	ProcessPod       string
 	ProcessContainer string // Container name from the pod's status.
+	// The process at the other end, when both ends' sockets are on the
+	// collector's node (a kubelet health check of a local pod, two pods on
+	// one node): the same fields for the side opposite ProcessSide. When
+	// both are known, ProcessSide is "src", so these name the process that
+	// accepted the connection. Omitted from JSON when unset, so batches
+	// without them match what older ingesters accept.
+	PeerProcessPID       int    `json:",omitempty"`
+	PeerProcessCommand   string `json:",omitempty"`
+	PeerProcessPod       string `json:",omitempty"`
+	PeerProcessContainer string `json:",omitempty"`
+	// Probe marks a TCP connection from a node to a port that a pod on that
+	// node probes: "container:kind[,kind]" (liveness, readiness, startup),
+	// several containers joined by "; ". It is matched from the pod's spec,
+	// not observed: the kubelet's socket usually closes before it can be
+	// looked up. Cleared when the process that opened the connection was
+	// identified as another one. Omitted from JSON when unset.
+	Probe string `json:",omitempty"`
 
 	// Route marks traffic on a Tailscale interface that is not between two
 	// tailnet devices: "exit-node" (this node forwarded a tailnet device's

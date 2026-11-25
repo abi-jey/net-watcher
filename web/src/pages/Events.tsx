@@ -3,8 +3,9 @@ import { ApiError, getJSON, url, type EventsResponse, type HealthResponse, type 
 import { setQuery, useResource } from '../lib/hooks.ts';
 import { windowRange } from '../lib/window.ts';
 import { dateTime } from '../lib/format.ts';
-import { addCondition, allOf, conditions, format, fromLegacy, legacyParams, tryParse, type Compare } from '../lib/filter.ts';
+import { addCondition, allOf, conditions, format, fromLegacy, legacyParams, tryParse, type Term } from '../lib/filter.ts';
 import { Pacer } from '../lib/pacer.ts';
+import { endProcesses } from '../lib/process.ts';
 import { Banner, Empty, ErrorBanner, Spinner } from '../components/ui.tsx';
 import { EventRow } from '../components/EventRow.tsx';
 import { FilterBar, type Suggestions } from '../components/FilterBar.tsx';
@@ -45,9 +46,14 @@ function suggestionsFrom(events: NetworkEvent[], nodes: string[]): Suggestions {
     add('workload', e.SrcWorkload, e.DstWorkload);
     add('ip', e.SrcIP, e.DstIP);
     add('port', e.DstPort);
-    add('process', e.ProcessCommand);
-    add('process.pod', e.ProcessPod);
-    add('process.container', e.ProcessContainer);
+    const ends = endProcesses(e);
+    for (const end of ['src', 'dst'] as const) {
+      const process = ends[end];
+      if (!process) continue;
+      add('process', process.command); add(`${end}.process`, process.command);
+      add('process.pod', process.pod); add(`${end}.process.pod`, process.pod);
+      add('process.container', process.container); add(`${end}.process.container`, process.container);
+    }
     add('iface', e.Interface);
     add('domain', e.Hostname?.replace(/\.$/, ''), e.TLSSNI, e.DNSQuery?.replace(/\.$/, ''));
     add('rcode', e.DNSResponseCode);
@@ -76,7 +82,7 @@ export function Events({ query }: { query: URLSearchParams }) {
   }, [search.legacy, search.window, search.text]);
 
   const apply = (text: string, window = search.window) => setQuery(['events'], { w: window, f: text || undefined });
-  const onFilter = (condition: Compare) => {
+  const onFilter = (condition: Term) => {
     setExpanded(undefined);
     apply(format(addCondition(tryParse(search.text).term, condition)));
   };

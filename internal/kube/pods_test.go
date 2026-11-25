@@ -235,3 +235,54 @@ func TestWatchedPodResolvesDeploymentBeforeReplicaSetIsListed(t *testing.T) {
 		t.Fatalf("unlabelled ReplicaSet guessed: %q", got.Workload)
 	}
 }
+
+// A connection from a pod's own node to a port its probes target matches
+// those probes, decoded from the API's JSON as a list or watch delivers it.
+func TestProbesMatchConnectionsFromThePodsNode(t *testing.T) {
+	const body = `{"kind":"Pod","metadata":{"name":"keda-operator-1","namespace":"keda","uid":"p1","creationTimestamp":"2026-01-01T00:00:00Z"},
+	"spec":{"nodeName":"abja","containers":[
+		{"name":"keda-operator","ports":[{"name":"probes","containerPort":8081,"protocol":"TCP"}],
+		 "livenessProbe":{"httpGet":{"path":"/healthz","port":"probes","scheme":"HTTP"},"periodSeconds":10},
+		 "readinessProbe":{"httpGet":{"path":"/readyz","port":8081}}},
+		{"name":"sidecar","readinessProbe":{"tcpSocket":{"port":9000}},"livenessProbe":{"exec":{"command":["true"]}},"startupProbe":{"grpc":{"port":9090}}},
+		{"name":"elsewhere","livenessProbe":{"httpGet":{"host":"192.0.2.1","port":80}}},
+		{"name":"misnamed","livenessProbe":{"tcpSocket":{"port":"missing"}}}],
+	 "initContainers":[{"name":"native-sidecar","restartPolicy":"Always","readinessProbe":{"tcpSocket":{"port":8081}}}]},
+	"status":{"phase":"Running","podIP":"10.0.1.84"}}`
+	var object Object
+	if err := json.Unmarshal([]byte(body), &object); err != nil {
+		t.Fatal(err)
+	}
+	index := New(nil)
+	at := time.Date(2026, 1, 1, 1, 0, 0, 0, time.UTC)
+	index.Replace([]Object{object}, at)
+	for _, c := range []struct {
+		port uint16
+		node string
+		at   time.Time
+		want string
+	}{
+		{8081, "abja", at, "keda-operator:liveness,readiness; native-sidecar:readiness"},
+		{9000, "abja", at, "sidecar:readiness"},
+		{9090, "abja", at, "sidecar:startup"},
+		{80, "abja", at, ""},                                              // probes another host
+		{8080, "abja", at, ""},                                            // no probe there
+		{8081, "desktop", at, ""},                                         // the kubelet probes only its own node's pods
+		{8081, "", at, ""},                                                // the source is not a known node
+		{8081, "abja", time.Date(2025, 12, 31, 0, 0, 0, 0, time.UTC), ""}, // before the pod existed
+	} {
+		if got := index.Probe("10.0.1.84", c.port, c.node, c.at); got != c.want {
+			t.Errorf("Probe(%d from %q at %s) = %q, want %q", c.port, c.node, c.at.Format(time.RFC3339), got, c.want)
+		}
+	}
+
+	// An address that changed hands around that time matches nothing.
+	other := pod("p2", "other", at.Add(-time.Hour), "Running", "10.0.1.84")
+	other.Spec.NodeName = "abja"
+	index.mu.Lock()
+	index.pods.apply(other, false, index.owners, at)
+	index.mu.Unlock()
+	if got := index.Probe("10.0.1.84", 8081, "abja", at); got != "" {
+		t.Errorf("ambiguous address matched %q", got)
+	}
+}

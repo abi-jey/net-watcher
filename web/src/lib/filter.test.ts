@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { addCondition, format, fromLegacy, hiddenTypes, negate, parse, toggleType, tryParse, type Compare } from './filter.ts';
+import { addCondition, allOf, format, fromLegacy, hiddenTypes, negate, parse, processIdentity, toggleType, tryParse, type Compare } from './filter.ts';
 
 // The parse cases the server's tests read too (internal/web/filter_test.go).
 const vectors: { input: string; canonical?: string; error?: string; serverOnly?: boolean }[] =
@@ -57,6 +57,15 @@ test('negation is written simply', () => {
 
 test('older link parameters become a filter', () => {
   const terms = fromLegacy(new URLSearchParams('process=python3&processPod=demo%2Fapi-1&collector=node-a&type=DNS,TLS_SNI&withProcess=yes&route=any&q=api'));
-  assert.equal(terms.map(t => format(t)).join(' and '),
-    'node = node-a and type = (DNS, TLS_SNI) and process = python3 and process.pod = demo/api-1 and process.container = none and process.side != none and route != none and api');
+  assert.equal(format(allOf(terms)),
+    'node = node-a and type = (DNS, TLS_SNI) and (src.process = python3 and src.process.pod = demo/api-1 and src.process.container = none' +
+    ' or dst.process = python3 and dst.process.pod = demo/api-1 and dst.process.container = none) and process.side != none and route != none and api');
+});
+
+test('a process identity holds at one end', () => {
+  assert.equal(format(processIdentity('kubelet', ['none'], 'none', ['src'])), 'src.process = kubelet and src.process.pod = none and src.process.container = none');
+  assert.equal(format(processIdentity('keda', ['keda/a', 'keda/b'], 'keda-operator', ['dst'])), 'dst.process = keda and dst.process.pod = (keda/a, keda/b) and dst.process.container = keda-operator');
+  // Parsed back, the text is the same condition.
+  const text = format(processIdentity('python', ['none'], 'none', ['src', 'dst']));
+  assert.equal(format(parse(text)), text);
 });

@@ -6,11 +6,13 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/abja/net-watcher/internal/database"
+	"github.com/abja/net-watcher/internal/kube"
 	"github.com/charmbracelet/log"
 )
 
@@ -103,7 +105,9 @@ func writeFakeProc(t *testing.T, root string, processes []fakeProcess) {
 func newTestAttributor(t *testing.T) (*processAttributor, chan database.NetworkEvent) {
 	t.Helper()
 	root := t.TempDir()
-	hostTables := map[string]string{"tcp": socketRow("192.0.2.10", 51000, "140.82.121.34", 443, "01", "900")}
+	hostTables := map[string]string{"tcp": socketRow("192.0.2.10", 51000, "140.82.121.34", 443, "01", "900") +
+		// The kubelet's health check of the pod's server.
+		socketRow("192.0.2.10", 52000, "10.2.0.8", 8080, "01", "901")}
 	podTables := map[string]string{
 		"tcp": socketRow("10.2.0.8", 40000, "10.96.0.1", 443, "01", "700") + socketRow("0.0.0.0", 8080, "0.0.0.0", 0, "0A", "701"),
 		// The sidecar's dual-stack socket shows a v4 flow v4-mapped.
@@ -118,6 +122,7 @@ func newTestAttributor(t *testing.T) (*processAttributor, chan database.NetworkE
 		{pid: 200, netns: "net:[2]", cgroup: podCgroup(testContainerID), comm: "python3", sockets: []string{"700", "701", "703"}, tables: podTables},
 		{pid: 201, netns: "net:[2]", cgroup: podCgroup(testSidecarID), comm: "envoy", sockets: []string{"702"}, tables: podTables},
 		{pid: 300, netns: "net:[1]", cgroup: "0::/system.slice/k3s.service\n", comm: "k3s-server", sockets: []string{"900"}, tables: hostTables},
+		{pid: 301, netns: "net:[1]", cgroup: "0::/system.slice/kubelet.service\n", comm: "kubelet", sockets: []string{"901"}, tables: hostTables},
 	})
 	events := make(chan database.NetworkEvent, 16)
 	a := &processAttributor{
@@ -251,8 +256,51 @@ func TestProcessAttributionInPodAndHostNamespaces(t *testing.T) {
 	}
 }
 
+// A connection between two processes on this node, such as the kubelet's
+// health check of a local pod, records both: the opener and the acceptor.
+func TestProcessAttributionRecordsBothLocalEnds(t *testing.T) {
+	a, events := newTestAttributor(t)
+	check := database.NetworkEvent{EventType: database.EventTCPStart, SrcIP: "192.0.2.10", SrcPort: 52000, DstIP: "10.2.0.8", DstPort: 8080, SrcKind: "node"}
+	podSide(&check, "dst")
+	got := attributed(t, a, events, check)
+	if got.ProcessSide != "src" || got.ProcessCommand != "kubelet" || got.ProcessPID != 301 || got.ProcessPod != "" {
+		t.Fatalf("opener: side=%q command=%q pid=%d pod=%q", got.ProcessSide, got.ProcessCommand, got.ProcessPID, got.ProcessPod)
+	}
+	if got.PeerProcessCommand != "python3" || got.PeerProcessPID != 200 || got.PeerProcessPod != "demo/api-1" || got.PeerProcessContainer != "api" {
+		t.Fatalf("acceptor: command=%q pid=%d pod=%q container=%q", got.PeerProcessCommand, got.PeerProcessPID, got.PeerProcessPod, got.PeerProcessContainer)
+	}
+	if a.bothEnds.Load() != 1 {
+		t.Fatalf("both_ends = %d, want 1", a.bothEnds.Load())
+	}
+	// The client's end is looked up first, while its socket still exists;
+	// the server's listener outlives the connection.
+	if c := a.candidates(check, time.Now(), time.Now()); len(c) != 2 || c[0].side != "src" || !c[0].host {
+		t.Fatalf("lookup order: %+v", c)
+	}
+	// The server's reply carries the same two processes, its own end first.
+	reply := database.NetworkEvent{EventType: database.EventTCPEnd, SrcIP: "10.2.0.8", SrcPort: 8080, DstIP: "192.0.2.10", DstPort: 52000}
+	if a.handle(&reply) || reply.ProcessSide != "src" || reply.ProcessCommand != "python3" || reply.PeerProcessCommand != "kubelet" || reply.PeerProcessPod != "" {
+		t.Fatalf("reply: %+v", reply)
+	}
+}
+
+func TestSecondEndLookupsNeedSpareBudget(t *testing.T) {
+	now := time.Now()
+	b := newWorkBudget(10*time.Millisecond, now)
+	if !b.spare(now) {
+		t.Fatal("a full budget has room to spare")
+	}
+	b.spend(7 * time.Millisecond)
+	if b.spare(now) || !b.ready(now) {
+		t.Fatal("3ms left of 10ms/s: first lookups may run, second-end lookups may not")
+	}
+	if !b.spare(now.Add(300 * time.Millisecond)) {
+		t.Fatal("the allowance refills")
+	}
+}
+
 func TestProcessAttributionNeverBlocksPackets(t *testing.T) {
-	a := &processAttributor{jobs: make(chan processJob, 1), flows: map[string]processIdentity{}, logger: log.Default()}
+	a := &processAttributor{jobs: make(chan processJob, 1), flows: map[string]flowProcesses{}, logger: log.Default()}
 	event := database.NetworkEvent{EventType: database.EventTCPStart, SrcKind: "pod", SrcUID: "x"}
 	if !a.handle(&event) || a.handle(&event) || a.queueFull.Load() != 1 {
 		t.Fatal("a full queue blocked or was not counted")
@@ -392,7 +440,7 @@ func TestHostSocketsAreQueriedFromTheKernel(t *testing.T) {
 		{pid: 400, netns: self, cgroup: "0::/system.slice/fetch.service\n", comm: "fetch",
 			sockets: []string{fmt.Sprint(socketInode(t, client.(*net.TCPConn)))}},
 		{pid: 401, netns: self, cgroup: "0::/system.slice/web.service\n", comm: "web",
-			sockets: []string{fmt.Sprint(socketInode(t, listener.(*net.TCPListener)))}},
+			sockets: []string{fmt.Sprint(socketInode(t, listener.(*net.TCPListener))), fmt.Sprint(socketInode(t, server.(*net.TCPConn)))}},
 	})
 	events := make(chan database.NetworkEvent, 4)
 	// This tests which lookups run, not how fast: a shared CI runner under the
@@ -412,8 +460,9 @@ func TestHostSocketsAreQueriedFromTheKernel(t *testing.T) {
 
 	clientAddr, serverAddr := client.LocalAddr().(*net.TCPAddr), client.RemoteAddr().(*net.TCPAddr)
 	connection := database.NetworkEvent{EventType: database.EventTCPStart, SrcIP: "127.0.0.1", SrcPort: uint16(clientAddr.Port), DstIP: "127.0.0.1", DstPort: uint16(serverAddr.Port)}
-	if got := attributed(t, a, events, connection); got.ProcessPID != 400 || got.ProcessCommand != "fetch" || got.ProcessSide != "src" {
-		t.Fatalf("host client: pid=%d command=%q side=%q", got.ProcessPID, got.ProcessCommand, got.ProcessSide)
+	if got := attributed(t, a, events, connection); got.ProcessPID != 400 || got.ProcessCommand != "fetch" || got.ProcessSide != "src" ||
+		got.PeerProcessPID != 401 || got.PeerProcessCommand != "web" {
+		t.Fatalf("host client and server: pid=%d command=%q side=%q, peer pid=%d command=%q", got.ProcessPID, got.ProcessCommand, got.ProcessSide, got.PeerProcessPID, got.PeerProcessCommand)
 	}
 	// A connection from a port nothing holds (forwarded traffic after NAT)
 	// reaches the server's listener on the receiving side only.
@@ -424,5 +473,68 @@ func TestHostSocketsAreQueriedFromTheKernel(t *testing.T) {
 	}
 	if a.tableReads.Load() != 0 || a.diagLookups.Load() < 3 {
 		t.Fatalf("tables read %d, kernel queries %d", a.tableReads.Load(), a.diagLookups.Load())
+	}
+}
+
+// Connections from a node to its pods' probe ports are matched against the
+// pods' probes; other connections are not looked up.
+func TestNodeToPodConnectionsAreMatchedToProbes(t *testing.T) {
+	sm := testManager(t)
+	sm.contextLookup = func(ip string, _ uint16, _ string, _ time.Time) kube.Attribution {
+		if ip == "10.0.1.155" {
+			return kube.Attribution{Kind: "node", Name: "abja"}
+		}
+		return kube.Attribution{Kind: "pod", Namespace: "keda", Name: ip}
+	}
+	var asked []string
+	sm.probeLookup = func(ip string, port uint16, node string, _ time.Time) string {
+		asked = append(asked, fmt.Sprintf("%s:%d from %s", ip, port, node))
+		if ip == "10.0.1.84" && port == 8081 && node == "abja" {
+			return "keda-operator:liveness,readiness"
+		}
+		return ""
+	}
+	sm.TrackTCP("lxc1", "[10.0.1.155]:44640", "[10.0.1.84]:8081", true, false, false, 60, false)
+	sm.TrackTCP("lxc1", "[10.0.1.155]:44650", "[10.0.1.84]:9999", true, false, false, 60, false)
+	sm.TrackTCP("lxc2", "[10.0.1.90]:5000", "[10.0.1.84]:8081", true, false, false, 60, false)
+	sm.flushEvents()
+	var events []database.NetworkEvent
+	if err := sm.db.Where("event_type = ?", database.EventTCPStart).Order("src_port").Find(&events).Error; err != nil {
+		t.Fatal(err)
+	}
+	probes := map[uint16]string{}
+	for _, e := range events {
+		probes[e.SrcPort] = e.Probe
+	}
+	if want := map[uint16]string{44640: "keda-operator:liveness,readiness", 44650: "", 5000: ""}; !reflect.DeepEqual(probes, want) {
+		t.Fatalf("probes by source port = %v, want %v", probes, want)
+	}
+	if want := []string{"10.0.1.84:8081 from abja", "10.0.1.84:9999 from abja"}; !reflect.DeepEqual(asked, want) {
+		t.Fatalf("looked up %v, want %v (pod to pod is not a probe)", asked, want)
+	}
+}
+
+// A probe match stands unless the connection's opener was identified as a
+// process other than the kubelet.
+func TestProbeMatchYieldsToAnotherObservedOpener(t *testing.T) {
+	kubelet := processIdentity{PID: 301, Command: "kubelet"}
+	server := processIdentity{PID: 200, Command: "python3", Pod: "demo/api-1", Container: "api"}
+	tunnel := processIdentity{PID: 900, Command: "cloudflared", Pod: "cloudflared/cloudflared-nrm9h", Container: "cloudflared"}
+	for _, c := range []struct {
+		name string
+		flow flowProcesses
+		keep bool
+	}{
+		{"the kubelet opened it", flowProcesses{src: kubelet, hasSrc: true, dst: server, hasDst: true}, true},
+		{"only the server is known", flowProcesses{dst: server, hasDst: true}, true},
+		{"no process known", flowProcesses{}, true},
+		{"a kubelet embedded in k3s", flowProcesses{src: processIdentity{PID: 7, Command: "k3s-agent"}, hasSrc: true}, true},
+		{"a host-network pod opened it", flowProcesses{src: tunnel, hasSrc: true, dst: server, hasDst: true}, false},
+	} {
+		event := database.NetworkEvent{Probe: "api:liveness"}
+		c.flow.apply(&event)
+		if kept := event.Probe != ""; kept != c.keep {
+			t.Errorf("%s: probe kept = %v, want %v", c.name, kept, c.keep)
+		}
 	}
 }

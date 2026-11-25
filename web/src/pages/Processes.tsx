@@ -3,7 +3,7 @@ import { ApiError, url, type PodsResponse, type PodsWarming, type ProcessesRespo
 import { rollupProcesses, splitWorkload, type ProcessRow } from '../lib/rollup.ts';
 import { href, setQuery, useResource } from '../lib/hooks.ts';
 import { windowRange } from '../lib/window.ts';
-import { allOf, format, is } from '../lib/filter.ts';
+import { allOf, format, is, processIdentity, type Term } from '../lib/filter.ts';
 import { bytes, count, dateTime, time } from '../lib/format.ts';
 import { Badge, Banner, Empty, ErrorBanner, Spinner, Stat, UpdatedAt, WindowSelect } from '../components/ui.tsx';
 
@@ -13,9 +13,15 @@ function percent(part: number, whole: number): string {
   return `${value >= 10 ? Math.round(value) : value.toFixed(1)}%`;
 }
 
+/**
+ * Events of the process: its command, pods and container at the end where
+ * it took part (the source when it opened connections, the destination when
+ * it accepted them), so the other end's process cannot match half of it.
+ */
 function eventsLink(process: ProcessRow, window: string): string {
   const pods = process.pods.length ? process.pods : ['none'];
-  const conditions = [is('process', process.command), is('process.pod', ...pods), is('process.container', process.container || 'none')];
+  const ends: ('src' | 'dst')[] = process.opened && !process.accepted ? ['src'] : process.accepted && !process.opened ? ['dst'] : ['src', 'dst'];
+  const conditions: Term[] = [processIdentity(process.command, pods, process.container || 'none', ends)];
   if (process.collector) conditions.push(is('node', process.collector));
   return href(['events'], { w: window, f: format(allOf(conditions)) });
 }

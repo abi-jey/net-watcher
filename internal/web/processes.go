@@ -58,6 +58,9 @@ type processRow struct {
 	Collector, Side, Pod, Namespace, Container, Command string
 	First, Last                                         int64
 	Events, Connections, Bytes                          int64
+	// PeerConnections: of Connections, those where the process was the
+	// event's peer, whose flows are already counted for the other end.
+	PeerConnections int64
 }
 
 func (s *Server) handleProcesses(w http.ResponseWriter, r *http.Request) {
@@ -80,7 +83,8 @@ func (s *Server) handleProcesses(w http.ResponseWriter, r *http.Request) {
 	case status.Ready:
 		from, to = from.Truncate(time.Hour), to.Add(time.Hour-time.Nanosecond).Truncate(time.Hour)
 		query := `SELECT collector_id AS collector, side, pod, MAX(namespace) AS namespace, container, command,
-			MIN(first_seen) AS first, MAX(last_seen) AS last, SUM(event_count) AS events, SUM(connections) AS connections, SUM(byte_count) AS bytes
+			MIN(first_seen) AS first, MAX(last_seen) AS last, SUM(event_count) AS events, SUM(connections) AS connections,
+			COALESCE(SUM(peer_connections), 0) AS peer_connections, SUM(byte_count) AS bytes
 			FROM hourly_processes WHERE hour >= ? AND hour < ?`
 		args := []interface{}{from.Unix(), to.Unix()}
 		if namespace != "" {
@@ -97,27 +101,35 @@ func (s *Server) handleProcesses(w http.ResponseWriter, r *http.Request) {
 		}
 	case to.Sub(from) <= podRawMaxWindow:
 		granularity = "event"
-		query := `SELECT collector_id AS collector, process_side AS side, process_pod AS pod, process_container AS container, process_command AS command,
-			MIN(timestamp) AS first_text, MAX(timestamp) AS last_text, COUNT(*) AS events,
-			SUM(event_type IN ('TCP_START', 'UDP_START')) AS connections, SUM(COALESCE(byte_count, 0)) AS bytes
-			FROM network_events WHERE process_side > '' AND timestamp >= ? AND timestamp < ?`
-		args := []interface{}{from, to}
+		// Each event counts for its process and, when recorded, the peer
+		// process at the other end, as the hourly summary does.
+		podFilter, args := "", []interface{}{from, to, from, to}
 		if namespace != "" {
-			query += " AND process_pod LIKE ?"
-			args = append(args, namespace+"/%")
+			podFilter, args = " AND pod LIKE ?", append(args, namespace+"/%")
 		}
-		query += " GROUP BY collector_id, process_side, process_pod, process_container, process_command LIMIT ?"
+		query := `SELECT collector, side, pod, container, command, MIN(timestamp) AS first_text, MAX(timestamp) AS last_text, COUNT(*) AS events,
+			SUM(event_type IN ('TCP_START', 'UDP_START')) AS connections, SUM(peer AND event_type IN ('TCP_START', 'UDP_START')) AS peer_connections,
+			SUM(COALESCE(byte_count, 0)) AS bytes FROM (
+				SELECT collector_id AS collector, process_side AS side, process_pod AS pod, process_container AS container, process_command AS command,
+					timestamp, event_type, byte_count, 0 AS peer
+				FROM network_events WHERE process_side > '' AND timestamp >= ? AND timestamp < ?
+				UNION ALL
+				SELECT collector_id, CASE process_side WHEN 'src' THEN 'dst' ELSE 'src' END, peer_process_pod, peer_process_container, peer_process_command,
+					timestamp, event_type, byte_count, 1
+				FROM network_events WHERE peer_process_command > '' AND process_side > '' AND timestamp >= ? AND timestamp < ?
+			) WHERE 1` + podFilter + " GROUP BY collector, side, pod, container, command LIMIT ?"
 		args = append(args, 2*processListMaxRows+1)
 		var raw []struct {
 			Collector, Side, Pod, Container, Command string
 			FirstText, LastText                      string
-			Events, Connections, Bytes               int64
+			Events, Connections, PeerConnections     int64
+			Bytes                                    int64
 		}
 		if err = db.Raw(query, args...).Scan(&raw).Error; err == nil {
 			for _, item := range raw {
 				rows = append(rows, processRow{Collector: item.Collector, Side: item.Side, Pod: item.Pod, Container: item.Container, Command: item.Command,
 					First: parseSQLiteTime(item.FirstText).UnixNano(), Last: parseSQLiteTime(item.LastText).UnixNano(),
-					Events: item.Events, Connections: item.Connections, Bytes: item.Bytes})
+					Events: item.Events, Connections: item.Connections, PeerConnections: item.PeerConnections, Bytes: item.Bytes})
 			}
 			if since := firstAttributed(rows); since != nil && namespace == "" {
 				coverage.Since = since
@@ -169,7 +181,7 @@ func mergeProcessRows(rows []processRow) ([]ProcessSummary, int64) {
 			p.LastSeen = last
 		}
 		p.Events += row.Events
-		attributed += row.Connections
+		attributed += row.Connections - row.PeerConnections
 		if row.Side == "src" {
 			p.Opened += row.Connections
 			p.OpenedBytes += row.Bytes

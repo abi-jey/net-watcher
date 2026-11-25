@@ -292,6 +292,34 @@ has no local socket. For the receiving side
 of a connection not yet accepted, the listening socket identifies the server.
 Later events of the same connection (TLS, end, timeout) reuse the result.
 
+When both ends of a connection are on the node (the kubelet's health check of
+a local pod, two pods on one node, a pod calling a host process), both sockets
+are looked up and the event records both processes: the one that opened the
+connection in `process_*` with `process_side = src`, the one that accepted it
+in `peer_process_*`. Without this, a health check would show only the pod's
+server, as if it had opened the connection. The second lookup only adds
+detail, so it runs only while that half of the budget has at least half a
+second's allowance left; otherwise it is skipped and counted as
+`second_end_skipped`. Collectors send the peer fields only to an ingester
+that lists `peer-process` in its `X-Net-Watcher-Accepts` response header, so
+an older ingester keeps receiving events it accepts (without them).
+
+The opener is the end most often missed: the source socket is looked up first,
+yet a kubelet health check typically lasts under a millisecond, and packets
+reach the collector in ring blocks up to 64 ms later, so the kubelet's socket
+has usually closed. The server's listener outlives the connection, so the
+accepting process is still found. Health checks are therefore recognised from
+the pods' specs instead: a TCP connection from a node to a port that the
+liveness, readiness or startup probe of a pod on that node targets (HTTP, TCP
+or gRPC; named ports resolved; probes of another host excluded) records
+`probe = container:kind[,kind]`. It is a match, not an observation: another
+process on the node reaching the same port looks the same on the wire, so the
+match is dropped when the opener is identified as a process other than the
+kubelet. Pods on the host network share the node's address and are not
+matched. The events page shows these as "health check", hidden with
+`probe = none`. Collectors send `probe` only to an ingester that lists `probe`
+in `X-Net-Watcher-Accepts`.
+
 A process running as another (non-root) user keeps `/proc/<pid>/fd` private to
 that user, which `CAP_SYS_PTRACE` does not override. For such sockets the
 socket table's owner uid is matched against the pod's processes: if every
@@ -313,7 +341,7 @@ before it started. Endpoints that cannot match (kernel tunnels such as VXLAN,
 ports with no listener) are skipped for a minute.
 
 Every 30 seconds the collector logs `Process attribution` with its counters
-(`attempted`, `matched`, `by_owner`, `inherited`, `no_socket`, `no_owner`,
+(`attempted`, `matched`, `both_ends`, `second_end_skipped`, `by_owner`, `inherited`, `no_socket`, `no_owner`,
 `known_miss`, `deadline_hit`, `over_budget`, `expired`, `tables_read`,
 `tables_reused`, `socket_queries`, `lookup_ms`, `snapshot_ms`) and up to four example misses
 with their reason.
@@ -416,11 +444,16 @@ processes and tailnet peers):
 | `namespace` | Kubernetes namespace of either end. |
 | `port` | Source or destination port. |
 | `route` | `exit-node`, `subnet-router`, `via-tailnet`, or `any`. |
-| `process`, `processPod`, `processContainer` | One exact process identity (with `collector`). |
+| `process`, `processPod`, `processContainer` | One exact process identity at either end (with `collector`). |
 
-Invalid values are rejected with 400. A process or a single route walks a
-partial index of only those events, so rare matches return quickly over long
-windows. In the UI, every tag in an event row (interface type, IP version, node,
+The `f` parameter takes a filter expression combining any of these, with
+`src.`/`dst.` prefixes for one end; `src.process` is the process that opened
+the connection, `dst.process` the one that accepted it, and a bare `process`
+either; `probe != none` selects health checks and `probe = none` hides them.
+Invalid values are rejected with 400. A process identity (command, pod
+and container at one end) walks the partial indexes of recorded and peer
+processes, and a single route walks its own, so rare matches return quickly
+over long windows. In the UI, every tag in an event row (interface type, IP version, node,
 process, namespace, kind, route) applies its filter when selected.
 
 ### Inspecting a pod

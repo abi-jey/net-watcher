@@ -17,23 +17,37 @@ func processEvent(at time.Time, eventType EventType, collector, side, pod, conta
 func assertProcessSummaryMatchesRaw(t *testing.T, db *DB) {
 	t.Helper()
 	type total struct {
-		Collector, Side, Pod, Container, Command string
-		Events, Connections, Bytes               int64
+		Collector, Side, Pod, Container, Command    string
+		Events, Connections, PeerConnections, Bytes int64
 	}
 	var raw, summary []total
-	err := db.Raw(`SELECT collector_id AS collector, process_side AS side, process_pod AS pod, process_container AS container, process_command AS command,
-		COUNT(*) AS events, SUM(event_type IN ('TCP_START','UDP_START')) AS connections, SUM(COALESCE(byte_count, 0)) AS bytes
-		FROM network_events WHERE process_side > '' GROUP BY 1, 2, 3, 4, 5 ORDER BY 1, 2, 3, 4, 5`).Scan(&raw).Error
+	// Each event counts for its process and, when recorded, the peer process
+	// at the other end.
+	err := db.Raw(`SELECT collector, side, pod, container, command, COUNT(*) AS events, SUM(event_type IN ('TCP_START','UDP_START')) AS connections,
+		SUM(peer AND event_type IN ('TCP_START','UDP_START')) AS peer_connections, SUM(COALESCE(byte_count, 0)) AS bytes FROM (
+			SELECT collector_id AS collector, process_side AS side, process_pod AS pod, process_container AS container, process_command AS command, event_type, byte_count, 0 AS peer
+			FROM network_events WHERE process_side > ''
+			UNION ALL
+			SELECT collector_id, CASE process_side WHEN 'src' THEN 'dst' ELSE 'src' END, peer_process_pod, peer_process_container, peer_process_command, event_type, byte_count, 1
+			FROM network_events WHERE peer_process_command > ''
+		) GROUP BY 1, 2, 3, 4, 5 ORDER BY 1, 2, 3, 4, 5`).Scan(&raw).Error
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := db.Raw(`SELECT collector_id AS collector, side, pod, container, command, SUM(event_count) AS events, SUM(connections) AS connections, SUM(byte_count) AS bytes
+	if err := db.Raw(`SELECT collector_id AS collector, side, pod, container, command, SUM(event_count) AS events, SUM(connections) AS connections,
+		SUM(peer_connections) AS peer_connections, SUM(byte_count) AS bytes
 		FROM hourly_processes GROUP BY 1, 2, 3, 4, 5 ORDER BY 1, 2, 3, 4, 5`).Scan(&summary).Error; err != nil {
 		t.Fatal(err)
 	}
 	if fmt.Sprint(raw) != fmt.Sprint(summary) {
 		t.Fatalf("summary %v\nraw %v", summary, raw)
 	}
+}
+
+// withPeer adds the process that accepted the connection.
+func withPeer(event NetworkEvent, pod, container, command string) NetworkEvent {
+	event.PeerProcessPID, event.PeerProcessPod, event.PeerProcessContainer, event.PeerProcessCommand = 43, pod, container, command
+	return event
 }
 
 // The process summary starts at the end of existing history (older rows have
@@ -59,6 +73,9 @@ func TestProcessSummaryLiveInsertRemovalAndReset(t *testing.T) {
 			processEvent(when.Add(time.Second), EventTCPEnd, "node-a", "src", "demo/api-1", "api", "python3", int64(1000+i)),
 			processEvent(when, EventUDPStart, "node-b", "src", "", "", "tailscaled", 0),
 			processEvent(when, EventTCPStart, "node-a", "dst", "demo/db-0", "postgres", "postgres", 0),
+			// A kubelet health check of the API pod: the pod's server is the peer.
+			withPeer(processEvent(when, EventTCPStart, "node-a", "src", "", "", "kubelet", 0), "demo/api-1", "api", "python3"),
+			withPeer(processEvent(when.Add(time.Millisecond), EventTCPEnd, "node-a", "src", "", "", "kubelet", 900), "demo/api-1", "api", "python3"),
 			NetworkEvent{Timestamp: when, EventType: EventTCPStart, SrcIP: "10.0.0.3", DstIP: "10.0.0.4"}, // Unattributed.
 		)
 	}
@@ -122,4 +139,29 @@ func TestProcessFilterUsesPartialIndex(t *testing.T) {
 	if fmt.Sprint(plan) == "" || !strings.Contains(fmt.Sprint(plan), "idx_process_time") {
 		t.Fatalf("plan does not use idx_process_time: %v", plan)
 	}
+}
+
+// Hourly rows written before peer_connections existed hold NULL there; later
+// events in the same hour still add up.
+func TestProcessSummaryPeerCountsOnRowsFromBeforeTheColumn(t *testing.T) {
+	db := summaryDB(t)
+	if err := db.EnableSummaries(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	at := time.Now().UTC().Truncate(time.Hour)
+	if err := db.InsertBatch([]NetworkEvent{processEvent(at, EventTCPStart, "node-a", "dst", "demo/db-0", "postgres", "postgres", 0)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Exec("UPDATE hourly_processes SET peer_connections = NULL").Error; err != nil {
+		t.Fatal(err)
+	}
+	check := withPeer(processEvent(at.Add(time.Minute), EventTCPStart, "node-a", "src", "", "", "kubelet", 0), "demo/db-0", "postgres", "postgres")
+	if err := db.InsertBatch([]NetworkEvent{check}); err != nil {
+		t.Fatal(err)
+	}
+	var peers int64
+	if err := db.Raw("SELECT peer_connections FROM hourly_processes WHERE command = 'postgres'").Scan(&peers).Error; err != nil || peers != 1 {
+		t.Fatalf("postgres peer connections %d, %v", peers, err)
+	}
+	assertProcessSummaryMatchesRaw(t, db)
 }

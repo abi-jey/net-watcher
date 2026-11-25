@@ -10,7 +10,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -64,15 +63,49 @@ const (
 type ContainerLookup func(id string) (namespace, pod, name string, ok bool)
 
 type processIdentity struct {
-	PID                           int
-	Command, Side, Pod, Container string
-	used                          time.Time
+	PID                     int
+	Command, Pod, Container string
 }
 
-func (identity processIdentity) apply(event *database.NetworkEvent, side string) {
-	event.ProcessPID, event.ProcessCommand, event.ProcessSide = identity.PID, identity.Command, side
-	event.ProcessPod, event.ProcessContainer = identity.Pod, identity.Container
+// flowProcesses are the processes found at a flow's ends. Both are looked up
+// when both ends are on this node: a kubelet health check is opened by the
+// kubelet and accepted by the pod's server, and either alone would mislead.
+type flowProcesses struct {
+	src, dst       processIdentity
+	hasSrc, hasDst bool
+	used           time.Time
 }
+
+func (f flowProcesses) reversed() flowProcesses {
+	f.src, f.dst, f.hasSrc, f.hasDst = f.dst, f.src, f.hasDst, f.hasSrc
+	return f
+}
+
+// apply records the processes on an event: the source's (the process that
+// opened the flow) when known, else the destination's, and the destination's
+// as the peer when both are.
+func (f flowProcesses) apply(event *database.NetworkEvent) {
+	primary, side := f.src, "src"
+	switch {
+	case !f.hasSrc && !f.hasDst:
+		return
+	case !f.hasSrc:
+		primary, side = f.dst, "dst"
+	case f.hasDst:
+		event.PeerProcessPID, event.PeerProcessCommand = f.dst.PID, f.dst.Command
+		event.PeerProcessPod, event.PeerProcessContainer = f.dst.Pod, f.dst.Container
+	}
+	event.ProcessPID, event.ProcessCommand, event.ProcessSide = primary.PID, primary.Command, side
+	event.ProcessPod, event.ProcessContainer = primary.Pod, primary.Container
+	if f.hasSrc && !kubeletCommands[f.src.Command] {
+		// Another process opened it: whatever port it reached, not a probe.
+		event.Probe = ""
+	}
+}
+
+// kubeletCommands are the command names the kubelet runs under: its own
+// binary, or a distribution's single binary that embeds it.
+var kubeletCommands = map[string]bool{"kubelet": true, "kubelite": true, "k3s-server": true, "k3s-agent": true}
 
 type procEntry struct {
 	pid                 int
@@ -111,6 +144,13 @@ func (b *workBudget) ready(now time.Time) bool {
 }
 
 func (b *workBudget) spend(d time.Duration) { b.available -= d }
+
+// spare reports whether at least half a second's allowance is left: a
+// lookup for a flow's second end only adds detail, so it must not use time
+// that a flow with no process found yet could use.
+func (b *workBudget) spare(now time.Time) bool {
+	return b.ready(now) && b.available >= b.rate/2
+}
 
 type processAttributor struct {
 	root       string
@@ -160,7 +200,7 @@ type processAttributor struct {
 	hostIPs atomic.Pointer[map[string]bool]
 
 	flowMu sync.Mutex
-	flows  map[string]processIdentity
+	flows  map[string]flowProcesses
 
 	// A few failed lookups per report interval, with their reason, so
 	// operators can see why connections stay unattributed.
@@ -168,6 +208,7 @@ type processAttributor struct {
 	examples  []string
 
 	attempted, matched, inherited, notLocal atomic.Uint64
+	bothEnds, peerSkipped                   atomic.Uint64 // Flows with both ends' processes; second-end lookups left for lack of spare budget.
 	budgetHit, overBudget, expired          atomic.Uint64
 	queueFull, noSocket, snapshots, indexed atomic.Uint64
 	knownMiss, noOwner, byOwner             atomic.Uint64
@@ -203,7 +244,7 @@ func (a *processAttributor) start() error {
 		return fmt.Errorf("host procfs at %s: %w", a.root, err)
 	}
 	a.jobs = make(chan processJob, processQueueSize)
-	a.flows = map[string]processIdentity{}
+	a.flows = map[string]flowProcesses{}
 	a.remote = map[string]time.Time{}
 	a.misses = map[string]time.Time{}
 	a.resume = map[string]int{}
@@ -243,33 +284,32 @@ func flowKey(event database.NetworkEvent, reverse bool) string {
 	return protocol + "|" + event.SrcIP + "|" + strconv.Itoa(int(event.SrcPort)) + "|" + event.DstIP + "|" + strconv.Itoa(int(event.DstPort))
 }
 
-// cached returns a flow's identity in either orientation, with the side as
+// cached returns a flow's processes in either orientation, with the ends as
 // seen from this event, and keeps the entry alive for long-lived flows.
-func (a *processAttributor) cached(event database.NetworkEvent, now time.Time) (processIdentity, string, bool) {
+func (a *processAttributor) cached(event database.NetworkEvent, now time.Time) (flowProcesses, bool) {
 	a.flowMu.Lock()
 	defer a.flowMu.Unlock()
 	for _, reverse := range []bool{false, true} {
 		key := flowKey(event, reverse)
-		identity, ok := a.flows[key]
+		flow, ok := a.flows[key]
 		if !ok {
 			continue
 		}
-		identity.used = now
-		a.flows[key] = identity
-		side := identity.Side
+		flow.used = now
+		a.flows[key] = flow
 		if reverse {
-			side = map[string]string{"src": "dst", "dst": "src"}[side]
+			flow = flow.reversed()
 		}
-		return identity, side, true
+		return flow, true
 	}
-	return processIdentity{}, "", false
+	return flowProcesses{}, false
 }
 
-func (a *processAttributor) remember(event database.NetworkEvent, identity processIdentity) {
+func (a *processAttributor) remember(event database.NetworkEvent, flow flowProcesses) {
 	a.flowMu.Lock()
 	defer a.flowMu.Unlock()
 	if len(a.flows) < processMaxFlows {
-		a.flows[flowKey(event, false)] = identity
+		a.flows[flowKey(event, false)] = flow
 	}
 }
 
@@ -294,8 +334,8 @@ func (a *processAttributor) handle(event *database.NetworkEvent) bool {
 		return false
 	}
 	now := time.Now()
-	if identity, side, ok := a.cached(*event, now); ok {
-		identity.apply(event, side)
+	if flow, ok := a.cached(*event, now); ok {
+		flow.apply(event)
 		a.inherited.Add(1)
 		return false
 	}
@@ -342,14 +382,15 @@ func (a *processAttributor) stop() {
 func (a *processAttributor) report() {
 	now := time.Now()
 	a.flowMu.Lock()
-	for key, identity := range a.flows {
-		if now.Sub(identity.used) > processFlowTTL {
+	for key, flow := range a.flows {
+		if now.Sub(flow.used) > processFlowTTL {
 			delete(a.flows, key)
 		}
 	}
 	flows := len(a.flows)
 	a.flowMu.Unlock()
 	attempted, matched, inherited, notLocal := a.attempted.Swap(0), a.matched.Swap(0), a.inherited.Swap(0), a.notLocal.Swap(0)
+	bothEnds, peerSkipped := a.bothEnds.Swap(0), a.peerSkipped.Swap(0)
 	budgetHit, overBudget, expired := a.budgetHit.Swap(0), a.overBudget.Swap(0), a.expired.Swap(0)
 	queueFull, noSocket, snapshots, work := a.queueFull.Swap(0), a.noSocket.Swap(0), a.snapshots.Swap(0), a.work.Swap(0)
 	indexed, snapshotWork, knownMiss, noOwner := a.indexed.Swap(0), a.snapshotWork.Swap(0), a.knownMiss.Swap(0), a.noOwner.Swap(0)
@@ -359,7 +400,7 @@ func (a *processAttributor) report() {
 	a.examples = nil
 	a.exampleMu.Unlock()
 	if attempted+inherited+overBudget+expired+queueFull > 0 {
-		a.logger.Info("Process attribution", "attempted", attempted, "matched", matched, "from_index", indexed, "by_owner", byOwner, "inherited", inherited,
+		a.logger.Info("Process attribution", "attempted", attempted, "matched", matched, "both_ends", bothEnds, "second_end_skipped", peerSkipped, "from_index", indexed, "by_owner", byOwner, "inherited", inherited,
 			"no_socket", noSocket, "no_owner", noOwner, "known_miss", knownMiss, "not_local", notLocal, "deadline_hit", budgetHit, "over_budget", overBudget,
 			"expired", expired, "queue_full", queueFull, "flows", flows, "snapshots", snapshots, "tables_read", tableReads, "tables_reused", tableReuse, "socket_queries", diagLookups,
 			"snapshot_ms", time.Duration(snapshotWork).Milliseconds(), "lookup_ms", time.Duration(work).Milliseconds(), "misses", strings.Join(examples, "; "))
@@ -371,8 +412,8 @@ func (a *processAttributor) run() {
 	for queued := range a.jobs {
 		event := queued.event
 		now := time.Now()
-		if identity, side, ok := a.cached(event, now); ok { // Attributed meanwhile.
-			identity.apply(&event, side)
+		if flow, ok := a.cached(event, now); ok { // Attributed meanwhile.
+			flow.apply(&event)
 			a.inherited.Add(1)
 		} else if now.Sub(queued.queuedAt) > processQueueAge {
 			a.expired.Add(1)
@@ -433,9 +474,12 @@ func (a *processAttributor) candidates(event database.NetworkEvent, queuedAt, no
 			list = append(list, c)
 		}
 	}
-	// Pod lookups are cheap (few processes to scan) and tried first;
-	// within each kind the source, which opened the flow, comes first.
-	sort.SliceStable(list, func(i, j int) bool { return !list[i].host && list[j].host })
+	// Every candidate is looked up, source first: both ends may be on this
+	// node, and the source's socket is the one that disappears. A short
+	// connection (a kubelet health check takes a few milliseconds) may have
+	// closed by the time the second lookup runs; the destination's listening
+	// socket still names the server then, the client's closed socket names
+	// nothing.
 	return list
 }
 
@@ -479,6 +523,7 @@ func (a *processAttributor) attribute(event *database.NetworkEvent, queuedAt, no
 		a.notLocal.Add(1)
 		return
 	}
+	var flow flowProcesses
 	for _, c := range candidates {
 		miss := missKey(*event, c)
 		if miss != "" && now.Before(a.misses[miss]) {
@@ -489,7 +534,12 @@ func (a *processAttributor) attribute(event *database.NetworkEvent, queuedAt, no
 		if c.host {
 			budget = &a.hostWork
 		}
-		if !budget.ready(now) {
+		second := flow.hasSrc || flow.hasDst
+		if second && !budget.spare(now) {
+			a.peerSkipped.Add(1)
+			continue
+		}
+		if !second && !budget.ready(now) {
 			a.overBudget.Add(1)
 			continue
 		}
@@ -505,15 +555,25 @@ func (a *processAttributor) attribute(event *database.NetworkEvent, queuedAt, no
 			}
 			continue
 		}
-		identity.Side, identity.used = c.side, now
-		identity.apply(event, c.side)
+		if c.side == "src" {
+			flow.src, flow.hasSrc = identity, true
+		} else {
+			flow.dst, flow.hasDst = identity, true
+		}
 		a.matched.Add(1)
-		a.remember(*event, identity)
 		if c.host {
 			a.noteHostPID(identity.PID)
 		}
+	}
+	if !flow.hasSrc && !flow.hasDst {
 		return
 	}
+	if flow.hasSrc && flow.hasDst {
+		a.bothEnds.Add(1)
+	}
+	flow.used = now
+	flow.apply(event)
+	a.remember(*event, flow)
 }
 
 func (a *processAttributor) lookup(event database.NetworkEvent, c candidate, deadline time.Time) (processIdentity, bool) {

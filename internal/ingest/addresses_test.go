@@ -38,7 +38,7 @@ func TestOtherNodesAddressesAreAttributedAtIngest(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Millisecond)
 	response := postRecorded(t, receiver.Handler(), heartbeat("desktop", now,
 		"2001:db8::d1", "100.64.1.1", "2001:db8::99", "192.168.1.5", "172.17.0.1", "fe80::1", "127.0.0.1"))
-	if response.Code != http.StatusNoContent || response.Header().Get(acceptsHeader) != acceptsAddresses {
+	if response.Code != http.StatusNoContent || response.Header().Get(acceptsHeader) != acceptsAddresses+", "+acceptsPeerProcesses+", "+acceptsProbes {
 		t.Fatalf("heartbeat: %d, accepts %q", response.Code, response.Header().Get(acceptsHeader))
 	}
 	if code := postRecorded(t, receiver.Handler(), heartbeat("abja", now, "2001:db8::99")).Code; code != http.StatusNoContent {
@@ -143,6 +143,46 @@ func TestForwarderSendsAddressesOnlyToIngesterThatAcceptsThem(t *testing.T) {
 		}
 		if got := strings.Contains(bodies[1], `"addresses":["2001:db8::a1"]`); got != accepts {
 			t.Fatalf("accepts=%t: second report %s", accepts, bodies[1])
+		}
+	}
+}
+
+func TestForwarderSendsOptionalEventFieldsOnlyToIngesterThatAcceptsThem(t *testing.T) {
+	for _, accepts := range []string{"", acceptsAddresses + ", " + acceptsPeerProcesses, acceptsAddresses + ", " + acceptsPeerProcesses + ", " + acceptsProbes} {
+		var bodies []string
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+			body, _ := io.ReadAll(request.Body)
+			bodies = append(bodies, string(body))
+			if accepts != "" {
+				w.Header().Set(acceptsHeader, accepts)
+			}
+			w.WriteHeader(http.StatusNoContent)
+		}))
+		local := testDB(t, "local.db")
+		check := database.NetworkEvent{Timestamp: time.Now().UTC(), EventType: database.EventTCPStart, SrcIP: "10.0.1.155", DstIP: "10.0.1.84", DstPort: 8081,
+			ProcessPID: 10, ProcessCommand: "kubelet", ProcessSide: "src", PeerProcessPID: 20, PeerProcessCommand: "keda", PeerProcessPod: "keda/keda-operator-1", PeerProcessContainer: "keda-operator",
+			Probe: "keda-operator:liveness"}
+		if err := local.Create(&check).Error; err != nil {
+			t.Fatal(err)
+		}
+		forwarder := Forwarder{DB: local, URL: server.URL, Token: "token", CollectorID: "abja", Version: "test", Logger: log.Default()}
+		if sent, err := forwarder.send(t.Context()); err != nil || !sent {
+			t.Fatalf("send: %t, %v", sent, err)
+		}
+		server.Close()
+		// The first request only asks what the ingester accepts.
+		if len(bodies) != 2 || strings.Contains(bodies[0], "kubelet") {
+			t.Fatalf("accepts %q: requests %v", accepts, bodies)
+		}
+		if !strings.Contains(bodies[1], `"ProcessCommand":"kubelet"`) {
+			t.Fatalf("accepts %q: event not sent: %s", accepts, bodies[1])
+		}
+		// An older ingester rejects unknown fields: it must not see them at all.
+		if got, want := strings.Contains(bodies[1], "PeerProcess"), strings.Contains(accepts, acceptsPeerProcesses); got != want {
+			t.Fatalf("accepts %q: peer sent %t: %s", accepts, got, bodies[1])
+		}
+		if got, want := strings.Contains(bodies[1], `"Probe":"keda-operator:liveness"`), strings.Contains(accepts, acceptsProbes); got != want || !want && strings.Contains(bodies[1], "Probe") {
+			t.Fatalf("accepts %q: probe sent %t: %s", accepts, got, bodies[1])
 		}
 	}
 }

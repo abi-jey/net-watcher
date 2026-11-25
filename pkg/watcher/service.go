@@ -35,6 +35,12 @@ func (w *Watcher) SetContextLookup(lookup ContextLookup) {
 	w.sessionManager.contextLookup = lookup
 }
 
+// SetProbeLookup marks connections from a node to its pods' probe ports
+// (NetworkEvent.Probe); it needs a context lookup too. Set before capture starts.
+func (w *Watcher) SetProbeLookup(lookup ProbeLookup) {
+	w.sessionManager.probeLookup = lookup
+}
+
 // EnableProcessAttribution attributes flows on this node to processes through
 // a read-only host proc mount, within budget of CPU time per second.
 func (w *Watcher) EnableProcessAttribution(root string, containers ContainerLookup, budget time.Duration) error {

@@ -47,6 +47,15 @@ function sided(name: string, label: string, kind: FieldKind, help: string, value
   ];
 }
 
+/** A connection records up to two processes: the one that opened it and, when on the same node, the one that accepted it. */
+function processFields(name: string, label: string, help: string): Field[] {
+  return [
+    { name, label, group: 'Process', kind: 'string', help: `${help} at either end. "is not" means neither end.` },
+    { name: `src.${name}`, label: label.replace('process', 'opening process'), group: 'Process', kind: 'string', help: `${help} that opened the connection (owns the source socket).` },
+    { name: `dst.${name}`, label: label.replace('process', 'accepting process'), group: 'Process', kind: 'string', help: `${help} that accepted the connection (owns the destination socket).` },
+  ];
+}
+
 export const fields: Field[] = [
   { name: 'type', label: 'type', group: 'Event', kind: 'enum', help: 'Event type.', values: [...eventTypes, 'TCP', 'UDP', 'HOURLY'].map(id => ({ id, label: id })) },
   { name: 'bytes', label: 'bytes', group: 'Event', kind: 'number', help: 'Bytes transferred: 1500, 1.5k, 2M (powers of 1024).' },
@@ -56,16 +65,18 @@ export const fields: Field[] = [
   { name: 'rcode', label: 'DNS result', group: 'Event', kind: 'enum', help: 'DNS response code of a DNS response; none on queries.', values: [
     { id: 'NOERROR', label: 'NOERROR (answered)' }, { id: 'NXDOMAIN', label: 'NXDOMAIN (no such name)' }, { id: 'SERVFAIL', label: 'SERVFAIL (server failure)' },
     { id: 'REFUSED', label: 'REFUSED' }, { id: 'FORMERR', label: 'FORMERR (malformed query)' }, { id: 'NOTIMP', label: 'NOTIMP (not implemented)' }, { id: 'none', label: 'none (queries)' }] },
+  { name: 'probe', label: 'health check probe', group: 'Event', kind: 'string', help: 'Pod probes a connection from the pod\'s node matches, as container:kinds (liveness, readiness, startup). probe != none selects health checks; probe = none hides them.' },
   ...sided('ip', 'address', 'ip', 'Address, or prefix such as 10.0.0.0/8,'),
   ...sided('port', 'port', 'number', 'Port, or range such as 1000-2000,'),
   ...sided('kind', 'kind', 'enum', 'Kubernetes kind', kinds),
   ...sided('ns', 'namespace', 'string', 'Kubernetes namespace'),
   ...sided('name', 'name', 'string', 'Pod, node or service name'),
   ...sided('workload', 'workload', 'string', 'Workload as Kind/name, such as Deployment/coredns'),
-  { name: 'process', label: 'process', group: 'Process', kind: 'string', help: 'Command of the process that owns the socket.' },
-  { name: 'process.pod', label: 'process pod', group: 'Process', kind: 'string', help: 'Pod of that process (namespace/name); none for host processes.' },
-  { name: 'process.container', label: 'process container', group: 'Process', kind: 'string', help: 'Container of that process.' },
-  { name: 'process.side', label: 'process side', group: 'Process', kind: 'enum', help: 'Which end the process is; none when unidentified.', values: [{ id: 'src', label: 'source' }, { id: 'dst', label: 'destination' }, { id: 'none', label: 'not identified' }] },
+  ...processFields('process', 'process', 'Command of the process'),
+  ...processFields('process.pod', 'process pod', 'Pod (namespace/name) of the process; none for a process outside any pod,'),
+  ...processFields('process.container', 'process container', 'Container of the process'),
+  { name: 'process.side', label: 'process side', group: 'Process', kind: 'enum', help: 'Which processes are known: src when the one that opened the connection is, dst when only the one that accepted it is; none when neither.',
+    values: [{ id: 'src', label: 'opener known' }, { id: 'dst', label: 'only the acceptor known' }, { id: 'none', label: 'not identified' }] },
   { name: 'node', label: 'node', group: 'Capture', kind: 'string', help: 'Collector (node) that captured the packet.' },
   { name: 'iface', label: 'interface', group: 'Capture', kind: 'string', help: 'Interface name, such as tailscale0.' },
   { name: 'iface.type', label: 'interface type', group: 'Capture', kind: 'role', help: 'What the interface connects.', values: roles },
@@ -75,7 +86,7 @@ export const fields: Field[] = [
 
 const aliases: Record<string, string> = {
   namespace: 'ns', 'src.namespace': 'src.ns', 'dst.namespace': 'dst.ns', collector: 'node', interface: 'iface', 'iface.role': 'iface.type',
-  command: 'process', host: 'domain', ipversion: 'ipv', event: 'type',
+  command: 'process', 'src.command': 'src.process', 'dst.command': 'dst.process', host: 'domain', ipversion: 'ipv', event: 'type',
 };
 
 export function field(name: string): Field | undefined {
@@ -319,10 +330,15 @@ export function describe(term: Term): { field: string; op: string; values: strin
 /**
  * Adds a condition from a clicked tag: showing only a value replaces a
  * condition that showed only another value of the field; hiding a value adds
- * it to the values already hidden.
+ * it to the values already hidden. A combined condition replaces itself or
+ * its negation.
  */
-export function addCondition(filter: Term | null, added: Compare): Term | null {
+export function addCondition(filter: Term | null, added: Term): Term | null {
   const terms = conditions(filter);
+  if (added.kind !== 'compare') {
+    const same = [format(added), format(negate(added))];
+    return allOf([...terms.filter(t => !same.includes(format(t))), added]);
+  }
   const same = terms.findIndex(t => t.kind === 'compare' && t.field === added.field && t.op === added.op);
   if (same >= 0) {
     const existing = terms[same] as Compare;
@@ -389,11 +405,7 @@ export function fromLegacy(query: URLSearchParams): Term[] {
   const types = (query.get('type') ?? query.get('eventType') ?? '').split(',').filter(Boolean);
   if (types.length) add('type', '=', ...types);
   const process = query.get('process');
-  if (process) {
-    add('process', '=', process);
-    add('process.pod', '=', query.get('processPod') || 'none');
-    add('process.container', '=', query.get('processContainer') || 'none');
-  }
+  if (process) terms.push(processIdentity(process, [query.get('processPod') || 'none'], query.get('processContainer') || 'none', ['src', 'dst']));
   const withProcess = query.get('withProcess');
   if (withProcess === 'yes' || withProcess === 'no') add('process.side', withProcess === 'yes' ? '!=' : '=', 'none');
   const route = query.get('route');
@@ -405,3 +417,14 @@ export function fromLegacy(query: URLSearchParams): Term[] {
 
 export const legacyParams = ['src', 'srcIP', 'dst', 'dstIP', 'collector', 'iface', 'ifaceRole', 'ipVersion', 'srcKind', 'dstKind', 'namespace', 'port', 'type', 'eventType',
   'process', 'processPod', 'processContainer', 'withProcess', 'route', 'q'];
+
+/**
+ * Connections where one end's process has this command, one of these pods
+ * ('none' for a process outside any pod) and this container, all at the same
+ * end: a node process is not matched by a connection whose other end is a
+ * pod. ends lists the ends it may be at: src when it opened connections, dst
+ * when it accepted them.
+ */
+export function processIdentity(command: string, pods: string[], container: string, ends: ('src' | 'dst')[]): Term {
+  return anyOf(ends.map(end => join('and', [is(`${end}.process`, command), is(`${end}.process.pod`, ...pods), is(`${end}.process.container`, container)])));
+}

@@ -2,7 +2,8 @@ import { useEffect, useRef, useState, type MouseEvent, type ReactNode } from 're
 import type { NetworkEvent } from '../lib/api.ts';
 import { bytes, dateTime, endpoint, isSet } from '../lib/format.ts';
 import { deviceName, eventLabel, family, interfaceRole, ipScope, rcodeName, routeInfo, scopeLabel, scopeTag } from '../lib/network.ts';
-import { describe, is, negate, type Compare } from '../lib/filter.ts';
+import { describe, is, negate, type Term } from '../lib/filter.ts';
+import { describeProbe, endProcesses, healthCheckEvidence, healthChecks, isHealthCheck, splitPod, type EndProcess } from '../lib/process.ts';
 import { href } from '../lib/hooks.ts';
 import { Attribution } from './ui.tsx';
 import { Icon } from './icons.tsx';
@@ -13,14 +14,14 @@ const source = (event: NetworkEvent): Side => ({ ip: event.SrcIP, port: event.Sr
 const destination = (event: NetworkEvent): Side => ({ ip: event.DstIP, port: event.DstPort, kind: event.DstKind, namespace: event.DstNamespace, name: event.DstName, uid: event.DstUID, workload: event.DstWorkload, attribution: event.DstAttribution });
 
 /** Called with a condition to add to the search: a tag's value, or its negation. */
-export type OnFilter = ((condition: Compare) => void) | undefined;
+export type OnFilter = ((condition: Term) => void) | undefined;
 
 /**
  * A tag that adds its value to the search. Selecting it offers "show only"
  * and "hide"; Alt-click hides at once. The menu is positioned on the page,
  * so a row's clipped cells do not cut it off.
  */
-function Tag({ className, title, condition, onFilter, children }: { className: string; title: string; condition?: Compare; onFilter: OnFilter; children: ReactNode }) {
+function Tag({ className, title, condition, label, onFilter, children }: { className: string; title: string; condition?: Term; label?: string; onFilter: OnFilter; children: ReactNode }) {
   const [at, setAt] = useState<{ left: number; top: number }>();
   const menu = useRef<HTMLSpanElement>(null);
   useEffect(() => {
@@ -36,24 +37,27 @@ function Tag({ className, title, condition, onFilter, children }: { className: s
   if (!condition || !onFilter) return <span className={className} title={title}>{children}</span>;
   const reading = describe(condition);
   const value = reading.values.join(', ');
-  const pick = (chosen: Compare) => { setAt(undefined); onFilter(chosen); };
+  // What the condition selects: its label, or field and value ("is" left unsaid).
+  const head = label ? <b>{label}</b> : <>{reading.field}{reading.op === 'is' ? '' : ` ${reading.op}`} <b>{value}</b></>;
+  const what = label ?? `${reading.field}${reading.op === 'is' ? '' : ` ${reading.op}`} ${value}`;
+  const pick = (chosen: Term) => { setAt(undefined); onFilter(chosen); };
   const open = (event: MouseEvent<HTMLButtonElement>) => {
     event.stopPropagation();
-    if (event.altKey) { onFilter(negate(condition) as Compare); return; }
+    if (event.altKey) { onFilter(negate(condition)); return; }
     const box = event.currentTarget.getBoundingClientRect();
     setAt(current => (current ? undefined : { left: Math.min(box.left, window.innerWidth - 240), top: box.bottom + 4 }));
   };
   return (
     <>
-      <button type="button" className={`${className} filterable`} title={`${title}. Select to filter by ${reading.field} ${value}; Alt-click hides it.`}
+      <button type="button" className={`${className} filterable`} title={`${title.replace(/\.$/, '')}. Select to filter by ${what}; Alt-click hides it.`}
         aria-haspopup="menu" aria-expanded={Boolean(at)} onClick={open} onKeyDown={event => event.stopPropagation()}>
         {children}
       </button>
       {at && (
         <span className="tag-menu" role="menu" ref={menu} style={at} onClick={event => event.stopPropagation()} onKeyDown={event => event.stopPropagation()}>
-          <span className="tag-menu-head">{reading.field} <b>{value}</b></span>
+          <span className="tag-menu-head">{head}</span>
           <button type="button" role="menuitem" onClick={() => pick(condition)}><Icon name="check" size={12} />Show only this</button>
-          <button type="button" role="menuitem" onClick={() => pick(negate(condition) as Compare)}><Icon name="close" size={12} />Hide this</button>
+          <button type="button" role="menuitem" onClick={() => pick(negate(condition))}><Icon name="close" size={12} />Hide this</button>
         </span>
       )}
     </>
@@ -66,12 +70,57 @@ function remoteName(event: NetworkEvent): string {
   return event.Hostname;
 }
 
-/** One end of the connection on one line: kind, name, namespace, address. */
-function Endpoint({ side, which, name, event, onFilter }: { side: Side; which: 'src' | 'dst'; name?: string; event: NetworkEvent; onFilter: OnFilter }) {
+/** What a process did, where it runs and how it was identified. */
+function processTitle(process: EndProcess, which: 'src' | 'dst'): string {
+  const role = which === 'src' ? 'opened this connection (owns the source socket)' : 'accepted this connection (owns the destination socket)';
+  const where = process.pod ? ` in pod ${process.pod}${process.container ? `, container ${process.container}` : ''}` : ' on the node, outside any pod';
+  return `Process ${process.command} ${role}${where}; ${process.pid ? `host PID ${process.pid}` : 'identified by its socket owner, PID not readable'}`;
+}
+
+/** The process at one end. */
+function ProcessTag({ process, which, onFilter }: { process: EndProcess; which: 'src' | 'dst'; onFilter: OnFilter }) {
+  return (
+    <Tag className="ep-process" title={processTitle(process, which)} condition={is(`${which}.process`, process.command)} onFilter={onFilter}>
+      <Icon name="process" size={11} />{process.command || '?'}
+    </Tag>
+  );
+}
+
+/**
+ * One end of the connection on one line: kind, name, namespace, the process
+ * that owns its socket, and the address. A node's own traffic reads "kubelet
+ * on abja"; a host-network pod, which uses its node's addresses, is named.
+ */
+function Endpoint({ side, which, name, process, event, onFilter }: { side: Side; which: 'src' | 'dst'; name?: string; process?: EndProcess; event: NetworkEvent; onFilter: OnFilter }) {
   const address = endpoint(side.ip, side.port);
   const addressTag = side.ip
     ? <Tag className="ep-addr mono" title={`Address ${side.ip}`} condition={is(`${which}.ip`, side.ip)} onFilter={onFilter}>{address}</Tag>
     : null;
+  const processTag = process ? <ProcessTag process={process} which={which} onFilter={onFilter} /> : null;
+  if (side.kind === 'node' && process) {
+    const node = side.name || side.ip;
+    if (process.pod) {
+      const pod = splitPod(process.pod);
+      return (
+        <span className="ep">
+          <Tag className="tag k8s pod hostnet" title={`Pod ${process.pod} on the host network of node ${node}: it uses the node's addresses`}
+            condition={is(`${which}.process.pod`, process.pod)} onFilter={onFilter}>host-net pod</Tag>
+          <span className="ep-name" title={`${process.pod}${process.container ? `, container ${process.container}` : ''}, on node ${node}`}>{pod.name}</span>
+          {processTag}
+          <span className="ep-on" title={`Node ${node}`}>on {node}</span>
+          {addressTag}
+        </span>
+      );
+    }
+    return (
+      <span className="ep">
+        <Tag className="tag k8s node" title="Kubernetes node: a process on the node itself" condition={is(`${which}.kind`, 'node')} onFilter={onFilter}>node</Tag>
+        {processTag}
+        <span className="ep-on" title={`Node ${node}`}>on <b>{node}</b></span>
+        {node !== side.ip && addressTag}
+      </span>
+    );
+  }
   if (side.kind) {
     const label = side.kind === 'pod' ? side.name : side.name || side.ip;
     return (
@@ -82,6 +131,7 @@ function Endpoint({ side, which, name, event, onFilter }: { side: Side; which: '
           : <span className="ep-name" title={label}>{label}</span>}
         {side.attribution && side.attribution !== 'exact' && side.kind === 'pod' && <Attribution value={side.attribution} />}
         {side.namespace && <Tag className="ns" title={`Namespace ${side.namespace}`} condition={is('ns', side.namespace)} onFilter={onFilter}>{side.namespace}</Tag>}
+        {processTag}
         {label !== side.ip && addressTag}
       </span>
     );
@@ -102,6 +152,7 @@ function Endpoint({ side, which, name, event, onFilter }: { side: Side; which: '
     <span className="ep">
       <span className={`tag scope ${scope}`} title={scopeLabel(scope)}>{scopeTag(scope)}</span>
       {name && <Tag className="ep-name" title={`Name ${name}`} condition={is('domain', name.replace(/\.$/, ''))} onFilter={onFilter}>{name}</Tag>}
+      {processTag}
       {addressTag}
     </span>
   );
@@ -151,21 +202,20 @@ export function EventRow({ event, expanded, onToggle, onFilter, fresh }: { event
   const route = routeInfo(event.Route);
   const peer = event.TailnetPeerName ? deviceName(event.TailnetPeerName) : event.TailnetPeer;
   const src = source(event), dst = destination(event);
+  const processes = endProcesses(event);
   return (
     <li className={`ev ${kind} ${expanded ? 'open' : ''} ${fresh ? 'fresh' : ''}`}>
       <div className="ev-row" role="button" tabIndex={0} aria-expanded={expanded} onClick={onToggle}
         onKeyDown={key => { if (key.key === 'Enter' || key.key === ' ') { key.preventDefault(); onToggle(); } }}>
         <span className="ev-time mono" title={dateTime(event.Timestamp)}>{rowTime(event.Timestamp)}</span>
         <span className="ev-type"><Tag className={`type ${kind}`} title={event.EventType} condition={is('type', event.EventType)} onFilter={onFilter}>{eventLabel(event.EventType)}</Tag></span>
-        <span className="ev-src"><Endpoint side={src} which="src" event={event} onFilter={onFilter} /></span>
+        <span className="ev-src"><Endpoint side={src} which="src" process={processes.src} event={event} onFilter={onFilter} /></span>
         <span className="ev-arrow" aria-label="to"><Icon name="arrow" size={14} /></span>
-        <span className="ev-dst"><Endpoint side={dst} which="dst" name={dst.kind ? undefined : remoteName(event)} event={event} onFilter={onFilter} /></span>
+        <span className="ev-dst"><Endpoint side={dst} which="dst" name={dst.kind ? undefined : remoteName(event)} process={processes.dst} event={event} onFilter={onFilter} /></span>
         <span className="ev-detail">
+          {isHealthCheck(event) && <Tag className="ctx check" title={`Health check: ${describeProbe(event.Probe)}, port ${event.DstPort}. ${healthCheckEvidence(event)}`} condition={healthChecks} label="health checks" onFilter={onFilter}>health check</Tag>}
           <Details event={event} onFilter={onFilter} />
           {route && <Tag className="ctx route" title={`${route.help}${event.TailnetPeer ? ` Device: ${event.TailnetPeerName || event.TailnetPeer}.` : ''}`} condition={is('route', event.Route)} onFilter={onFilter}>{route.label}{peer ? <span className="muted"> · {peer}</span> : null}</Tag>}
-          {event.ProcessCommand && <Tag className="ctx process" title={processTitle(event)} condition={is('process', event.ProcessCommand)} onFilter={onFilter}>
-            <Icon name="process" size={12} />{event.ProcessCommand}{event.ProcessContainer && event.ProcessContainer !== event.ProcessCommand ? <span className="muted"> · {event.ProcessContainer}</span> : null}
-          </Tag>}
           <Tag className="ctx" title={`${event.Interface}: ${link.help}`} condition={link.id ? is('iface.type', link.id) : undefined} onFilter={onFilter}>{link.role}</Tag>
           <Tag className="ctx node" title="Collector (node) that captured the packet" condition={event.CollectorID ? is('node', event.CollectorID) : undefined} onFilter={onFilter}>{event.CollectorID || 'local'}</Tag>
         </span>
@@ -175,26 +225,20 @@ export function EventRow({ event, expanded, onToggle, onFilter, fresh }: { event
   );
 }
 
-function processTitle(event: NetworkEvent): string {
-  const role = event.ProcessSide === 'dst' ? 'accepted this connection (owns the destination socket)' : 'opened this connection (owns the source socket)';
-  const where = event.ProcessPod ? ` in pod ${event.ProcessPod}${event.ProcessContainer ? `, container ${event.ProcessContainer}` : ''}` : ' on the node (outside any pod)';
-  return `Process that ${role}${where}${event.ProcessPID ? `; host PID ${event.ProcessPID}` : '; identified by its socket owner, PID not readable'}`;
-}
-
-function ProcessFacts({ event }: { event: NetworkEvent }) {
+function ProcessFacts({ process, which }: { process: EndProcess; which: 'src' | 'dst' }) {
   return <>
     <dt>Process</dt>
     <dd>
-      <span className="mono">{event.ProcessCommand || 'unknown'}</span>
-      {event.ProcessPID
-        ? <span className="muted"> · host PID {event.ProcessPID}</span>
+      <span className="mono">{process.command || 'unknown'}</span>
+      {process.pid
+        ? <span className="muted"> · host PID {process.pid}</span>
         : <span className="muted" title="The process runs as another user, so its descriptors are private; its socket's owner identifies one container and command."> · PID not readable</span>}
-      <div className="muted small">{event.ProcessSide === 'dst' ? 'accepted' : 'opened'} this connection{event.ProcessContainer ? ` · container ${event.ProcessContainer}` : ''}{event.ProcessPod ? '' : ' · node process outside any pod'}</div>
+      <div className="muted small">{which === 'src' ? 'opened' : 'accepted'} this connection{process.pod ? ` · pod ${process.pod}` : ' · node process outside any pod'}{process.container ? ` · container ${process.container}` : ''}</div>
     </dd>
   </>;
 }
 
-function SideFacts({ title, side, process, event }: { title: string; side: Side; process?: NetworkEvent; event: NetworkEvent }) {
+function SideFacts({ title, side, which, process, event }: { title: string; side: Side; which: 'src' | 'dst'; process?: EndProcess; event: NetworkEvent }) {
   const scope = ipScope(side.ip);
   const peer = event.TailnetPeer === side.ip;
   return (
@@ -211,7 +255,7 @@ function SideFacts({ title, side, process, event }: { title: string; side: Side;
           {side.uid && <><dt>UID</dt><dd className="mono">{side.uid}</dd></>}
           <dt>Attribution</dt><dd><Attribution value={side.attribution || 'none'} /></dd>
         </> : <><dt>Kubernetes</dt><dd className="muted">{peer ? 'a tailnet device, outside the cluster' : 'not a known cluster address'}</dd></>}
-        {process && <ProcessFacts event={process} />}
+        {process && <ProcessFacts process={process} which={which} />}
       </dl>
     </section>
   );
@@ -219,12 +263,13 @@ function SideFacts({ title, side, process, event }: { title: string; side: Side;
 
 function EventDetails({ event }: { event: NetworkEvent }) {
   const link = interfaceRole(event.Interface);
+  const processes = endProcesses(event);
   const fields = Object.entries(event).filter(([key, value]) => !rawSkip.has(key) && value !== '' && value !== 0 && value !== false && value !== null && (typeof value !== 'string' || isSet(value)));
   return (
     <div className="ev-details">
       <div className="facts">
-        <SideFacts title="Source" side={source(event)} process={event.ProcessSide === 'src' ? event : undefined} event={event} />
-        <SideFacts title="Destination" side={destination(event)} process={event.ProcessSide === 'dst' ? event : undefined} event={event} />
+        <SideFacts title="Source" side={source(event)} which="src" process={processes.src} event={event} />
+        <SideFacts title="Destination" side={destination(event)} which="dst" process={processes.dst} event={event} />
         <section>
           <h3>Capture</h3>
           <dl className="kv">
@@ -233,6 +278,7 @@ function EventDetails({ event }: { event: NetworkEvent }) {
             <dt>Collector</dt><dd>{event.CollectorID || 'local'}</dd>
             <dt>Interface</dt><dd><span className="mono">{event.Interface || '—'}</span> · {link.role}<div className="muted small">{link.help}</div></dd>
             {routeInfo(event.Route) && <><dt>Tailscale</dt><dd>{routeInfo(event.Route)!.label}{event.TailnetPeer ? ` for ${event.TailnetPeerName || event.TailnetPeer}` : ''}<div className="muted small">{routeInfo(event.Route)!.help}</div></dd></>}
+            {isHealthCheck(event) && <><dt>Purpose</dt><dd>Health check: {describeProbe(event.Probe)}, port {event.DstPort}<div className="muted small">{healthCheckEvidence(event)} The kubelet probes only pods on its own node, from the node's address.</div></dd></>}
             <dt>Protocol</dt><dd>{[event.Protocol, event.IPVersion ? `IPv${event.IPVersion}` : ''].filter(Boolean).join(' · ') || '—'}</dd>
             {!event.ProcessSide && <><dt>Process</dt><dd>{event.ProcessCommand ? <>{event.ProcessCommand}{event.ProcessPID ? <span className="muted"> · host PID {event.ProcessPID}</span> : null}</> : (event.Route === 'exit-node' || event.Route === 'subnet-router')
               ? <span className="muted">none: forwarded for a tailnet device, not opened by a process on this node</span>

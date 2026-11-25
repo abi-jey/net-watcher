@@ -42,6 +42,8 @@ type Object struct {
 		ExternalIPs []string
 		Addresses   []struct{ Type, IP string }
 		Ports       []Port
+		// A pod's containers, for the ports their network probes target.
+		Containers, InitContainers []Container
 	}
 	Status struct {
 		Phase                      string
@@ -60,6 +62,29 @@ type Object struct {
 		Name, Protocol string
 		Port           int
 	}
+}
+
+// Container is the part of a pod's container spec its network probes need.
+type Container struct {
+	Name  string
+	Ports []struct {
+		Name          string
+		ContainerPort int
+	}
+	LivenessProbe, ReadinessProbe, StartupProbe *Probe
+}
+
+// Probe is a container probe. Exec probes send no traffic and are not kept.
+type Probe struct {
+	HTTPGet, TCPSocket *ProbeTarget
+	GRPC               *struct{ Port int }
+}
+
+// ProbeTarget is where an HTTP or TCP probe connects: Port is a number or a
+// container port's name; a Host replaces the pod's address.
+type ProbeTarget struct {
+	Host string
+	Port json.RawMessage
 }
 
 // ContainerStatus carries the runtime ID ("containerd://<id>") of a container.

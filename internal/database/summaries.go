@@ -64,7 +64,8 @@ func SummaryStatus(tx *gorm.DB) (AggregationStatus, error) {
 const summaryColumns = "id, timestamp, event_type, src_ip, dst_ip, hostname, byte_count, " +
 	"src_kind, src_namespace, src_name, src_uid, src_workload, src_attribution, " +
 	"dst_kind, dst_namespace, dst_name, dst_uid, dst_workload, dst_attribution, " +
-	"collector_id, process_command, process_side, process_pod, process_container"
+	"collector_id, process_command, process_side, process_pod, process_container, " +
+	"peer_process_command, peer_process_pod, peer_process_container"
 
 // EnableSummaries snapshots the historical high-water mark without scanning or
 // rewriting events. Collector-only databases do not enable summary maintenance.

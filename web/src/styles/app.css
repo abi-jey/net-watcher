@@ -410,3 +410,11 @@ details.explain ul { padding-left: 20px; }
 .disclosure.open { transform: rotate(90deg); }
 tbody tr.sub-row td { background: var(--surface-work-inset); padding-top: 5px; padding-bottom: 5px; }
 tbody tr.sub-row td:nth-child(2) { padding-left: 22px; }
+
+/* The process at each end of a row, and node or host-network ends. */
+.ep-process { flex: 0 1 auto; min-width: 4ch; max-width: 18ch; overflow: hidden; text-overflow: ellipsis; display: inline-flex; align-items: center; gap: 3px; font-size: 11px; line-height: 16px; padding: 0 4px; border-radius: 4px; color: var(--text-h); background: color-mix(in srgb, var(--green) 16%, transparent); white-space: nowrap; }
+button.ep-process.filterable { border: 1px solid transparent; font: inherit; font-size: 11px; line-height: 16px; color: var(--text-h); background: color-mix(in srgb, var(--green) 16%, transparent); }
+.ep-on { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--text-muted); font-size: 12px; }
+.ep-on b { color: var(--text-h); font-weight: 500; }
+.tag.k8s.hostnet { color: var(--accent-work); }
+.ctx.check { color: var(--text-secondary); background: color-mix(in srgb, var(--info) 14%, transparent); }

@@ -29,6 +29,10 @@ type HourlyProcess struct {
 	EventCount  int64
 	// Connections counts flows the process was attributed at their start.
 	Connections int64
+	// PeerConnections counts those of Connections where the process was the
+	// event's peer process (the flow's other end was attributed too), so
+	// attributed flows are Connections - PeerConnections summed over all rows.
+	PeerConnections int64
 	// ByteCount totals both directions of attributed flows, recorded at flow end.
 	ByteCount int64
 	FirstSeen int64
@@ -105,28 +109,37 @@ func aggregateProcesses(tx *gorm.DB, events []NetworkEvent, delta int64) error {
 	}
 	rows := map[key]*HourlyProcess{}
 	hours := map[int64]bool{}
-	for _, event := range events {
-		if event.ProcessSide == "" {
-			continue
-		}
+	add := func(event NetworkEvent, side, pod, container, command string, peer bool) {
 		hour := event.Timestamp.UTC().Truncate(time.Hour).Unix()
 		at := event.Timestamp.UnixNano()
 		hours[hour] = true
-		k := key{hour, event.CollectorID, event.ProcessSide, event.ProcessPod, event.ProcessContainer, event.ProcessCommand}
+		k := key{hour, event.CollectorID, side, pod, container, command}
 		row := rows[k]
 		if row == nil {
-			namespace, _, _ := strings.Cut(event.ProcessPod, "/")
-			row = &HourlyProcess{Hour: hour, CollectorID: event.CollectorID, Side: event.ProcessSide, Pod: event.ProcessPod,
-				Container: event.ProcessContainer, Command: event.ProcessCommand, Namespace: namespace, FirstSeen: at, LastSeen: at}
+			namespace, _, _ := strings.Cut(pod, "/")
+			row = &HourlyProcess{Hour: hour, CollectorID: event.CollectorID, Side: side, Pod: pod,
+				Container: container, Command: command, Namespace: namespace, FirstSeen: at, LastSeen: at}
 			rows[k] = row
 		}
 		row.EventCount += delta
 		row.ByteCount += delta * event.ByteCount
 		if isFlowStart(event.EventType) {
 			row.Connections += delta
+			if peer {
+				row.PeerConnections += delta
+			}
 		}
 		row.FirstSeen = min(row.FirstSeen, at)
 		row.LastSeen = max(row.LastSeen, at)
+	}
+	for _, event := range events {
+		if event.ProcessSide == "" {
+			continue
+		}
+		add(event, event.ProcessSide, event.ProcessPod, event.ProcessContainer, event.ProcessCommand, false)
+		if event.PeerProcessCommand != "" {
+			add(event, otherSide(event.ProcessSide), event.PeerProcessPod, event.PeerProcessContainer, event.PeerProcessCommand, true)
+		}
 	}
 	if len(rows) == 0 {
 		return nil
@@ -141,9 +154,11 @@ func aggregateProcesses(tx *gorm.DB, events []NetworkEvent, delta int64) error {
 		return fmt.Sprint(a.Hour, a.CollectorID, a.Side, a.Pod, a.Container, a.Command) < fmt.Sprint(b.Hour, b.CollectorID, b.Side, b.Pod, b.Container, b.Command)
 	})
 	counts := map[string]interface{}{
-		"event_count": gorm.Expr("event_count + excluded.event_count"),
-		"connections": gorm.Expr("connections + excluded.connections"),
-		"byte_count":  gorm.Expr("byte_count + excluded.byte_count"),
+		"event_count":      gorm.Expr("event_count + excluded.event_count"),
+		"connections":      gorm.Expr("connections + excluded.connections"),
+		// Rows from before the column existed hold NULL.
+		"peer_connections": gorm.Expr("COALESCE(peer_connections, 0) + excluded.peer_connections"),
+		"byte_count":       gorm.Expr("byte_count + excluded.byte_count"),
 	}
 	updates := clause.Assignments(counts)
 	if delta > 0 {
@@ -164,4 +179,12 @@ func aggregateProcesses(tx *gorm.DB, events []NetworkEvent, delta int64) error {
 		}
 	}
 	return nil
+}
+
+// otherSide is the end opposite side ("src" or "dst").
+func otherSide(side string) string {
+	if side == "src" {
+		return "dst"
+	}
+	return "src"
 }

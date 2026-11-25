@@ -166,12 +166,11 @@ func eventsRequestFilter(query url.Values) (*expr, error) {
 	// An exact process identity, as listed by /api/processes; an empty pod
 	// selects host processes.
 	if value := query.Get("process"); value != "" {
-		for _, err := range []error{add("process", "process", "=", value), add("processPod", "process.pod", "=", orNone(query.Get("processPod"))),
-			add("processContainer", "process.container", "=", orNone(query.Get("processContainer")))} {
-			if err != nil {
-				return nil, err
-			}
+		identity, err := processIdentityFilter(value, orNone(query.Get("processPod")), orNone(query.Get("processContainer")))
+		if err != nil {
+			return nil, fmt.Errorf("process: %w", err)
 		}
+		terms = append(terms, identity)
 	}
 	switch value := query.Get("withProcess"); value {
 	case "":
@@ -207,6 +206,78 @@ func orNone(value string) string {
 	return value
 }
 
+// processIdentityFilter selects connections where the process at one end
+// has this command, pod and container: all three hold at the same end, so a
+// host process is not matched by a connection whose other end is a pod.
+func processIdentityFilter(command, pod, container string) (*expr, error) {
+	var ends []*expr
+	for _, end := range []string{"src.", "dst."} {
+		var terms []*expr
+		for _, c := range [][2]string{{"process", command}, {"process.pod", pod}, {"process.container", container}} {
+			name, field, _ := lookupField(end + c[0])
+			term, err := newCompare(name, field, "=", []string{c[1]}, 0)
+			if err != nil {
+				return nil, err
+			}
+			terms = append(terms, term)
+		}
+		ends = append(ends, join(exprAnd, terms))
+	}
+	return join(exprOr, ends), nil
+}
+
+// processIdentity finds a condition that pins one end's process to a single
+// command, pod and container: src. or dst. comparisons of all three with one
+// value each, among the top-level conditions or as the alternatives of an
+// "or" (as processIdentityFilter writes it) that all name the same identity.
+func processIdentity(conditions []*expr) ([3]string, bool) {
+	bound := func(terms []*expr) ([3]string, bool) {
+		for _, end := range []string{"src.", "dst."} {
+			var identity [3]string
+			found := 0
+			for i, name := range []string{"process", "process.pod", "process.container"} {
+				for _, c := range terms {
+					if c.kind == exprCompare && c.name == end+name && c.op == "=" && len(c.norm) == 1 {
+						identity[i] = c.norm[0].text
+						found++
+						break
+					}
+				}
+			}
+			if found == 3 && identity[0] != "" {
+				return identity, true
+			}
+		}
+		return [3]string{}, false
+	}
+	if identity, ok := bound(conditions); ok {
+		return identity, true
+	}
+	for _, c := range conditions {
+		if c.kind != exprOr {
+			continue
+		}
+		var identity [3]string
+		ok := true
+		for i, alternative := range c.terms {
+			terms := []*expr{alternative}
+			if alternative.kind == exprAnd {
+				terms = alternative.terms
+			}
+			found, matched := bound(terms)
+			if !matched || (i > 0 && found != identity) {
+				ok = false
+				break
+			}
+			identity = found
+		}
+		if ok {
+			return identity, true
+		}
+	}
+	return [3]string{}, false
+}
+
 // eventsPart is one index walk of a page: the index and the conditions that
 // let SQLite read it in time order.
 type eventsPart struct {
@@ -218,8 +289,9 @@ type eventsPart struct {
 const maxNamespaceWalks = 8
 
 // eventsParts chooses the indexes a page walks, newest first, from the
-// filter's top-level conditions. A process identity or one Tailscale route
-// walks a partial index holding only those rows in time order. Namespaces
+// filter's top-level conditions. A process identity at one end walks the
+// partial indexes of recorded processes and peer processes; one Tailscale
+// route walks a partial index holding only those rows in time order. Namespaces
 // walk each side's (namespace, time) index, which lists only their events:
 // walking all events by time would read a quiet namespace's whole window.
 // Anything else walks all events by time.
@@ -238,11 +310,14 @@ func eventsParts(filter *expr) []eventsPart {
 		}
 		return "", false
 	}
-	if command, ok := single("process"); ok && command != "" {
-		pod, podOK := single("process.pod")
-		container, containerOK := single("process.container")
-		if podOK && containerOK {
-			return []eventsPart{{"idx_process_time", "process_command = ? AND process_pod = ? AND process_container = ? AND process_side > ''", []any{command, pod, container}}}
+	if id, ok := processIdentity(conditions); ok {
+		// The identity is at the end the filter names; either column pair may
+		// hold it. Rows whose recorded process has it come from the first walk.
+		return []eventsPart{
+			{"idx_process_time", "process_command = ? AND process_pod = ? AND process_container = ? AND process_side > ''", []any{id[0], id[1], id[2]}},
+			{"idx_peer_process_time", "peer_process_command = ? AND peer_process_pod = ? AND peer_process_container = ? AND peer_process_command > ''" +
+				" AND NOT (COALESCE(process_command, '') = ? AND COALESCE(process_pod, '') = ? AND COALESCE(process_container, '') = ?)",
+				[]any{id[0], id[1], id[2], id[0], id[1], id[2]}},
 		}
 	}
 	if route, ok := single("route"); ok && route != "" {

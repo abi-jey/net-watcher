@@ -74,6 +74,12 @@ func New(dbPath string) (*DB, error) {
 		_ = sqlDB.Close()
 		return nil, err
 	}
+	// The same for the process at the other end, so a process's drill-down
+	// also finds the connections it took part in as the peer.
+	if err := db.Exec("CREATE INDEX IF NOT EXISTS idx_peer_process_time ON network_events(peer_process_command, peer_process_pod, peer_process_container, timestamp) WHERE peer_process_command > ''").Error; err != nil {
+		_ = sqlDB.Close()
+		return nil, err
+	}
 	// Tailscale routes are rare among all events; a partial index keeps the
 	// "exit node traffic" view from walking every event in a window.
 	if err := db.Exec("CREATE INDEX IF NOT EXISTS idx_route_time ON network_events(route, timestamp) WHERE route > ''").Error; err != nil {
