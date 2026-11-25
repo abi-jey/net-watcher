@@ -243,6 +243,7 @@ type processAttributor struct {
 	attempted, matched, inherited, notLocal atomic.Uint64
 	bothEnds, peerSkipped                   atomic.Uint64 // Flows with both ends' processes; second-end lookups left for lack of spare budget.
 	traced, kernelEnds                      atomic.Uint64 // Openers from connect tracing; ends owned by a kernel tunnel.
+	sendersTraced                           atomic.Uint64 // UDP sockets named by their traced sender.
 	budgetHit, overBudget, expired          atomic.Uint64
 	queueFull, noSocket, snapshots, indexed atomic.Uint64
 	knownMiss, noOwner, byOwner             atomic.Uint64
@@ -251,10 +252,11 @@ type processAttributor struct {
 }
 
 // connectSource names the process that opened a TCP connection from this
-// node (connectTracer).
+// node, and the one sending on a UDP socket (connectTracer).
 type connectSource interface {
 	opener(src, dst netip.AddrPort, at time.Time) (connectRecord, bool)
-	stats(now time.Time) (received, unresolved, lost uint64, kept int)
+	sender(inode uint64, at time.Time) (connectRecord, bool)
+	stats(now time.Time) traceStats
 	close()
 }
 
@@ -316,7 +318,11 @@ func (a *processAttributor) start() error {
 			a.logger.Warn("Connect tracing unavailable; openers of short connections will often be missed", "error", err)
 		} else {
 			a.connects = tracer
-			a.logger.Info("Connect tracing enabled: the process opening each TCP connection on this node is recorded when it connects")
+			udp := "unavailable: the kernel's BTF lacks the socket inode fields"
+			if tracer.udpReader != nil {
+				udp = fmt.Sprintf("traced at %d send functions", len(tracer.udpLinks))
+			}
+			a.logger.Info("Connect tracing enabled: the process opening each TCP connection on this node is recorded when it connects, and the one sending on each UDP socket as it sends", "udp_senders", udp)
 		}
 	}
 	a.workers.Add(1)
@@ -481,16 +487,48 @@ func (a *processAttributor) connectOpener(event database.NetworkEvent) (processI
 	if !ok {
 		return processIdentity{}, false
 	}
+	identity := a.tracedIdentity(record)
+	if identity.Pod == "" && event.SrcKind == "pod" {
+		identity.Pod = event.SrcNamespace + "/" + event.SrcName // Its own network namespace: the pod's.
+	}
+	return identity, true
+}
+
+// tracedSender is the process connect tracing saw send on the UDP socket a
+// lookup found, by its inode: no descriptors need reading.
+func (a *processAttributor) tracedSender(event database.NetworkEvent, c candidate, inode string, udp bool) (processIdentity, bool) {
+	if a.connects == nil || !udp {
+		return processIdentity{}, false
+	}
+	number, err := strconv.ParseUint(inode, 10, 64)
+	if err != nil {
+		return processIdentity{}, false
+	}
+	record, ok := a.connects.sender(number, event.Timestamp)
+	if !ok {
+		return processIdentity{}, false
+	}
+	identity := a.tracedIdentity(record)
+	if identity.Pod == "" && !c.host {
+		if c.side == "src" {
+			identity.Pod = event.SrcNamespace + "/" + event.SrcName
+		} else {
+			identity.Pod = event.DstNamespace + "/" + event.DstName
+		}
+	}
+	return identity, true
+}
+
+// tracedIdentity names a traced process, with its pod and container when its
+// container is a known pod's.
+func (a *processAttributor) tracedIdentity(record connectRecord) processIdentity {
 	identity := processIdentity{PID: record.pid, Command: record.command}
 	if record.containerID != "" && a.containers != nil {
 		if namespace, pod, name, ok := a.containers(record.containerID); ok {
 			identity.Pod, identity.Container = namespace+"/"+pod, name
 		}
 	}
-	if identity.Pod == "" && event.SrcKind == "pod" {
-		identity.Pod = event.SrcNamespace + "/" + event.SrcName // Its own network namespace: the pod's.
-	}
-	return identity, true
+	return identity
 }
 
 // kernelEnd reports whether a kernel tunnel device owns this end of a UDP
@@ -548,14 +586,16 @@ func (a *processAttributor) report() {
 	examples := a.examples
 	a.examples = nil
 	a.exampleMu.Unlock()
+	sendersTraced := a.sendersTraced.Swap(0)
 	if a.connects != nil {
-		received, unresolved, lost, kept := a.connects.stats(now)
-		if received+lost > 0 {
-			a.logger.Info("Connect tracing", "connects", received, "unnamed", unresolved, "lost", lost, "records", kept)
+		s := a.connects.stats(now)
+		if s.connects+s.lost+s.senders+s.sendersLost > 0 {
+			a.logger.Info("Connect tracing", "connects", s.connects, "unnamed", s.unnamed, "lost", s.lost, "records", s.records,
+				"udp_senders", s.senders, "udp_unnamed", s.sendersUnnamed, "udp_lost", s.sendersLost, "udp_sockets", s.sockets)
 		}
 	}
 	if attempted+inherited+overBudget+expired+queueFull+traced+kernelEnds > 0 {
-		a.logger.Info("Process attribution", "attempted", attempted, "matched", matched, "traced", traced, "kernel", kernelEnds, "both_ends", bothEnds, "second_end_skipped", peerSkipped, "from_index", indexed, "by_owner", byOwner, "inherited", inherited,
+		a.logger.Info("Process attribution", "attempted", attempted, "matched", matched, "traced", traced, "udp_traced", sendersTraced, "kernel", kernelEnds, "both_ends", bothEnds, "second_end_skipped", peerSkipped, "from_index", indexed, "by_owner", byOwner, "inherited", inherited,
 			"no_socket", noSocket, "no_owner", noOwner, "known_miss", knownMiss, "not_local", notLocal, "deadline_hit", budgetHit, "over_budget", overBudget,
 			"expired", expired, "queue_full", queueFull, "flows", flows, "snapshots", snapshots, "tables_read", tableReads, "tables_reused", tableReuse, "socket_queries", diagLookups,
 			"snapshot_ms", time.Duration(snapshotWork).Milliseconds(), "lookup_ms", time.Duration(work).Milliseconds(), "misses", strings.Join(examples, "; "))
@@ -772,6 +812,10 @@ func (a *processAttributor) lookup(event database.NetworkEvent, c candidate, dea
 			a.example(event, c, fmt.Sprintf("no socket (tables readable: %t)", opened))
 		}
 		return processIdentity{}, false
+	}
+	if identity, ok := a.tracedSender(event, c, inode, udp); ok {
+		a.sendersTraced.Add(1)
+		return identity, true
 	}
 	target := "socket:[" + inode + "]"
 	if proc, ok := a.indexedOwner(target, c.procs); ok {

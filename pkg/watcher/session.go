@@ -830,12 +830,20 @@ func (s *Session) account(event *database.NetworkEvent, at time.Time) {
 	event.SrcBytes, event.DstBytes, event.SrcPackets, event.DstPackets = s.SrcBytes, s.DstBytes, s.SrcPackets, s.DstPackets
 }
 
-// record is a flow's update, or its end when it expired.
+// record is a flow's update, or its end when it expired, made at time at. It
+// carries the time of the flow's last packet: the traffic it accounts for
+// moved by then, and an idle flow ended then, not when the sweep noticed.
+// An update is only made for traffic since the previous record, so a flow's
+// records stay in order.
 func (s *Session) record(at time.Time, ended bool) database.NetworkEvent {
 	srcIP, srcPort := parseAddr(s.Src)
 	dstIP, dstPort := parseAddr(s.Dst)
+	last := s.LastSeen
+	if last.IsZero() || last.After(at) {
+		last = at
+	}
 	event := database.NetworkEvent{
-		Timestamp: at,
+		Timestamp: last,
 		Interface: s.Iface,
 		IPVersion: s.IPVersion,
 		SrcIP:     srcIP,

@@ -43,6 +43,21 @@ export interface Repeat {
   bursts: number;
   /** Median time between the bursts' starts, in milliseconds; 0 with fewer than three bursts. */
   every: number;
+  /**
+   * Set when the flows are one port's, on a node or pod, with addresses
+   * outside the cluster: a torrent client's, a server's. Its sent bytes are
+   * then the peers', received the port's.
+   */
+  peers?: Peers;
+}
+
+export interface Peers {
+  /** Distinct addresses outside the cluster. */
+  count: number;
+  /** Flows a peer sent first in. */
+  opened: number;
+  /** A flow's record read from the peers to the port, with the port's process when known. */
+  event: NetworkEvent;
 }
 
 export type Row =
@@ -53,6 +68,8 @@ export type Row =
 /** How far apart two nodes' records of one flow may be and still join. */
 const sameFlowSlack = 2 * 60_000;
 const burstGap = 1000;
+/** Outside addresses one port must exchange flows with to show them as one row. */
+const minPeers = 3;
 
 const flowTypes = new Set(['TCP_START', 'TCP_UPDATE', 'TCP_END', 'UDP_START', 'UDP_UPDATE', 'UDP_END', 'TLS_SNI']);
 
@@ -223,6 +240,49 @@ function target(flow: Flow): string {
   return `${protocolOf(event)}|${event.DstIP}|${event.DstPort}`;
 }
 
+const inCluster = (kind: string) => kind === 'node' || kind === 'pod';
+
+/** The end of a flow on a node or pod whose other end is outside the cluster. */
+function localEnd(flow: Flow): 'src' | 'dst' | undefined {
+  const event = flow.merged;
+  if (flow.kind !== 'flow') return undefined;
+  if (inCluster(event.DstKind) && !event.SrcKind) return 'dst';
+  if (inCluster(event.SrcKind) && !event.DstKind) return 'src';
+  return undefined;
+}
+
+/** The node's or pod's port a flow with the outside uses, both ways alike. */
+function portKey(flow: Flow, side: 'src' | 'dst'): string {
+  const event = flow.merged;
+  const [kind, namespace, name, port] = side === 'dst' ? [event.DstKind, event.DstNamespace, event.DstName, event.DstPort] : [event.SrcKind, event.SrcNamespace, event.SrcName, event.SrcPort];
+  const owner = kind === 'pod' ? `pod|${namespace}/${name}` : 'node';
+  return ['port', flow.nodes.join('+'), protocolOf(event), owner, port].join('|');
+}
+
+/** Flows of one port with many outside addresses, as one row read from the peers to the port. */
+function peersOf(key: string, flows: Flow[]): Row {
+  const sides = new Map(flows.map(flow => [flow, localEnd(flow)!]));
+  const processAt = (flow: Flow) => {
+    const processes = endProcesses(flow.merged);
+    return sides.get(flow) === 'dst' ? processes.dst : processes.src;
+  };
+  const shown = flows.find(processAt) ?? flows[0];
+  const event = sides.get(shown) === 'src' ? turned(shown.merged) : shown.merged;
+  let fromPeers = 0, toPeers = 0;
+  for (const flow of flows) {
+    if (sides.get(flow) === 'dst') { fromPeers += flow.sent; toPeers += flow.received; } else { fromPeers += flow.received; toPeers += flow.sent; }
+  }
+  const remotes = new Set(flows.map(flow => (sides.get(flow) === 'dst' ? flow.merged.SrcIP : flow.merged.DstIP)));
+  return {
+    kind: 'repeat', key: `repeat|${key}`, last: flows[0].last,
+    repeat: {
+      key, flows, first: flows.map(flow => flow.first).sort()[0], last: flows[0].last,
+      sent: fromPeers, received: toPeers, bursts: flows.length, every: 0,
+      peers: { count: remotes.size, opened: flows.filter(flow => sides.get(flow) === 'dst').length, event },
+    },
+  };
+}
+
 function median(values: number[]): number {
   if (values.length < 2) return 0;
   const sorted = [...values].sort((a, b) => a - b);
@@ -236,8 +296,25 @@ function median(values: number[]): number {
 export function groupRecords(events: NetworkEvent[]): Row[] {
   const { groups, others } = groupFlows(events);
   const rows: Row[] = others.map(event => ({ kind: 'record', key: `record|${event.ID}`, last: event.Timestamp, event }));
+  const flows = groups.map(toFlow);
+  // One port's flows with many outside addresses: a torrent client's peers,
+  // a server's clients. Each address on its own row would bury the rest.
+  const ports = new Map<string, Flow[]>();
+  for (const flow of flows) {
+    const side = localEnd(flow);
+    if (side) ports.set(portKey(flow, side), [...(ports.get(portKey(flow, side)) ?? []), flow]);
+  }
+  const shown = new Set<Flow>();
+  for (const [key, members] of ports) {
+    const remotes = new Set(members.map(flow => (localEnd(flow) === 'dst' ? flow.merged.SrcIP : flow.merged.DstIP)));
+    if (remotes.size < minPeers) continue;
+    members.sort((a, b) => b.last.localeCompare(a.last));
+    members.forEach(flow => shown.add(flow));
+    rows.push(peersOf(key, members));
+  }
   const repeats = new Map<string, Flow[]>();
-  for (const flow of groups.map(toFlow)) {
+  for (const flow of flows) {
+    if (shown.has(flow)) continue;
     const key = `${opener(flow)}→${target(flow)}`;
     repeats.set(key, [...(repeats.get(key) ?? []), flow]);
   }

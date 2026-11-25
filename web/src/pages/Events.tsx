@@ -217,7 +217,7 @@ export function Events({ query }: { query: URLSearchParams }) {
         )}
         <div className="table-foot">
           <span className="muted small" aria-live="polite">
-            {events.length.toLocaleString()} records shown{search.view === 'flows' ? ` as ${rows.length.toLocaleString()} rows` : ''}
+            {events.length.toLocaleString()} records shown{search.view === 'flows' ? ` as ${rows.length.toLocaleString()} row${rows.length === 1 ? '' : 's'}` : ''}
             {page && !live && (page.complete && !page.nextCursor ? ' · whole window searched' : ` · back to ${dateTime(page.searchedFrom)}`)}
           </span>
           {loading && events.length > 0 && <span className="muted small"><Spinner /> Loading older events…</span>}
