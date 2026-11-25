@@ -111,7 +111,9 @@ func newTestAttributor(t *testing.T, configure ...func(*processAttributor)) (*pr
 	root := t.TempDir()
 	hostTables := map[string]string{"tcp": socketRow("192.0.2.10", 51000, "140.82.121.34", 443, "01", "900") +
 		// The kubelet's health check of the pod's server.
-		socketRow("192.0.2.10", 52000, "10.2.0.8", 8080, "01", "901")}
+		socketRow("192.0.2.10", 52000, "10.2.0.8", 8080, "01", "901"),
+		// Unconnected UDP sockets no listed process holds: a torrent client's.
+		"udp": socketRow("0.0.0.0", 51660, "0.0.0.0", 0, "07", "950") + socketRow("0.0.0.0", 51661, "0.0.0.0", 0, "07", "951")}
 	podTables := map[string]string{
 		"tcp": socketRow("10.2.0.8", 40000, "10.96.0.1", 443, "01", "700") + socketRow("0.0.0.0", 8080, "0.0.0.0", 0, "0A", "701"),
 		// The sidecar's dual-stack socket shows a v4 flow v4-mapped.
@@ -552,8 +554,47 @@ func (f fakeConnects) opener(src, dst netip.AddrPort, _ time.Time) (connectRecor
 	record, ok := f[connectKey{src, dst}]
 	return record, ok
 }
-func (f fakeConnects) stats(time.Time) (uint64, uint64, uint64, int) { return 0, 0, 0, len(f) }
-func (f fakeConnects) close()                                        {}
+func (f fakeConnects) sender(uint64, time.Time) (connectRecord, bool) { return connectRecord{}, false }
+func (f fakeConnects) stats(time.Time) traceStats                     { return traceStats{records: len(f)} }
+func (f fakeConnects) close()                                         {}
+
+// fakeSenders names the processes sending on UDP sockets, by inode.
+type fakeSenders map[uint64]connectRecord
+
+func (f fakeSenders) opener(netip.AddrPort, netip.AddrPort, time.Time) (connectRecord, bool) {
+	return connectRecord{}, false
+}
+func (f fakeSenders) sender(inode uint64, _ time.Time) (connectRecord, bool) {
+	record, ok := f[inode]
+	return record, ok
+}
+func (f fakeSenders) stats(time.Time) traceStats { return traceStats{sockets: len(f)} }
+func (f fakeSenders) close()                     {}
+
+// A torrent client's socket, bound to a port and sending to anyone: the
+// lookup finds it, but no readable process holds it. Its traced sender
+// names it, for peers reaching it and for its own sends.
+func TestTracedSenderNamesAnUnconnectedUDPSocket(t *testing.T) {
+	a, events := newTestAttributor(t, func(a *processAttributor) {
+		a.connects = fakeSenders{950: {pid: 4400, command: "transmission-da", at: time.Now()}}
+	})
+	in := attributed(t, a, events, database.NetworkEvent{EventType: database.EventUDPStart, Timestamp: time.Now(), SrcIP: "203.0.113.5", SrcPort: 7091, DstIP: "192.0.2.10", DstPort: 51660})
+	if in.ProcessSide != "dst" || in.ProcessCommand != "transmission-da" || in.ProcessPID != 4400 || in.ProcessPod != "" {
+		t.Fatalf("peer to the socket: %+v", in)
+	}
+	out := attributed(t, a, events, database.NetworkEvent{EventType: database.EventUDPStart, Timestamp: time.Now(), SrcIP: "192.0.2.10", SrcPort: 51660, DstIP: "198.51.100.7", DstPort: 6881})
+	if out.ProcessSide != "src" || out.ProcessCommand != "transmission-da" {
+		t.Fatalf("socket to a peer: %+v", out)
+	}
+	if a.sendersTraced.Load() != 2 {
+		t.Fatalf("udp_traced = %d", a.sendersTraced.Load())
+	}
+	// A socket no traced process sent on stays unnamed, as before.
+	other := attributed(t, a, events, database.NetworkEvent{EventType: database.EventUDPStart, Timestamp: time.Now(), SrcIP: "203.0.113.5", SrcPort: 7092, DstIP: "192.0.2.10", DstPort: 51661})
+	if other.ProcessSide != "" {
+		t.Fatalf("unknown socket named: %+v", other)
+	}
+}
 
 // A health check whose kubelet socket has closed: connect tracing names the
 // opener without a lookup, and the server's lookup still runs as the first

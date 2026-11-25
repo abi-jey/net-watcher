@@ -368,6 +368,19 @@ the budget. The program only reads: it cannot change, delay or drop a
 connection. It is assembled by the collector (no C toolchain), using field
 offsets from the kernel's BTF (`/sys/kernel/btf/vmlinux`, kernel 5.8+).
 
+UDP has no connect. A socket bound to a port sends to anyone: a BitTorrent
+client's DHT and transfers, QUIC, a resolver. Lookups find such a socket and
+its owner's uid, but often not the process holding it. The collector cannot
+list the descriptors of processes it does not own, and one user on a desktop
+has hundreds of processes. With the same flag, a second program at the entry
+of `udp_sendmsg` and `udpv6_sendmsg` records the sending process with the
+socket's inode, the number lookups find. It reports each socket at most once
+every 30 seconds while it sends, using an LRU map in the kernel, so a busy
+socket costs a map lookup per packet and nothing more. A lookup that finds
+the socket names its last sender, for flows either side started: a peer
+reaching the port, or the socket sending out. A socket that only receives is
+named once it sends.
+
 ```yaml
 args:
   - --process-attribution
@@ -382,17 +395,19 @@ securityContext:
 tracing program, which may read kernel memory: that is the added trust. Neither
 is `CAP_SYS_ADMIN`, and the collector stays unprivileged. Without them the
 collector logs `Connect tracing unavailable` and attributes as before. The
-accepting side is still found by socket lookups, and UDP is not traced.
+accepting side of a TCP connection is still found by socket lookups.
 
 Every 30 seconds the collector logs `Process attribution` with its counters
-(`attempted`, `matched`, `traced` (openers from connect tracing), `kernel`
+(`attempted`, `matched`, `traced` (openers from connect tracing), `udp_traced`
+(UDP sockets named by their traced sender), `kernel`
 (tunnel ends), `both_ends`, `second_end_skipped`, `by_owner`, `inherited`, `no_socket`, `no_owner`,
 `known_miss`, `deadline_hit`, `over_budget`, `expired`, `tables_read`,
 `tables_reused`, `socket_queries`, `lookup_ms`, `snapshot_ms`) and up to four example misses
 with their reason. With connect tracing it also logs `Connect tracing`:
 `connects` recorded, `unnamed` (the process had exited before it could be
 read), `lost` (records the kernel dropped for a full ring buffer) and
-`records` kept.
+`records` kept, and the same for UDP senders: `udp_senders`, `udp_unnamed`,
+`udp_lost` and `udp_sockets` (sockets with a known sender).
 
 Connections stay unattributed when the socket closed before the lookup ran
 (the opener of a TCP connection is still known with connect tracing), when
@@ -493,7 +508,9 @@ flow. A process that reaches five destinations makes five flows.
     the flow. `DstBytes` and `DstPackets` were sent by the destination.
 - **Updates.** An open flow that carried traffic gets a `TCP_UPDATE` or
   `UDP_UPDATE` record every 5 minutes, so a long transfer's volume shows
-  while it lasts rather than when it stops.
+  while it lasts rather than when it stops. Updates, and the end of a flow
+  that went quiet (`UDP_END` after 2 minutes, `TIMEOUT`), carry the time of
+  the flow's last packet, not the time the collector wrote them.
   - `ByteCount` on an update or end is the bytes since the flow's previous
     record. Summaries and charts add `ByteCount` over all records, so no byte
     counts twice and each lands in the hour it moved.
@@ -521,7 +538,11 @@ records on every node, with each node's process; a lookup reads from the
 client that asked to its resolver (↑ the query, ↓ the response). Flows one opener (a process,
 or an address when no process is known) makes to one destination again and
 again, such as health checks or a name looked up repeatedly, collapse into one
-row that expands to them. **Records** lists every stored record as it is.
+row that expands to them. So do the flows of one port of a node or pod with
+three or more addresses outside the cluster, whichever side sent first: a
+torrent client's peers, a server's clients. That row reads from the peers to
+the port, with ↑ what the peers sent and ↓ what the port sent. **Records**
+lists every stored record as it is.
 
 A collector forwards `FlowID` and the totals only to an ingester that
 advertises the `flows` capability. An older ingester gets the records without

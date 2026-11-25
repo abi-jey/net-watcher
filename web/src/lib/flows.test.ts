@@ -143,3 +143,31 @@ test('lookups at once are a burst, and bursts set the pace', () => {
   assert.equal(repeat.bursts, 4);
   assert.equal(repeat.every, 15_000);
 });
+
+test('one port\'s flows with many outside addresses are one row, both ways', () => {
+  const desktop = { CollectorID: 'desktop', Interface: 'enp1s0' } as Partial<NetworkEvent>;
+  const fromPeer = (n: number) => [
+    record({ ...desktop, EventType: 'UDP_START', FlowID: `p${n}`, Timestamp: at(n), SrcIP: `203.0.113.${n}`, SrcPort: 7000 + n, DstIP: '192.168.1.80', DstPort: 51660, DstKind: 'node', DstName: 'desktop', SrcBytes: 143, SrcPackets: 1 }),
+    record({ ...desktop, EventType: 'UDP_END', FlowID: `p${n}`, Timestamp: at(n + 0.001), SrcIP: `203.0.113.${n}`, SrcPort: 7000 + n, DstIP: '192.168.1.80', DstPort: 51660, DstKind: 'node', DstName: 'desktop', SrcBytes: 143, DstBytes: 314, ProcessSide: 'dst', ProcessCommand: 'transmission-da' }),
+  ];
+  const toPeer = record({ ...desktop, EventType: 'UDP_START', FlowID: 'q1', Timestamp: at(10), SrcIP: '192.168.1.80', SrcPort: 51660, SrcKind: 'node', SrcName: 'desktop',
+    DstIP: '198.51.100.7', DstPort: 6881, SrcBytes: 100, DstBytes: 900, ProcessSide: 'src', ProcessCommand: 'transmission-da' });
+  const browser = record({ ...desktop, EventType: 'UDP_START', FlowID: 'b1', Timestamp: at(11), SrcIP: '192.168.1.80', SrcPort: 50123, SrcKind: 'node', SrcName: 'desktop', DstIP: '142.250.1.1', DstPort: 443 });
+  const rows = groupRecords([...[1, 2, 3].flatMap(fromPeer), toPeer, browser]);
+  assert.equal(rows.length, 2);
+  const group = rows.find(row => row.kind === 'repeat') as Extract<Row, { kind: 'repeat' }>;
+  assert.ok(group.repeat.peers);
+  assert.equal(group.repeat.flows.length, 4);
+  assert.equal(group.repeat.peers.count, 4);
+  assert.equal(group.repeat.peers.opened, 3);
+  assert.equal(group.repeat.sent, 3 * 143 + 900); // By the peers.
+  assert.equal(group.repeat.received, 3 * 314 + 100); // By the port.
+  assert.equal(group.repeat.peers.event.DstPort, 51660); // Read toward the port, with its process.
+  assert.equal(group.repeat.peers.event.ProcessCommand, 'transmission-da');
+  assert.equal(group.repeat.peers.event.ProcessSide, 'dst');
+  assert.ok(rows.some(row => row.kind === 'flow' && row.flow.merged.DstPort === 443));
+
+  // Two outside addresses are two flows, as before.
+  assert.deepEqual(groupRecords([1, 2].flatMap(fromPeer)).map(row => row.kind), ['flow', 'flow']);
+});
+

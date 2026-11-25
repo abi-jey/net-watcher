@@ -197,6 +197,33 @@ func TestDNSLookupIsOneRecordPerNode(t *testing.T) {
 	}
 }
 
+// A flow that went quiet ended with its last packet, not when the sweep
+// noticed: its end, and its updates, carry the last packet's time.
+func TestIdleFlowEndsAtItsLastPacket(t *testing.T) {
+	sm := testManager(t)
+	noTunnels(sm)
+	sm.updateInterval = time.Millisecond
+	sm.TrackUDP("eth0", "[203.0.113.5]:7091", "[10.0.0.31]:51660", 7091, 51660, 143, false)
+	sm.TrackUDP("eth0", "[10.0.0.31]:51660", "[203.0.113.5]:7091", 51660, 7091, 314, false)
+	var last time.Time
+	sm.mutex.Lock()
+	for _, session := range sm.sessions {
+		last = session.LastSeen
+	}
+	sm.mutex.Unlock()
+	sm.recordFlows(last.Add(time.Second)) // An update: traffic since the start.
+	sm.recordFlows(last.Add(sm.sessionTimeout + 30*time.Second))
+	events := storedEvents(t, sm)
+	if len(events) != 3 || events[1].EventType != database.EventUDPUpdate || events[2].EventType != database.EventUDPEnd {
+		t.Fatalf("records: %+v", events)
+	}
+	for _, event := range events[1:] {
+		if !event.Timestamp.Equal(last) {
+			t.Fatalf("%s at %v, last packet at %v", event.EventType, event.Timestamp, last)
+		}
+	}
+}
+
 // Each interface is captured on its own: a query on a busy tunnel device
 // can be handled after its response on another. The response waits for it
 // and records the lookup, matched, with its evidence.

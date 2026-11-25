@@ -123,6 +123,51 @@ func TestSocketOffsetsFromKernelBTF(t *testing.T) {
 	if len(connectProgram(o)) == 0 {
 		t.Fatal("no program")
 	}
+	if !o.hasInode || o.socket == 0 || o.inode == 0 || len(udpSenderProgram(o)) == 0 {
+		t.Fatalf("UDP sender offsets %+v", o)
+	}
+}
+
+func udpEvent(pid uint32, comm string, inode, cgroup uint64) []byte {
+	raw := make([]byte, udpEventSize)
+	binary.NativeEndian.PutUint32(raw[0:], pid)
+	binary.NativeEndian.PutUint16(raw[4:], unix.AF_INET)
+	binary.NativeEndian.PutUint16(raw[6:], 51660)
+	binary.NativeEndian.PutUint64(raw[8:], inode)
+	copy(raw[16:32], comm)
+	binary.NativeEndian.PutUint64(raw[32:], cgroup)
+	return raw
+}
+
+func TestUDPSendersNameTheProcessBySocket(t *testing.T) {
+	root := t.TempDir()
+	process := filepath.Join(root, "4400")
+	if err := os.MkdirAll(process, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(process, "cgroup"), []byte("0::/user.slice/user-1000.slice/session-2.scope\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(process, "comm"), []byte("transmission-da\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tracer := &connectTracer{root: root, records: map[connectKey]connectRecord{}, senders: map[uint64]connectRecord{}, processes: map[connectProcessKey]connectProcess{}}
+	now := time.Now()
+	tracer.addSender(udpEvent(4400, "UTP", 97826323, 3), now) // Sent from a thread of its own name.
+	record, ok := tracer.sender(97826323, now.Add(time.Minute))
+	if !ok || record.pid != 4400 || record.command != "transmission-da" || record.containerID != "" {
+		t.Fatalf("record %+v, %t", record, ok)
+	}
+	if _, ok := tracer.sender(97826324, now); ok {
+		t.Fatal("another socket named")
+	}
+	if _, ok := tracer.sender(97826323, now.Add(udpSenderTTL+time.Second)); ok {
+		t.Fatal("a sender long silent named")
+	}
+	tracer.addSender(udpEvent(4500, "gone", 97826400, 3), now)
+	if _, ok := tracer.sender(97826400, now); ok || tracer.sentUnresolved.Load() != 1 {
+		t.Fatal("an unreadable process was recorded")
+	}
 }
 
 // Loads the program into the running kernel: needs CAP_BPF and CAP_PERFMON
@@ -161,10 +206,80 @@ func TestConnectTracerRecordsConnections(t *testing.T) {
 			break
 		}
 		if time.Now().After(deadline) {
-			received, unresolved, lost, kept := tracer.stats(time.Now())
-			t.Fatalf("no record for %v -> %v (received %d, unnamed %d, lost %d, kept %d)", src, dst, received, unresolved, lost, kept)
+			t.Fatalf("no record for %v -> %v (%+v)", src, dst, tracer.stats(time.Now()))
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Log("recorded", src, "->", dst, "by pid", strconv.Itoa(os.Getpid()))
+}
+
+// Loads the UDP sender programs: a socket that sends is named by its inode,
+// once, however often it sends (run with NET_WATCHER_BPF_TEST=1).
+func TestConnectTracerRecordsUDPSenders(t *testing.T) {
+	if os.Getenv("NET_WATCHER_BPF_TEST") == "" {
+		t.Skip("set NET_WATCHER_BPF_TEST=1 to load the eBPF program")
+	}
+	tracer, err := newConnectTracer("/proc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tracer.close()
+	if tracer.udpReader == nil {
+		t.Fatal("UDP sender programs not loaded")
+	}
+	for _, network := range []string{"udp4", "udp6"} {
+		address := map[string]string{"udp4": "127.0.0.1:0", "udp6": "[::1]:0"}[network]
+		receiver, err := net.ListenPacket(network, address)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sender, err := net.ListenPacket(network, address) // Unconnected, like a DHT node's.
+		if err != nil {
+			t.Fatal(err)
+		}
+		for range 50 {
+			if _, err := sender.WriteTo([]byte("ping"), receiver.LocalAddr()); err != nil {
+				t.Fatal(err)
+			}
+		}
+		file, err := sender.(*net.UDPConn).File()
+		if err != nil {
+			t.Fatal(err)
+		}
+		var stat unix.Stat_t
+		if err := unix.Fstat(int(file.Fd()), &stat); err != nil {
+			t.Fatal(err)
+		}
+		_ = file.Close()
+		deadline := time.Now().Add(2 * time.Second)
+		var first connectRecord
+		for {
+			if record, ok := tracer.sender(stat.Ino, time.Now()); ok {
+				if record.pid != os.Getpid() {
+					t.Fatalf("%s: pid %d, want %d", network, record.pid, os.Getpid())
+				}
+				first = record
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("%s: no sender for inode %d (%+v)", network, stat.Ino, tracer.stats(time.Now()))
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		// Sending again within udpReportEvery makes no new record.
+		for range 50 {
+			if _, err := sender.WriteTo([]byte("ping"), receiver.LocalAddr()); err != nil {
+				t.Fatal(err)
+			}
+		}
+		time.Sleep(100 * time.Millisecond)
+		if record, _ := tracer.sender(stat.Ino, time.Now()); !record.at.Equal(first.at) {
+			t.Fatalf("%s: reported again after %v", network, record.at.Sub(first.at))
+		}
+		_ = sender.Close()
+		_ = receiver.Close()
+	}
+	if s := tracer.stats(time.Now()); s.sendersLost > 0 {
+		t.Fatalf("%d records lost", s.sendersLost)
+	}
 }

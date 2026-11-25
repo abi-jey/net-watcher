@@ -412,7 +412,8 @@ export function RepeatRow({ repeat, expanded, onToggle, onFilter, fresh, openFlo
   repeat: Repeat; expanded: boolean; onToggle: () => void; onFilter?: OnFilter; fresh?: boolean; openFlow?: string; onToggleFlow: (key: string) => void;
 }) {
   const newest = repeat.flows[0];
-  const event = newest.merged;
+  const peers = repeat.peers;
+  const event = peers?.event ?? newest.merged;
   const lookup = newest.kind === 'lookup';
   const kind = lookup ? 'dns' : family(event.EventType);
   const processes = endProcesses(event);
@@ -420,14 +421,20 @@ export function RepeatRow({ repeat, expanded, onToggle, onFilter, fresh, openFlo
   const nodes = [...new Set(repeat.flows.flatMap(flow => flow.nodes))].sort();
   const open = repeat.flows.filter(flow => flow.open).length;
   const facts = [`${n} ${lookup ? 'lookups' : 'flows'}${repeat.bursts < n ? ` in ${repeat.bursts} burst${repeat.bursts === 1 ? '' : 's'}` : ''}`, repeat.every ? `every ~${duration(repeat.every)}` : '',
+    peers && peers.opened < n ? `${peers.opened} started by peers` : '',
     directions({ SrcBytes: repeat.sent, DstBytes: repeat.received }), open ? `${open} open` : ''].filter(Boolean);
+  const typeHelp = peers
+    ? `${n} flows between this port and ${peers.count} addresses outside the cluster, either side sending first; ↑ is what the peers sent, ↓ what the port sent. Select to list them`
+    : `${n} ${lookup ? 'lookups of one name' : 'flows'} by one ${event.ProcessSide === 'src' ? 'process' : 'source'} to one destination; select to list them`;
   return (
     <li className={`ev ev-repeat ${kind} ${expanded ? 'open' : ''} ${fresh ? 'fresh' : ''}`}>
       <div className="ev-row" role="button" tabIndex={0} aria-expanded={expanded} onClick={onToggle}
         onKeyDown={key => { if (key.key === 'Enter' || key.key === ' ') { key.preventDefault(); onToggle(); } }}>
         <span className="ev-time mono" title={span(repeat.first, repeat.last)}>{rowTime(repeat.last)}</span>
-        <span className="ev-type"><span className={`type ${kind}`} title={`${n} ${lookup ? 'lookups of one name' : 'flows'} by one ${event.ProcessSide === 'src' ? 'process' : 'source'} to one destination; select to list them`}>{n}× {lookup ? 'DNS' : kind.toUpperCase()}</span></span>
-        <span className="ev-src"><Endpoint side={source(event)} which="src" process={processes.src} event={event} onFilter={onFilter} /></span>
+        <span className="ev-type"><span className={`type ${kind}`} title={typeHelp}>{n}× {lookup ? 'DNS' : kind.toUpperCase()}</span></span>
+        <span className="ev-src">{peers
+          ? <span className="ep" title="Distinct addresses outside the cluster that exchanged traffic with this port"><span className="ep-name">{peers.count.toLocaleString()} peers</span><span className="ep-on">outside the cluster</span></span>
+          : <Endpoint side={source(event)} which="src" process={processes.src} event={event} onFilter={onFilter} />}</span>
         <span className="ev-arrow" aria-label="to"><Icon name="arrow" size={14} /></span>
         <span className="ev-dst"><Endpoint side={destination(event)} which="dst" name={event.DstKind ? undefined : remoteName(event)} process={processes.dst} event={event} onFilter={onFilter} /></span>
         <span className="ev-detail">
