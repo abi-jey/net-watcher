@@ -156,7 +156,8 @@ func aggregateProcesses(tx *gorm.DB, events []NetworkEvent, delta int64) error {
 	counts := map[string]interface{}{
 		"event_count":      gorm.Expr("event_count + excluded.event_count"),
 		"connections":      gorm.Expr("connections + excluded.connections"),
-		"peer_connections": gorm.Expr("peer_connections + excluded.peer_connections"),
+		// Rows from before the column existed hold NULL.
+		"peer_connections": gorm.Expr("COALESCE(peer_connections, 0) + excluded.peer_connections"),
 		"byte_count":       gorm.Expr("byte_count + excluded.byte_count"),
 	}
 	updates := clause.Assignments(counts)

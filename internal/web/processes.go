@@ -84,7 +84,7 @@ func (s *Server) handleProcesses(w http.ResponseWriter, r *http.Request) {
 		from, to = from.Truncate(time.Hour), to.Add(time.Hour-time.Nanosecond).Truncate(time.Hour)
 		query := `SELECT collector_id AS collector, side, pod, MAX(namespace) AS namespace, container, command,
 			MIN(first_seen) AS first, MAX(last_seen) AS last, SUM(event_count) AS events, SUM(connections) AS connections,
-			SUM(peer_connections) AS peer_connections, SUM(byte_count) AS bytes
+			COALESCE(SUM(peer_connections), 0) AS peer_connections, SUM(byte_count) AS bytes
 			FROM hourly_processes WHERE hour >= ? AND hour < ?`
 		args := []interface{}{from.Unix(), to.Unix()}
 		if namespace != "" {

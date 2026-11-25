@@ -140,3 +140,28 @@ func TestProcessFilterUsesPartialIndex(t *testing.T) {
 		t.Fatalf("plan does not use idx_process_time: %v", plan)
 	}
 }
+
+// Hourly rows written before peer_connections existed hold NULL there; later
+// events in the same hour still add up.
+func TestProcessSummaryPeerCountsOnRowsFromBeforeTheColumn(t *testing.T) {
+	db := summaryDB(t)
+	if err := db.EnableSummaries(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	at := time.Now().UTC().Truncate(time.Hour)
+	if err := db.InsertBatch([]NetworkEvent{processEvent(at, EventTCPStart, "node-a", "dst", "demo/db-0", "postgres", "postgres", 0)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Exec("UPDATE hourly_processes SET peer_connections = NULL").Error; err != nil {
+		t.Fatal(err)
+	}
+	check := withPeer(processEvent(at.Add(time.Minute), EventTCPStart, "node-a", "src", "", "", "kubelet", 0), "demo/db-0", "postgres", "postgres")
+	if err := db.InsertBatch([]NetworkEvent{check}); err != nil {
+		t.Fatal(err)
+	}
+	var peers int64
+	if err := db.Raw("SELECT peer_connections FROM hourly_processes WHERE command = 'postgres'").Scan(&peers).Error; err != nil || peers != 1 {
+		t.Fatalf("postgres peer connections %d, %v", peers, err)
+	}
+	assertProcessSummaryMatchesRaw(t, db)
+}
