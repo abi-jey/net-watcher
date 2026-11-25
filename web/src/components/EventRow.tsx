@@ -21,7 +21,7 @@ export type OnFilter = ((condition: Term) => void) | undefined;
  * and "hide"; Alt-click hides at once. The menu is positioned on the page,
  * so a row's clipped cells do not cut it off.
  */
-function Tag({ className, title, condition, onFilter, children }: { className: string; title: string; condition?: Term; onFilter: OnFilter; children: ReactNode }) {
+function Tag({ className, title, condition, label, onFilter, children }: { className: string; title: string; condition?: Term; label?: string; onFilter: OnFilter; children: ReactNode }) {
   const [at, setAt] = useState<{ left: number; top: number }>();
   const menu = useRef<HTMLSpanElement>(null);
   useEffect(() => {
@@ -37,6 +37,9 @@ function Tag({ className, title, condition, onFilter, children }: { className: s
   if (!condition || !onFilter) return <span className={className} title={title}>{children}</span>;
   const reading = describe(condition);
   const value = reading.values.join(', ');
+  // What the condition selects: its label, or field and value ("is" left unsaid).
+  const head = label ? <b>{label}</b> : <>{reading.field}{reading.op === 'is' ? '' : ` ${reading.op}`} <b>{value}</b></>;
+  const what = label ?? `${reading.field}${reading.op === 'is' ? '' : ` ${reading.op}`} ${value}`;
   const pick = (chosen: Term) => { setAt(undefined); onFilter(chosen); };
   const open = (event: MouseEvent<HTMLButtonElement>) => {
     event.stopPropagation();
@@ -46,13 +49,13 @@ function Tag({ className, title, condition, onFilter, children }: { className: s
   };
   return (
     <>
-      <button type="button" className={`${className} filterable`} title={`${title}. Select to filter by ${reading.field} ${value}; Alt-click hides it.`}
+      <button type="button" className={`${className} filterable`} title={`${title.replace(/\.$/, '')}. Select to filter by ${what}; Alt-click hides it.`}
         aria-haspopup="menu" aria-expanded={Boolean(at)} onClick={open} onKeyDown={event => event.stopPropagation()}>
         {children}
       </button>
       {at && (
         <span className="tag-menu" role="menu" ref={menu} style={at} onClick={event => event.stopPropagation()} onKeyDown={event => event.stopPropagation()}>
-          <span className="tag-menu-head">{reading.field} <b>{value}</b></span>
+          <span className="tag-menu-head">{head}</span>
           <button type="button" role="menuitem" onClick={() => pick(condition)}><Icon name="check" size={12} />Show only this</button>
           <button type="button" role="menuitem" onClick={() => pick(negate(condition))}><Icon name="close" size={12} />Hide this</button>
         </span>
@@ -210,7 +213,7 @@ export function EventRow({ event, expanded, onToggle, onFilter, fresh }: { event
         <span className="ev-arrow" aria-label="to"><Icon name="arrow" size={14} /></span>
         <span className="ev-dst"><Endpoint side={dst} which="dst" name={dst.kind ? undefined : remoteName(event)} process={processes.dst} event={event} onFilter={onFilter} /></span>
         <span className="ev-detail">
-          {isHealthCheck(event) && <Tag className="ctx check" title={`Health check: ${describeProbe(event.Probe)}, port ${event.DstPort}. ${healthCheckEvidence(event)} Select to show only or hide health checks.`} condition={healthChecks} onFilter={onFilter}>health check</Tag>}
+          {isHealthCheck(event) && <Tag className="ctx check" title={`Health check: ${describeProbe(event.Probe)}, port ${event.DstPort}. ${healthCheckEvidence(event)}`} condition={healthChecks} label="health checks" onFilter={onFilter}>health check</Tag>}
           <Details event={event} onFilter={onFilter} />
           {route && <Tag className="ctx route" title={`${route.help}${event.TailnetPeer ? ` Device: ${event.TailnetPeerName || event.TailnetPeer}.` : ''}`} condition={is('route', event.Route)} onFilter={onFilter}>{route.label}{peer ? <span className="muted"> · {peer}</span> : null}</Tag>}
           <Tag className="ctx" title={`${event.Interface}: ${link.help}`} condition={link.id ? is('iface.type', link.id) : undefined} onFilter={onFilter}>{link.role}</Tag>
