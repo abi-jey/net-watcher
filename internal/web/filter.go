@@ -149,21 +149,18 @@ func sided(kind fieldKind, column string, values map[string]string, unit func(st
 // filterFields by canonical name; filterAliases maps other names to them.
 var filterFields, filterAliases = func() (map[string]*filterField, map[string]string) {
 	fields := map[string]*filterField{
-		"type":              {kind: enumField, columns: []string{"event_type"}, values: eventTypeValues},
-		"node":              {kind: stringField, columns: []string{"collector_id"}},
-		"iface":             {kind: stringField, columns: []string{"interface"}},
-		"iface.type":        {kind: roleField, columns: []string{"interface"}},
-		"ipv":               {kind: numberField, columns: []string{"ip_version"}, unit: ipVersion},
-		"process":           {kind: stringField, columns: []string{"process_command"}},
-		"process.pod":       {kind: stringField, columns: []string{"process_pod"}},
-		"process.container": {kind: stringField, columns: []string{"process_container"}},
-		"process.side":      {kind: enumField, columns: []string{"process_side"}, values: sideValues},
-		"route":             {kind: enumField, columns: []string{"route"}, values: routeValues},
-		"peer":              {kind: stringField, columns: []string{"tailnet_peer", "tailnet_peer_name"}, entity: true},
-		"domain":            {kind: domainField, columns: []string{"hostname", "dns_query", "tls_sni"}, entity: true},
-		"rcode":             {kind: enumField, columns: []string{"dns_response_code"}, values: rcodeValues, shown: sortedKeys(rcodeNames)},
-		"bytes":             {kind: numberField, columns: []string{"byte_count"}, unit: byteCount},
-		"duration":          {kind: numberField, columns: []string{"duration"}, unit: milliseconds},
+		"type":         {kind: enumField, columns: []string{"event_type"}, values: eventTypeValues},
+		"node":         {kind: stringField, columns: []string{"collector_id"}},
+		"iface":        {kind: stringField, columns: []string{"interface"}},
+		"iface.type":   {kind: roleField, columns: []string{"interface"}},
+		"ipv":          {kind: numberField, columns: []string{"ip_version"}, unit: ipVersion},
+		"process.side": {kind: enumField, columns: []string{"process_side"}, values: sideValues},
+		"route":        {kind: enumField, columns: []string{"route"}, values: routeValues},
+		"peer":         {kind: stringField, columns: []string{"tailnet_peer", "tailnet_peer_name"}, entity: true},
+		"domain":       {kind: domainField, columns: []string{"hostname", "dns_query", "tls_sni"}, entity: true},
+		"rcode":        {kind: enumField, columns: []string{"dns_response_code"}, values: rcodeValues, shown: sortedKeys(rcodeNames)},
+		"bytes":        {kind: numberField, columns: []string{"byte_count"}, unit: byteCount},
+		"duration":     {kind: numberField, columns: []string{"duration"}, unit: milliseconds},
 	}
 	for name, column := range map[string]string{"ip": "ip", "port": "port", "kind": "kind", "ns": "namespace", "name": "name", "workload": "workload"} {
 		kind, values, unit := stringField, map[string]string(nil), (func(string) (int64, error))(nil)
@@ -177,8 +174,15 @@ var filterFields, filterAliases = func() (map[string]*filterField, map[string]st
 		}
 		fields[name], fields["src."+name], fields["dst."+name] = sided(kind, column, values, unit)
 	}
+	// A connection records up to two processes (see processEndColumns). A
+	// bare name matches either; src./dst. the one that opened or accepted it.
+	for name, column := range map[string]string{"process": "command", "process.pod": "pod", "process.container": "container"} {
+		fields[name] = &filterField{kind: stringField, columns: []string{"process_" + column, "peer_process_" + column}}
+		fields["src."+name] = &filterField{kind: stringField, columns: []string{"src_process_" + column}}
+		fields["dst."+name] = &filterField{kind: stringField, columns: []string{"dst_process_" + column}}
+	}
 	aliases := map[string]string{"namespace": "ns", "src.namespace": "src.ns", "dst.namespace": "dst.ns", "collector": "node", "interface": "iface",
-		"iface.role": "iface.type", "command": "process", "host": "domain", "ipversion": "ipv", "event": "type"}
+		"iface.role": "iface.type", "command": "process", "src.command": "src.process", "dst.command": "dst.process", "host": "domain", "ipversion": "ipv", "event": "type"}
 	return fields, aliases
 }()
 
@@ -193,7 +197,28 @@ func lookupField(name string) (string, *filterField, bool) {
 
 // textColumns are searched by a bare word.
 var textColumns = []string{"src_ip", "dst_ip", "hostname", "dns_query", "tls_sni", "src_name", "dst_name", "src_namespace", "dst_namespace", "src_workload", "dst_workload",
-	"process_command", "process_pod", "process_container", "tailnet_peer", "tailnet_peer_name"}
+	"process_command", "process_pod", "process_container", "peer_process_command", "peer_process_pod", "peer_process_container", "tailnet_peer", "tailnet_peer_name"}
+
+// processEndColumns are virtual columns for the process at one end. An event
+// stores one process at process_side and, when both ends were on the
+// collector's node, the other end's as peer_process_*.
+var processEndColumns = func() map[string]string {
+	columns := map[string]string{}
+	for end, other := range map[string]string{"src": "dst", "dst": "src"} {
+		for _, field := range []string{"command", "pod", "container"} {
+			columns[end+"_process_"+field] = fmt.Sprintf("(CASE process_side WHEN '%s' THEN process_%s WHEN '%s' THEN peer_process_%s END)", end, field, other, field)
+		}
+	}
+	return columns
+}()
+
+// sqlColumn is a column's SQL: its name, or a virtual column's expression.
+func sqlColumn(column string) string {
+	if expression, ok := processEndColumns[column]; ok {
+		return expression
+	}
+	return column
+}
 
 // FilterError is a syntax or value error at a byte offset of the expression.
 type FilterError struct {
@@ -746,7 +771,7 @@ func (e *expr) sql() (string, []any) {
 		// An unset entity: every one of its columns is unset.
 		var unset []string
 		for _, column := range e.field.columns {
-			unset = append(unset, "COALESCE("+column+", '') = ''")
+			unset = append(unset, "COALESCE("+sqlColumn(column)+", '') = ''")
 		}
 		parts = append(parts, "("+strings.Join(unset, " AND ")+")")
 	}
@@ -776,7 +801,7 @@ func (e *expr) hasNone() bool {
 }
 
 func (e *expr) columnSQL(column string) (string, []any) {
-	text := "COALESCE(" + column + ", '')"
+	text := "COALESCE(" + sqlColumn(column) + ", '')"
 	var parts []string
 	var args []any
 	switch {
@@ -785,7 +810,7 @@ func (e *expr) columnSQL(column string) (string, []any) {
 			parts, args = append(parts, text+" LIKE ? ESCAPE '\\'"), append(args, likeContains(v.text))
 		}
 	case e.field.kind == numberField:
-		number := "COALESCE(" + column + ", 0)"
+		number := "COALESCE(" + sqlColumn(column) + ", 0)"
 		for _, v := range e.norm {
 			switch e.op {
 			case "<", "<=", ">", ">=":
@@ -1003,6 +1028,16 @@ func eventText(e *database.NetworkEvent, column string) string {
 		return e.ProcessContainer
 	case "process_side":
 		return e.ProcessSide
+	case "peer_process_command":
+		return e.PeerProcessCommand
+	case "peer_process_pod":
+		return e.PeerProcessPod
+	case "peer_process_container":
+		return e.PeerProcessContainer
+	case "src_process_command", "src_process_pod", "src_process_container", "dst_process_command", "dst_process_pod", "dst_process_container":
+		end, field, _ := strings.Cut(column, "_process_")
+		command, pod, container := processAt(e, end)
+		return map[string]string{"command": command, "pod": pod, "container": container}[field]
 	case "route":
 		return e.Route
 	case "tailnet_peer":
@@ -1019,6 +1054,18 @@ func eventText(e *database.NetworkEvent, column string) string {
 		return e.DNSResponseCode
 	}
 	panic("filter: no text column " + column)
+}
+
+// processAt is the process recorded at one end ("src" or "dst"), as
+// processEndColumns reads it.
+func processAt(e *database.NetworkEvent, end string) (command, pod, container string) {
+	switch e.ProcessSide {
+	case "":
+		return "", "", ""
+	case end:
+		return e.ProcessCommand, e.ProcessPod, e.ProcessContainer
+	}
+	return e.PeerProcessCommand, e.PeerProcessPod, e.PeerProcessContainer
 }
 
 func eventNumber(e *database.NetworkEvent, column string) int64 {

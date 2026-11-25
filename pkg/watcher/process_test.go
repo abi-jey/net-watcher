@@ -103,7 +103,9 @@ func writeFakeProc(t *testing.T, root string, processes []fakeProcess) {
 func newTestAttributor(t *testing.T) (*processAttributor, chan database.NetworkEvent) {
 	t.Helper()
 	root := t.TempDir()
-	hostTables := map[string]string{"tcp": socketRow("192.0.2.10", 51000, "140.82.121.34", 443, "01", "900")}
+	hostTables := map[string]string{"tcp": socketRow("192.0.2.10", 51000, "140.82.121.34", 443, "01", "900") +
+		// The kubelet's health check of the pod's server.
+		socketRow("192.0.2.10", 52000, "10.2.0.8", 8080, "01", "901")}
 	podTables := map[string]string{
 		"tcp": socketRow("10.2.0.8", 40000, "10.96.0.1", 443, "01", "700") + socketRow("0.0.0.0", 8080, "0.0.0.0", 0, "0A", "701"),
 		// The sidecar's dual-stack socket shows a v4 flow v4-mapped.
@@ -118,6 +120,7 @@ func newTestAttributor(t *testing.T) (*processAttributor, chan database.NetworkE
 		{pid: 200, netns: "net:[2]", cgroup: podCgroup(testContainerID), comm: "python3", sockets: []string{"700", "701", "703"}, tables: podTables},
 		{pid: 201, netns: "net:[2]", cgroup: podCgroup(testSidecarID), comm: "envoy", sockets: []string{"702"}, tables: podTables},
 		{pid: 300, netns: "net:[1]", cgroup: "0::/system.slice/k3s.service\n", comm: "k3s-server", sockets: []string{"900"}, tables: hostTables},
+		{pid: 301, netns: "net:[1]", cgroup: "0::/system.slice/kubelet.service\n", comm: "kubelet", sockets: []string{"901"}, tables: hostTables},
 	})
 	events := make(chan database.NetworkEvent, 16)
 	a := &processAttributor{
@@ -251,8 +254,46 @@ func TestProcessAttributionInPodAndHostNamespaces(t *testing.T) {
 	}
 }
 
+// A connection between two processes on this node, such as the kubelet's
+// health check of a local pod, records both: the opener and the acceptor.
+func TestProcessAttributionRecordsBothLocalEnds(t *testing.T) {
+	a, events := newTestAttributor(t)
+	check := database.NetworkEvent{EventType: database.EventTCPStart, SrcIP: "192.0.2.10", SrcPort: 52000, DstIP: "10.2.0.8", DstPort: 8080, SrcKind: "node"}
+	podSide(&check, "dst")
+	got := attributed(t, a, events, check)
+	if got.ProcessSide != "src" || got.ProcessCommand != "kubelet" || got.ProcessPID != 301 || got.ProcessPod != "" {
+		t.Fatalf("opener: side=%q command=%q pid=%d pod=%q", got.ProcessSide, got.ProcessCommand, got.ProcessPID, got.ProcessPod)
+	}
+	if got.PeerProcessCommand != "python3" || got.PeerProcessPID != 200 || got.PeerProcessPod != "demo/api-1" || got.PeerProcessContainer != "api" {
+		t.Fatalf("acceptor: command=%q pid=%d pod=%q container=%q", got.PeerProcessCommand, got.PeerProcessPID, got.PeerProcessPod, got.PeerProcessContainer)
+	}
+	if a.bothEnds.Load() != 1 {
+		t.Fatalf("both_ends = %d, want 1", a.bothEnds.Load())
+	}
+	// The server's reply carries the same two processes, its own end first.
+	reply := database.NetworkEvent{EventType: database.EventTCPEnd, SrcIP: "10.2.0.8", SrcPort: 8080, DstIP: "192.0.2.10", DstPort: 52000}
+	if a.handle(&reply) || reply.ProcessSide != "src" || reply.ProcessCommand != "python3" || reply.PeerProcessCommand != "kubelet" || reply.PeerProcessPod != "" {
+		t.Fatalf("reply: %+v", reply)
+	}
+}
+
+func TestSecondEndLookupsNeedSpareBudget(t *testing.T) {
+	now := time.Now()
+	b := newWorkBudget(10*time.Millisecond, now)
+	if !b.spare(now) {
+		t.Fatal("a full budget has room to spare")
+	}
+	b.spend(7 * time.Millisecond)
+	if b.spare(now) || !b.ready(now) {
+		t.Fatal("3ms left of 10ms/s: first lookups may run, second-end lookups may not")
+	}
+	if !b.spare(now.Add(300 * time.Millisecond)) {
+		t.Fatal("the allowance refills")
+	}
+}
+
 func TestProcessAttributionNeverBlocksPackets(t *testing.T) {
-	a := &processAttributor{jobs: make(chan processJob, 1), flows: map[string]processIdentity{}, logger: log.Default()}
+	a := &processAttributor{jobs: make(chan processJob, 1), flows: map[string]flowProcesses{}, logger: log.Default()}
 	event := database.NetworkEvent{EventType: database.EventTCPStart, SrcKind: "pod", SrcUID: "x"}
 	if !a.handle(&event) || a.handle(&event) || a.queueFull.Load() != 1 {
 		t.Fatal("a full queue blocked or was not counted")
@@ -392,7 +433,7 @@ func TestHostSocketsAreQueriedFromTheKernel(t *testing.T) {
 		{pid: 400, netns: self, cgroup: "0::/system.slice/fetch.service\n", comm: "fetch",
 			sockets: []string{fmt.Sprint(socketInode(t, client.(*net.TCPConn)))}},
 		{pid: 401, netns: self, cgroup: "0::/system.slice/web.service\n", comm: "web",
-			sockets: []string{fmt.Sprint(socketInode(t, listener.(*net.TCPListener)))}},
+			sockets: []string{fmt.Sprint(socketInode(t, listener.(*net.TCPListener))), fmt.Sprint(socketInode(t, server.(*net.TCPConn)))}},
 	})
 	events := make(chan database.NetworkEvent, 4)
 	// This tests which lookups run, not how fast: a shared CI runner under the
@@ -412,8 +453,9 @@ func TestHostSocketsAreQueriedFromTheKernel(t *testing.T) {
 
 	clientAddr, serverAddr := client.LocalAddr().(*net.TCPAddr), client.RemoteAddr().(*net.TCPAddr)
 	connection := database.NetworkEvent{EventType: database.EventTCPStart, SrcIP: "127.0.0.1", SrcPort: uint16(clientAddr.Port), DstIP: "127.0.0.1", DstPort: uint16(serverAddr.Port)}
-	if got := attributed(t, a, events, connection); got.ProcessPID != 400 || got.ProcessCommand != "fetch" || got.ProcessSide != "src" {
-		t.Fatalf("host client: pid=%d command=%q side=%q", got.ProcessPID, got.ProcessCommand, got.ProcessSide)
+	if got := attributed(t, a, events, connection); got.ProcessPID != 400 || got.ProcessCommand != "fetch" || got.ProcessSide != "src" ||
+		got.PeerProcessPID != 401 || got.PeerProcessCommand != "web" {
+		t.Fatalf("host client and server: pid=%d command=%q side=%q, peer pid=%d command=%q", got.ProcessPID, got.ProcessCommand, got.ProcessSide, got.PeerProcessPID, got.PeerProcessCommand)
 	}
 	// A connection from a port nothing holds (forwarded traffic after NAT)
 	// reaches the server's listener on the receiving side only.

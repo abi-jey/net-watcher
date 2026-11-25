@@ -82,16 +82,30 @@ func filterEvents(t *testing.T, db *gorm.DB, now time.Time, n int, seed uint64) 
 		}
 		// Process fields are set together, as the collector sets them.
 		if r.IntN(2) == 0 {
-			e.ProcessCommand, e.ProcessSide = pick("curl", "python3", "tailscaled"), pick("src", "dst")
+			e.ProcessCommand, e.ProcessSide = pick("curl", "python3", "tailscaled", "kubelet"), pick("src", "dst")
 			e.ProcessPod, e.ProcessContainer = pick("demo/api-1", ""), pick("api", "")
+			// The other end's process, when both ends were on the node.
+			if r.IntN(2) == 0 {
+				e.PeerProcessCommand, e.PeerProcessPod, e.PeerProcessContainer = pick("python3", "kubelet", "curl"), pick("demo/api-1", ""), pick("api", "")
+			}
 		}
 		events[i] = e
 	}
 	if err := db.CreateInBatches(&events, 100).Error; err != nil {
 		t.Fatal(err)
 	}
+	// Unset columns are NULL in rows stored before the column existed. A
+	// process's fields are added and written together, so in rows with a
+	// process (or peer process) its pod and container are never NULL: the
+	// process index walks rely on it.
+	together := map[string]string{"process_pod": "process_side", "process_container": "process_side",
+		"peer_process_pod": "peer_process_command", "peer_process_container": "peer_process_command"}
 	for _, column := range append(append([]string{}, textColumns...), "collector_id", "interface", "route", "process_side", "src_kind", "dst_kind", "dns_response_code") {
-		if err := db.Exec("UPDATE network_events SET " + column + " = NULL WHERE " + column + " = '' AND id % 3 = 0").Error; err != nil {
+		condition := ""
+		if owner, ok := together[column]; ok {
+			condition = " AND COALESCE(" + owner + ", '') = ''"
+		}
+		if err := db.Exec("UPDATE network_events SET " + column + " = NULL WHERE " + column + " = '' AND id % 3 = 0" + condition).Error; err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -180,8 +194,24 @@ func TestFilterSQLAndLiveTailAgree(t *testing.T) {
 	events := filterEvents(t, f.writer.DB, now, 600, 7)
 	r := rand.New(rand.NewPCG(11, 3))
 	checked, nonTrivial := 0, 0
-	for i := 0; i < 800; i++ {
-		text := randomFilter(r, 3)
+	// Process identities at one end, as the Processes page links them, walk
+	// the process and peer process indexes; random filters rarely do.
+	identities := []string{
+		"src.process = python3 and src.process.pod = demo/api-1 and src.process.container = api",
+		"dst.process = python3 and dst.process.pod = demo/api-1 and dst.process.container = api and type = TCP_START",
+		"(src.process = kubelet and src.process.pod = none and src.process.container = none) or (dst.process = kubelet and dst.process.pod = none and dst.process.container = none)",
+		"(src.process = curl and src.process.pod = demo/api-1 and src.process.container = api) or (dst.process = curl and dst.process.pod = demo/api-1 and dst.process.container = api)",
+	}
+	for i := 0; i < 800+len(identities); i++ {
+		text := ""
+		if i < len(identities) {
+			text = identities[i]
+			if filter, _ := parseFilter(text); len(eventsParts(filter)) != 2 {
+				t.Fatalf("%q does not walk the process indexes: %v", text, eventsParts(filter))
+			}
+		} else {
+			text = randomFilter(r, 3)
+		}
 		filter, err := parseFilter(text)
 		if err != nil {
 			t.Fatalf("%q: %v", text, err)
@@ -242,42 +272,62 @@ func TestFilterMeanings(t *testing.T) {
 	podToNode := database.NetworkEvent{EventType: "TCP_START", SrcKind: "pod", SrcNamespace: "default", SrcIP: "10.0.1.5", DstKind: "node", DstIP: "100.64.1.1", DstPort: 443, Interface: "lxc1"}
 	external := database.NetworkEvent{EventType: "TLS_SNI", SrcKind: "node", SrcIP: "192.168.1.5", DstIP: "142.250.1.1", DstPort: 443, TLSSNI: "api.Example.com.", ByteCount: 3000, Interface: "enp0s25"}
 	dns := database.NetworkEvent{EventType: "DNS", SrcKind: "pod", SrcNamespace: "kube-system", SrcName: "coredns-1", DstIP: "1.1.1.1", DstPort: 53, DNSQuery: "notexample.com", DNSResponseCode: "Non-Existent Domain"}
-	events := map[string]*database.NetworkEvent{"podToNode": &podToNode, "external": &external, "dns": &dns}
-	for _, test := range []struct {
-		filter string
-		want   string
+	// The kubelet's health check of a pod on its node: both processes known.
+	probe := database.NetworkEvent{EventType: "TCP_START", SrcKind: "node", SrcIP: "10.0.1.155", DstKind: "pod", DstNamespace: "keda", DstIP: "10.0.1.84", DstPort: 8081,
+		ProcessCommand: "kubelet", ProcessSide: "src", PeerProcessCommand: "keda", PeerProcessPod: "keda/keda-operator-1", PeerProcessContainer: "keda-operator"}
+	// Only the accepting process known.
+	accepted := database.NetworkEvent{EventType: "TCP_START", SrcIP: "10.0.0.31", DstKind: "pod", DstNamespace: "base", DstIP: "10.0.1.112", DstPort: 8000,
+		ProcessCommand: "python", ProcessSide: "dst", ProcessPod: "base/base-server-1", ProcessContainer: "base-server"}
+	for _, set := range []struct {
+		events map[string]*database.NetworkEvent
+		tests  [][2]string // Filter, the events it selects.
 	}{
-		{"kind != pod", "external"},                           // Neither end a pod.
-		{"src.kind != pod", "external"},                       // The source is not a pod.
-		{"kind = node", "external podToNode"},                 // Either end a node.
-		{"dst.kind = none", "dns external"},                   // The destination is outside the cluster.
-		{"ip = 100.64.0.0/10", "podToNode"},                   // Either address in the tailnet range.
-		{"domain = example.com", "external"},                  // The name or a subdomain, in any case.
-		{"domain ~ example", "dns external"},                  // Contains.
-		{"bytes > 2k", "external"},                            // Units in powers of 1024.
-		{"port = 50-500", "dns external podToNode"},           // A range.
-		{"port = 53 or iface.type = uplink", "dns external"},  // Mixed conditions.
-		{"-coredns", "external podToNode"},                    // A negated word.
-		{"rcode = NXDOMAIN and not ns = default", "dns"},      // Negated comparison.
-		{`rcode = "non-existent domain"`, "dns"},              // As stored.
-		{"rcode != (noerror, servfail) and port = 53", "dns"}, // Standard names.
-		{"(kind = pod or port = 443) and -ns=kube-system", "external podToNode"},
-		{"ns = none", "dns external podToNode"}, // At least one end outside a namespace.
-		{"src.ns = none", "external"},
-		{"type = (dns, tls_sni)", "dns external"},
+		{map[string]*database.NetworkEvent{"podToNode": &podToNode, "external": &external, "dns": &dns}, [][2]string{
+			{"kind != pod", "external"},                           // Neither end a pod.
+			{"src.kind != pod", "external"},                       // The source is not a pod.
+			{"kind = node", "external podToNode"},                 // Either end a node.
+			{"dst.kind = none", "dns external"},                   // The destination is outside the cluster.
+			{"ip = 100.64.0.0/10", "podToNode"},                   // Either address in the tailnet range.
+			{"domain = example.com", "external"},                  // The name or a subdomain, in any case.
+			{"domain ~ example", "dns external"},                  // Contains.
+			{"bytes > 2k", "external"},                            // Units in powers of 1024.
+			{"port = 50-500", "dns external podToNode"},           // A range.
+			{"port = 53 or iface.type = uplink", "dns external"},  // Mixed conditions.
+			{"-coredns", "external podToNode"},                    // A negated word.
+			{"rcode = NXDOMAIN and not ns = default", "dns"},      // Negated comparison.
+			{`rcode = "non-existent domain"`, "dns"},              // As stored.
+			{"rcode != (noerror, servfail) and port = 53", "dns"}, // Standard names.
+			{"(kind = pod or port = 443) and -ns=kube-system", "external podToNode"},
+			{"ns = none", "dns external podToNode"}, // At least one end outside a namespace.
+			{"src.ns = none", "external"},
+			{"type = (dns, tls_sni)", "dns external"},
+		}},
+		{map[string]*database.NetworkEvent{"probe": &probe, "accepted": &accepted, "external": &external}, [][2]string{
+			{"src.process = kubelet", "probe"},                          // The process that opened it.
+			{"dst.process = keda", "probe"},                             // The process that accepted it.
+			{"process = keda", "probe"},                                 // A process at either end.
+			{"dst.process = python", "accepted"},                        // Accepted; the opener is unknown.
+			{"src.process = python", ""},                                // Not at the source.
+			{"dst.process.pod = keda/keda-operator-1", "probe"},         // Pod of the accepting process.
+			{"src.process.pod = none and src.process != none", "probe"}, // Opened by a process outside any pod.
+			{"process.side = src", "probe"},                             // The opener is known.
+			{"process.side = none", "external"},                         // No process known.
+		}},
 	} {
-		filter, err := parseFilter(test.filter)
-		if err != nil {
-			t.Fatalf("%q: %v", test.filter, err)
-		}
-		var got []string
-		for _, name := range sortedKeys(events) {
-			if filter.matches(events[name]) {
-				got = append(got, name)
+		for _, test := range set.tests {
+			filter, err := parseFilter(test[0])
+			if err != nil {
+				t.Fatalf("%q: %v", test[0], err)
 			}
-		}
-		if strings.Join(got, " ") != test.want {
-			t.Errorf("%q selects %v, want %s", test.filter, got, test.want)
+			var got []string
+			for _, name := range sortedKeys(set.events) {
+				if filter.matches(set.events[name]) {
+					got = append(got, name)
+				}
+			}
+			if strings.Join(got, " ") != test[1] {
+				t.Errorf("%q selects %v, want %q", test[0], got, test[1])
+			}
 		}
 	}
 }
