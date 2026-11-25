@@ -23,10 +23,13 @@ const dnsPruneInterval = time.Second
 // interfaces of a node (a pod's, the tunnel's, the resolver pod's): a copy
 // seen on another interface within dnsCopyWindow is not recorded again. The
 // response records the lookup with its query; a query waits for it up to
-// dnsAnswerWait, then is recorded unanswered.
+// dnsAnswerWait, then is recorded unanswered. A process lookup can delay a
+// query's record past its response's: the response then waits up to
+// dnsQueryWait for it (the process queue gives up after processQueueAge).
 const (
 	dnsCopyWindow    = time.Second
 	dnsAnswerWait    = 10 * time.Second
+	dnsQueryWait     = 3 * time.Second
 	dnsSweepInterval = 2 * time.Second
 )
 
@@ -261,6 +264,7 @@ func (sm *SessionManager) TrackDNSPacket(iface, src, dst, transport string, payl
 			if size > 0 {
 				event.ByteCount, event.SrcBytes, event.SrcPackets = size, size, 1
 			}
+			sm.expectQuery(event)
 			sm.queueEvent(event)
 			continue
 		}
@@ -335,12 +339,22 @@ func (sm *SessionManager) TrackDNSPacket(iface, src, dst, transport string, payl
 	return true
 }
 
-// heldQuery is a DNS query's record, after its process lookup, waiting for
-// the response that records the lookup.
-type heldQuery struct {
-	event database.NetworkEvent
+// heldLookup is a lookup's state between its query's record and its
+// response's, which arrive after their process lookups, in either order.
+type heldLookup struct {
+	state heldState
+	event database.NetworkEvent // The held query or response.
 	at    time.Time
 }
+
+type heldState uint8
+
+const (
+	queryExpected  heldState = iota // The query's record is on its way.
+	queryHeld                       // The query waits for its response.
+	responseHeld                    // The response waits for its query's processes.
+	lookupAnswered                  // The response was recorded without its query.
+)
 
 // dnsLookupKey identifies a lookup in its query's and its response's records.
 func dnsLookupKey(event database.NetworkEvent) string {
@@ -351,46 +365,92 @@ func dnsLookupKey(event database.NetworkEvent) string {
 	return fmt.Sprintf("%s|%s|%d|%s|%d|%d|%s|%s", event.Protocol, client, clientPort, resolver, resolverPort, event.DNSID, event.DNSQuery, event.DNSQuestionType)
 }
 
-// holdQuery keeps a captured DNS query's record until its response, and
-// reports whether it did. The response gives the query's processes to the
-// lookup's record when it found none itself, and the query's record is
-// dropped: the response holds the question, its time and its size.
+// expectQuery notes a query's record before it goes to the process lookup,
+// so its response, should it get there first, waits for it.
+func (sm *SessionManager) expectQuery(event database.NetworkEvent) {
+	key := dnsLookupKey(event)
+	sm.dnsHoldMu.Lock()
+	defer sm.dnsHoldMu.Unlock()
+	if sm.dnsHeld == nil {
+		sm.dnsHeld = map[string]heldLookup{}
+	}
+	if _, exists := sm.dnsHeld[key]; !exists && len(sm.dnsHeld) < maxDNSState {
+		sm.dnsHeld[key] = heldLookup{state: queryExpected, at: time.Now()}
+	}
+}
+
+// holdQuery makes one record of a DNS lookup on this node and reports whether
+// it kept the event from being recorded now. A query's record waits for its
+// response, which records the lookup: the response holds the question, its
+// time and both sizes, and takes the query's processes when it found none
+// itself. The query's record is then dropped.
 func (sm *SessionManager) holdQuery(event *database.NetworkEvent) bool {
 	if event.EventType != database.EventDNS || event.DNSVersion == 0 {
 		return false
 	}
 	key := dnsLookupKey(*event)
 	sm.dnsHoldMu.Lock()
-	defer sm.dnsHoldMu.Unlock()
 	if sm.dnsHeld == nil {
-		sm.dnsHeld = map[string]heldQuery{}
+		sm.dnsHeld = map[string]heldLookup{}
 	}
+	held, exists := sm.dnsHeld[key]
+	var response *database.NetworkEvent
+	hold := false
 	switch event.DNSType {
 	case "QUERY":
-		if _, exists := sm.dnsHeld[key]; exists || len(sm.dnsHeld) >= maxDNSState {
-			return false
+		switch {
+		case !exists && len(sm.dnsHeld) < maxDNSState, exists && held.state == queryExpected:
+			sm.dnsHeld[key] = heldLookup{state: queryHeld, event: *event, at: time.Now()}
+			hold = true
+		case exists && held.state == responseHeld:
+			delete(sm.dnsHeld, key)
+			if held.event.ProcessSide == "" {
+				processesOf(*event).reversed().apply(&held.event)
+			}
+			response, hold = &held.event, true
+		case exists && held.state == lookupAnswered:
+			delete(sm.dnsHeld, key) // Recorded by its response already.
+			hold = true
 		}
-		sm.dnsHeld[key] = heldQuery{event: *event, at: time.Now()}
-		return true
 	case "RESPONSE":
-		if query, ok := sm.dnsHeld[key]; ok {
+		switch {
+		case exists && held.state == queryHeld:
 			delete(sm.dnsHeld, key)
 			if event.ProcessSide == "" {
-				processesOf(query.event).reversed().apply(event)
+				processesOf(held.event).reversed().apply(event)
 			}
+		case exists && held.state == queryExpected:
+			sm.dnsHeld[key] = heldLookup{state: responseHeld, event: *event, at: time.Now()}
+			hold = true
 		}
 	}
-	return false
+	sm.dnsHoldMu.Unlock()
+	if response != nil {
+		sm.bufferEvent(*response)
+	}
+	return hold
 }
 
-// releaseQueries records the held queries captured before a time: no
-// response came.
-func (sm *SessionManager) releaseQueries(before time.Time) {
+// releaseQueries records what waited too long at now: queries no response
+// came for (unanswered), and responses whose query's record did not come.
+// With all, it records every held query and response.
+func (sm *SessionManager) releaseQueries(now time.Time, all bool) {
 	sm.dnsHoldMu.Lock()
 	var released []database.NetworkEvent
-	for key, query := range sm.dnsHeld {
-		if query.at.Before(before) {
-			released = append(released, query.event)
+	for key, held := range sm.dnsHeld {
+		age := now.Sub(held.at)
+		switch {
+		case held.state == queryHeld && (all || age >= dnsAnswerWait):
+			released = append(released, held.event)
+			delete(sm.dnsHeld, key)
+		case held.state == responseHeld && (all || age >= dnsQueryWait):
+			released = append(released, held.event)
+			if all {
+				delete(sm.dnsHeld, key)
+			} else {
+				sm.dnsHeld[key] = heldLookup{state: lookupAnswered, at: now}
+			}
+		case (held.state == queryExpected || held.state == lookupAnswered) && (all || age >= dnsAnswerWait):
 			delete(sm.dnsHeld, key)
 		}
 	}

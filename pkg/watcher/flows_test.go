@@ -183,7 +183,7 @@ func TestDNSLookupIsOneRecordPerNode(t *testing.T) {
 			t.Fatal("a DNS message was not taken as DNS")
 		}
 	}
-	sm.releaseQueries(time.Now().Add(time.Minute))
+	sm.releaseQueries(time.Now().Add(time.Minute), false)
 	events := storedEvents(t, sm)
 	if len(events) != 1 {
 		t.Fatalf("%d records: %+v", len(events), events)
@@ -202,11 +202,11 @@ func TestUnansweredQueryIsRecorded(t *testing.T) {
 	sm := testManager(t)
 	query := dnsMessage(t, 9, false, "gone.test", nil)
 	sm.TrackDNSPacket("eth0", "[10.0.1.84]:51001", "[10.0.0.20]:53", "UDP", query, time.Now(), false, len(query)+42)
-	sm.releaseQueries(time.Now().Add(-time.Second)) // Still waiting.
+	sm.releaseQueries(time.Now().Add(dnsAnswerWait-time.Second), false) // Still waiting.
 	if events := storedEvents(t, sm); len(events) != 0 {
 		t.Fatalf("recorded before its wait: %+v", events)
 	}
-	sm.releaseQueries(time.Now().Add(time.Second))
+	sm.releaseQueries(time.Now().Add(dnsAnswerWait+time.Second), false)
 	events := storedEvents(t, sm)
 	if len(events) != 1 || events[0].DNSType != "QUERY" || events[0].DNSQuery != "gone.test" || events[0].ByteCount != int64(len(query)+42) || events[0].SrcPackets != 1 {
 		t.Fatalf("records: %+v", events)
@@ -238,21 +238,64 @@ func TestLookupRecordTakesTheQueryProcess(t *testing.T) {
 				return e.ProcessSide == "src" && e.ProcessCommand == "coredns" && e.ProcessPod == "kube-system/coredns-1" && e.PeerProcessCommand == "curl"
 			}},
 	} {
-		sm := testManager(t)
-		query := c.query
-		query.EventType, query.DNSVersion, query.DNSType, query.DNSID, query.DNSQuery, query.DNSQuestionType, query.Protocol = database.EventDNS, 1, "QUERY", 5, "api.test", "A", "UDP"
-		query.Timestamp, query.SrcIP, query.SrcPort, query.DstIP, query.DstPort = time.Now(), "10.0.1.84", 51003, "10.0.0.20", 53
-		response := query
-		response.DNSType, response.SrcIP, response.SrcPort, response.DstIP, response.DstPort = "RESPONSE", query.DstIP, query.DstPort, query.SrcIP, query.SrcPort
-		response.ProcessSide, response.ProcessPID, response.ProcessCommand, response.ProcessPod = "", 0, "", ""
-		response.PeerProcessCommand, response.PeerProcessPod = "", ""
-		sm.appendEvent(query)
-		sm.appendEvent(response)
-		sm.releaseQueries(time.Now().Add(time.Minute))
-		events := storedEvents(t, sm)
-		if len(events) != 1 || !c.check(events[0]) {
-			t.Fatalf("%s: %+v", c.name, events)
+		// The query's process lookup can make its record arrive after the
+		// response's: either way, one record with the query's process.
+		for _, responseFirst := range []bool{false, true} {
+			sm := testManager(t)
+			query, response := lookupPair(c.query)
+			sm.expectQuery(query)
+			if responseFirst {
+				sm.appendEvent(response)
+				sm.appendEvent(query)
+			} else {
+				sm.appendEvent(query)
+				sm.appendEvent(response)
+			}
+			sm.releaseQueries(time.Now().Add(time.Minute), false)
+			events := storedEvents(t, sm)
+			if len(events) != 1 || !c.check(events[0]) {
+				t.Fatalf("%s, response first %v: %+v", c.name, responseFirst, events)
+			}
 		}
+	}
+}
+
+// lookupPair is a query with the given processes and its response, with none.
+func lookupPair(processes database.NetworkEvent) (database.NetworkEvent, database.NetworkEvent) {
+	query := processes
+	query.EventType, query.DNSVersion, query.DNSType, query.DNSID, query.DNSQuery, query.DNSQuestionType, query.Protocol = database.EventDNS, 1, "QUERY", 5, "api.test", "A", "UDP"
+	query.Timestamp, query.SrcIP, query.SrcPort, query.DstIP, query.DstPort = time.Now(), "10.0.1.84", 51003, "10.0.0.20", 53
+	response := query
+	response.DNSType, response.SrcIP, response.SrcPort, response.DstIP, response.DstPort = "RESPONSE", query.DstIP, query.DstPort, query.SrcIP, query.SrcPort
+	response.ProcessSide, response.ProcessPID, response.ProcessCommand, response.ProcessPod = "", 0, "", ""
+	response.PeerProcessCommand, response.PeerProcessPod = "", ""
+	return query, response
+}
+
+// A response waits a little for its query's record, which is never recorded
+// on its own once the response has been: the lookup is not unanswered.
+func TestResponseWaitsForItsQueryOnlySoLong(t *testing.T) {
+	sm := testManager(t)
+	query, response := lookupPair(database.NetworkEvent{ProcessSide: "src", ProcessCommand: "curl"})
+	sm.expectQuery(query)
+	sm.appendEvent(response)
+	sm.releaseQueries(time.Now().Add(dnsQueryWait-time.Second), false)
+	if events := storedEvents(t, sm); len(events) != 0 {
+		t.Fatalf("recorded before its wait: %+v", events)
+	}
+	sm.releaseQueries(time.Now().Add(dnsQueryWait+time.Second), false)
+	sm.appendEvent(query) // Later still.
+	sm.releaseQueries(time.Now().Add(time.Minute), false)
+	events := storedEvents(t, sm)
+	if len(events) != 1 || events[0].DNSType != "RESPONSE" {
+		t.Fatalf("records: %+v", events)
+	}
+
+	// A response whose query was not seen is recorded at once.
+	sm = testManager(t)
+	sm.appendEvent(response)
+	if events := storedEvents(t, sm); len(events) != 1 {
+		t.Fatalf("records: %+v", events)
 	}
 }
 

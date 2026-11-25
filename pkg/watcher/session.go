@@ -75,7 +75,7 @@ type SessionManager struct {
 	// dnsHeld are DNS queries waiting for their response, which records the
 	// lookup; by lookup key (dnsLookupKey).
 	dnsHoldMu   sync.Mutex
-	dnsHeld     map[string]heldQuery
+	dnsHeld     map[string]heldLookup
 	stopChan    chan struct{}
 	cleanupDone chan struct{}
 	// Filters - which protocols/events to log
@@ -194,7 +194,7 @@ func NewSessionManager(logger *log.Logger, db *database.DB, onlyFilter, excludeF
 		cleanupInterval:  30 * time.Second,
 		sessionTimeout:   2 * time.Minute,
 		updateInterval:   flowUpdateInterval,
-		dnsHeld:          map[string]heldQuery{},
+		dnsHeld:          map[string]heldLookup{},
 		stopChan:         make(chan struct{}),
 		cleanupDone:      make(chan struct{}),
 		filters:          filters,
@@ -234,7 +234,7 @@ func (sm *SessionManager) flushLoop() {
 		case <-sm.flushSignal:
 			sm.flushEvents()
 		case now := <-sweep.C:
-			sm.releaseQueries(now.Add(-dnsAnswerWait))
+			sm.releaseQueries(now, false)
 		}
 	}
 }
@@ -394,7 +394,7 @@ func (sm *SessionManager) Stop() {
 	if lookup := sm.currentProcessLookup(); lookup != nil {
 		lookup.stop()
 	}
-	sm.releaseQueries(time.Now()) // Unanswered: recorded as queries.
+	sm.releaseQueries(time.Now(), true) // Unanswered queries, and responses whose query did not come.
 	// Flush any remaining buffered events
 	sm.flushEvents()
 }
