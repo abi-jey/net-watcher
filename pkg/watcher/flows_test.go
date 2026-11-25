@@ -197,6 +197,60 @@ func TestDNSLookupIsOneRecordPerNode(t *testing.T) {
 	}
 }
 
+// Each interface is captured on its own: a query on a busy tunnel device
+// can be handled after its response on another. The response waits for it
+// and records the lookup, matched, with its evidence.
+func TestResponseHandledBeforeItsQuery(t *testing.T) {
+	sm := testManager(t)
+	at := time.Now()
+	client, resolver := "[10.0.1.155]:43271", "[10.0.0.14]:53"
+	query := dnsMessage(t, 31, false, "web.test", nil)
+	response := dnsMessage(t, 31, true, "web.test", []layers.DNSResourceRecord{addressRecord("web.test", "10.96.4.20", 30)})
+	sm.TrackDNSPacket("cilium_host", resolver, client, "UDP", response, at.Add(time.Millisecond), false, len(response)+42)
+	sm.TrackDNSPacket("cilium_vxlan", resolver, client, "UDP", response, at.Add(time.Millisecond), false, len(response)+42) // Its copy.
+	sm.TrackDNSPacket("cilium_vxlan", client, resolver, "UDP", query, at, false, len(query)+42)
+	sm.releaseQueries(time.Now().Add(time.Minute), false)
+	events := storedEvents(t, sm)
+	if len(events) != 1 {
+		t.Fatalf("%d records: %+v", len(events), events)
+	}
+	lookup := events[0]
+	if lookup.DNSType != "RESPONSE" || !lookup.DNSMatched || !lookup.DNSQueryTime.Equal(at) || lookup.DstBytes != int64(len(query)+42) || lookup.Interface != "cilium_host" {
+		t.Fatalf("lookup: %+v", lookup)
+	}
+	if got := resolutions(t, sm); len(got) != 1 {
+		t.Fatalf("evidence: %+v", got)
+	}
+
+	// A response whose query never comes is recorded unmatched after its wait,
+	// and leaves a later query with the same key to its own response.
+	sm = testManager(t)
+	sm.TrackDNSPacket("eth0", resolver, client, "UDP", response, at, false, len(response)+42)
+	sm.releaseParked(time.Now().Add(dnsParkWait/2), false)
+	if events := storedEvents(t, sm); len(events) != 0 {
+		t.Fatalf("recorded before its wait: %+v", events)
+	}
+	sm.releaseParked(time.Now().Add(dnsParkWait), false)
+	sm.TrackDNSPacket("eth0", client, resolver, "UDP", query, at.Add(time.Second), false, len(query)+42)
+	sm.TrackDNSPacket("eth0", resolver, client, "UDP", response, at.Add(time.Second+time.Millisecond), false, len(response)+42)
+	events = storedEvents(t, sm)
+	if len(events) != 2 || events[0].DNSMatched || !events[1].DNSMatched || !events[1].DNSQueryTime.Equal(at.Add(time.Second)) {
+		t.Fatalf("records: %+v", events)
+	}
+
+	// The same, with the later query arriving while the response waits: the
+	// response, captured before it, is not its answer.
+	sm = testManager(t)
+	sm.TrackDNSPacket("eth0", resolver, client, "UDP", response, at, false, len(response)+42)
+	sm.TrackDNSPacket("eth0", client, resolver, "UDP", query, at.Add(500*time.Millisecond), false, len(query)+42)
+	sm.TrackDNSPacket("eth0", resolver, client, "UDP", response, at.Add(501*time.Millisecond), false, len(response)+42)
+	sm.releaseQueries(time.Now().Add(time.Minute), false)
+	events = storedEvents(t, sm)
+	if len(events) != 2 || events[0].DNSMatched || !events[1].DNSMatched || !events[1].DNSQueryTime.Equal(at.Add(500*time.Millisecond)) {
+		t.Fatalf("records: %+v", events)
+	}
+}
+
 // A query that gets no response is recorded as one, once its wait is over.
 func TestUnansweredQueryIsRecorded(t *testing.T) {
 	sm := testManager(t)

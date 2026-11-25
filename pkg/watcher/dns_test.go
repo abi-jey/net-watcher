@@ -129,6 +129,7 @@ func TestDNSRejectsUnprovenMappings(t *testing.T) {
 				message.Answers[0].Name = []byte("other.test")
 			}
 			sm.TrackDNSPacket("eth0", resolver, client, "UDP", serializeDNS(t, message), at.Add(time.Millisecond), false, 0)
+			sm.releaseParked(time.Now(), true) // No query is coming for an unmatched response.
 			if got := resolutions(t, sm); len(got) != 0 {
 				t.Fatalf("false DNS evidence: %+v", got)
 			}

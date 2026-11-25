@@ -234,6 +234,7 @@ func (sm *SessionManager) flushLoop() {
 		case <-sm.flushSignal:
 			sm.flushEvents()
 		case now := <-sweep.C:
+			sm.releaseParked(now, false)
 			sm.releaseQueries(now, false)
 		}
 	}
@@ -394,6 +395,7 @@ func (sm *SessionManager) Stop() {
 	if lookup := sm.currentProcessLookup(); lookup != nil {
 		lookup.stop()
 	}
+	sm.releaseParked(time.Now(), true)
 	sm.releaseQueries(time.Now(), true) // Unanswered queries, and responses whose query did not come.
 	// Flush any remaining buffered events
 	sm.flushEvents()
