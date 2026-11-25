@@ -517,7 +517,8 @@ flow. A process that reaches five destinations makes five flows.
 
 Each node records its own end of a flow between nodes. The Events page's
 **Flows** view (the default) shows each flow or lookup as one row from all its
-records on every node, with each node's process. Flows one opener (a process,
+records on every node, with each node's process; a lookup reads from the
+client that asked to its resolver (↑ the query, ↓ the response). Flows one opener (a process,
 or an address when no process is known) makes to one destination again and
 again, such as health checks or a name looked up repeatedly, collapse into one
 row that expands to them. **Records** lists every stored record as it is.

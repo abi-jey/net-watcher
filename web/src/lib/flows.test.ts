@@ -75,10 +75,25 @@ test('a lookup seen by the client\'s and the resolver\'s node is one row', () =>
   assert.equal(rows.length, 1);
   const flow = flowOf(rows[0]);
   assert.equal(flow.kind, 'lookup');
-  assert.equal(flow.merged.ProcessCommand, 'coredns'); // The resolver is the response's source.
+  // The row reads from the client that asked to its resolver, as the query does.
+  assert.equal(flow.merged.SrcIP, '10.0.1.84');
+  assert.equal(flow.merged.DstPort, 53);
+  assert.equal(flow.merged.ProcessCommand, 'prometheus');
   assert.equal(flow.merged.ProcessSide, 'src');
-  assert.equal(flow.merged.PeerProcessCommand, 'prometheus');
-  assert.equal(flow.sent, 120);
+  assert.equal(flow.merged.PeerProcessCommand, 'coredns');
+  assert.equal(flow.sent, 80); // The query.
+  assert.equal(flow.received, 120);
+});
+
+test('lookups of one name by one client repeat, whichever record they were seen in', () => {
+  const lookup = (id: number, seconds: number, type: string) => ({ EventType: 'DNS', DNSID: id, DNSQuery: 'api.test', DNSQuestionType: 'A', Protocol: 'UDP',
+    DNSType: type, Timestamp: at(seconds), ...(type === 'RESPONSE'
+      ? { SrcIP: '10.0.0.20', SrcPort: 53, DstIP: '10.0.1.84', DstPort: 51000 + id }
+      : { SrcIP: '10.0.1.84', SrcPort: 51000 + id, DstIP: '10.0.0.20', DstPort: 53 }) }) as Partial<NetworkEvent>;
+  const rows = groupRecords([record(lookup(1, 0, 'RESPONSE')), record(lookup(2, 30, 'QUERY')), record(lookup(3, 60, 'RESPONSE'))]);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].kind, 'repeat');
+  assert.equal((rows[0] as Extract<Row, { kind: 'repeat' }>).repeat.flows.length, 3);
 });
 
 test('one opener reaching one destination again and again is one repeat row', () => {

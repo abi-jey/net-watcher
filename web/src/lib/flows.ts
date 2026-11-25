@@ -123,6 +123,20 @@ function groupFlows(events: NetworkEvent[]): { groups: NetworkEvent[][]; others:
   return { groups: [...groups.values()], others };
 }
 
+/** Fields of one end of a record, paired with the other end's. */
+const endFields = [['SrcIP', 'DstIP'], ['SrcPort', 'DstPort'], ['SrcKind', 'DstKind'], ['SrcNamespace', 'DstNamespace'], ['SrcName', 'DstName'],
+  ['SrcUID', 'DstUID'], ['SrcWorkload', 'DstWorkload'], ['SrcAttribution', 'DstAttribution'], ['SrcBytes', 'DstBytes'],
+  ['SrcPackets', 'DstPackets'], ['SourceContext', 'DestinationContext']] as const;
+
+/** A record with its ends swapped: a response as its query's client sees it. */
+function turned(event: NetworkEvent): NetworkEvent {
+  const fields = event as unknown as Record<string, unknown>;
+  const out: Record<string, unknown> = { ...fields };
+  for (const [src, dst] of endFields) { out[src] = fields[dst]; out[dst] = fields[src]; }
+  if (event.ProcessSide) out.ProcessSide = event.ProcessSide === 'src' ? 'dst' : 'src';
+  return out as unknown as NetworkEvent;
+}
+
 /** Whether a record names the flow's ends the other way round from base. */
 function reversed(record: NetworkEvent, base: NetworkEvent): boolean {
   return record.SrcIP === base.DstIP && record.SrcPort === base.DstPort && !(record.SrcIP === base.SrcIP && record.SrcPort === base.SrcPort);
@@ -136,8 +150,10 @@ function toFlow(records: NetworkEvent[]): Flow {
   records.sort((a, b) => b.Timestamp.localeCompare(a.Timestamp) || b.ID - a.ID);
   const lookup = records[0].EventType === 'DNS';
   const chronological = [...records].reverse();
-  // The record whose orientation the flow takes: a lookup's response, a flow's open.
-  const base = (lookup ? chronological.find(record => record.DNSType === 'RESPONSE') : chronological.find(record => record.EventType.endsWith('_START'))) ?? chronological[0];
+  // The record the row is built on: a lookup's response, turned to read from
+  // the client that asked to its resolver, as the query does; a flow's open.
+  const response = lookup ? chronological.find(record => record.DNSType === 'RESPONSE') : undefined;
+  const base = response ? turned(response) : (lookup ? undefined : chronological.find(record => record.EventType.endsWith('_START'))) ?? chronological[0];
   let src: EndProcess | undefined, dst: EndProcess | undefined;
   let sent = 0, received = 0, sentPackets = 0, receivedPackets = 0, duration = 0;
   let probe = '', reason = '';
@@ -173,7 +189,7 @@ function toFlow(records: NetworkEvent[]): Flow {
   merged.Probe = probe || undefined;
   const nodes = [...new Set(records.map(record => record.CollectorID || 'local'))].sort();
   return {
-    key: lookup ? lookupKey(base) : `flow|${records.map(record => `${record.CollectorID}:${record.FlowID || record.ID}`).sort()[0]}`,
+    key: lookup ? lookupKey(records[0]) : `flow|${records.map(record => `${record.CollectorID}:${record.FlowID || record.ID}`).sort()[0]}`,
     kind: lookup ? 'lookup' : 'flow',
     records, merged,
     first: records[records.length - 1].Timestamp,
@@ -183,7 +199,7 @@ function toFlow(records: NetworkEvent[]): Flow {
   };
 }
 
-/** Who opened a flow: its process when known, else its source's identity. */
+/** Who opened a flow or asked a lookup: its process when known, else its source's identity. */
 function opener(flow: Flow): string {
   const event = flow.merged;
   if (event.ProcessSide === 'src') {
@@ -191,7 +207,6 @@ function opener(flow: Flow): string {
     const node = flow.records.find(record => record.ProcessCommand === event.ProcessCommand || record.PeerProcessCommand === event.ProcessCommand)?.CollectorID ?? '';
     return `process|${node}|${event.ProcessCommand}|${event.ProcessPod}|${event.ProcessContainer}`;
   }
-  if (flow.kind === 'lookup') return event.DstKind === 'pod' ? `pod|${event.DstNamespace}/${event.DstName}` : `ip|${event.DstIP}`;
   return event.SrcKind === 'pod' ? `pod|${event.SrcNamespace}/${event.SrcName}` : `ip|${event.SrcIP}`;
 }
 
