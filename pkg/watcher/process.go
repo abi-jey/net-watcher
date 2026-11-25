@@ -10,7 +10,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -467,10 +466,12 @@ func (a *processAttributor) candidates(event database.NetworkEvent, queuedAt, no
 			list = append(list, c)
 		}
 	}
-	// Pod lookups are cheap (few processes to scan) and tried first;
-	// within each kind the source, which opened the flow, comes first.
-	// Every candidate is looked up: both ends may be on this node.
-	sort.SliceStable(list, func(i, j int) bool { return !list[i].host && list[j].host })
+	// Every candidate is looked up, source first: both ends may be on this
+	// node, and the source's socket is the one that disappears. A short
+	// connection (a kubelet health check takes a few milliseconds) may have
+	// closed by the time the second lookup runs; the destination's listening
+	// socket still names the server then, the client's closed socket names
+	// nothing.
 	return list
 }
 

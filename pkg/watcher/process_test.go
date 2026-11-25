@@ -270,6 +270,11 @@ func TestProcessAttributionRecordsBothLocalEnds(t *testing.T) {
 	if a.bothEnds.Load() != 1 {
 		t.Fatalf("both_ends = %d, want 1", a.bothEnds.Load())
 	}
+	// The client's end is looked up first, while its socket still exists;
+	// the server's listener outlives the connection.
+	if c := a.candidates(check, time.Now(), time.Now()); len(c) != 2 || c[0].side != "src" || !c[0].host {
+		t.Fatalf("lookup order: %+v", c)
+	}
 	// The server's reply carries the same two processes, its own end first.
 	reply := database.NetworkEvent{EventType: database.EventTCPEnd, SrcIP: "10.2.0.8", SrcPort: 8080, DstIP: "192.0.2.10", DstPort: 52000}
 	if a.handle(&reply) || reply.ProcessSide != "src" || reply.ProcessCommand != "python3" || reply.PeerProcessCommand != "kubelet" || reply.PeerProcessPod != "" {
