@@ -84,6 +84,14 @@ func (f flowProcesses) reversed() flowProcesses {
 // apply records the processes on an event: the source's (the process that
 // opened the flow) when known, else the destination's, and the destination's
 // as the peer when both are.
+func (f *flowProcesses) set(side string, identity processIdentity) {
+	if side == "src" {
+		f.src, f.hasSrc = identity, true
+	} else {
+		f.dst, f.hasDst = identity, true
+	}
+}
+
 func (f flowProcesses) apply(event *database.NetworkEvent) {
 	primary, side := f.src, "src"
 	switch {
@@ -160,6 +168,12 @@ type processAttributor struct {
 	logger     *log.Logger
 	budget     time.Duration // CPU time per second; DefaultProcessBudget when zero.
 	deadline   time.Duration // Per lookup; processLookupDeadline when zero.
+	// tunnelLookup lists the UDP ports of kernel tunnel devices (tunnels.go).
+	tunnelLookup func() (map[uint16]string, error)
+	// traceConnects loads the connect tracer (connect.go) at start; connects
+	// is it, or a test's stand-in.
+	traceConnects bool
+	connects      connectSource
 
 	jobsMu  sync.RWMutex
 	closed  bool
@@ -176,6 +190,7 @@ type processAttributor struct {
 	recent   []int                // Host PIDs that recently owned sockets, newest first.
 	podWork  workBudget
 	hostWork workBudget
+	tunnels  map[uint16]string // Kernel tunnel ports, refreshed with each snapshot.
 	// lastCacheable: the last lookup completed without a match (no socket, or
 	// no process that can be named), so the same endpoint will miss again.
 	lastCacheable bool
@@ -201,6 +216,10 @@ type processAttributor struct {
 
 	flowMu sync.Mutex
 	flows  map[string]flowProcesses
+	// pending counts queued flow starts by flow key: until a start is looked
+	// up, the flow's later events (a short connection's end) queue behind it
+	// and inherit what it finds.
+	pending map[string]int
 
 	// A few failed lookups per report interval, with their reason, so
 	// operators can see why connections stay unattributed.
@@ -209,11 +228,20 @@ type processAttributor struct {
 
 	attempted, matched, inherited, notLocal atomic.Uint64
 	bothEnds, peerSkipped                   atomic.Uint64 // Flows with both ends' processes; second-end lookups left for lack of spare budget.
+	traced, kernelEnds                      atomic.Uint64 // Openers from connect tracing; ends owned by a kernel tunnel.
 	budgetHit, overBudget, expired          atomic.Uint64
 	queueFull, noSocket, snapshots, indexed atomic.Uint64
 	knownMiss, noOwner, byOwner             atomic.Uint64
 	tableReads, tableReuse, diagLookups     atomic.Uint64
 	work, snapshotWork                      atomic.Int64 // Nanoseconds spent reading /proc.
+}
+
+// connectSource names the process that opened a TCP connection from this
+// node (connectTracer).
+type connectSource interface {
+	opener(src, dst netip.AddrPort, at time.Time) (connectRecord, bool)
+	stats(now time.Time) (received, unresolved, lost uint64, kept int)
+	close()
 }
 
 type socketTable struct {
@@ -231,8 +259,9 @@ type socketRef struct {
 	fd  string
 }
 
-func newProcessAttributor(root string, containers ContainerLookup, budget time.Duration, logger *log.Logger, onEvent func(database.NetworkEvent)) (*processAttributor, error) {
-	a := &processAttributor{root: root, containers: containers, budget: budget, addresses: localAddresses, onEvent: onEvent, logger: logger}
+func newProcessAttributor(root string, containers ContainerLookup, budget time.Duration, traceConnects bool, logger *log.Logger, onEvent func(database.NetworkEvent)) (*processAttributor, error) {
+	a := &processAttributor{root: root, containers: containers, budget: budget, addresses: localAddresses, tunnelLookup: tunnelPorts,
+		traceConnects: traceConnects, onEvent: onEvent, logger: logger}
 	if err := a.start(); err != nil {
 		return nil, err
 	}
@@ -244,7 +273,7 @@ func (a *processAttributor) start() error {
 		return fmt.Errorf("host procfs at %s: %w", a.root, err)
 	}
 	a.jobs = make(chan processJob, processQueueSize)
-	a.flows = map[string]flowProcesses{}
+	a.flows, a.pending = map[string]flowProcesses{}, map[string]int{}
 	a.remote = map[string]time.Time{}
 	a.misses = map[string]time.Time{}
 	a.resume = map[string]int{}
@@ -266,6 +295,14 @@ func (a *processAttributor) start() error {
 			a.diag, a.diagNetns = diag, self
 		} else {
 			a.logger.Warn("Host socket lookups read socket tables", "error", err)
+		}
+	}
+	if a.traceConnects && a.connects == nil {
+		if tracer, err := newConnectTracer(a.root); err != nil {
+			a.logger.Warn("Connect tracing unavailable; openers of short connections will often be missed", "error", err)
+		} else {
+			a.connects = tracer
+			a.logger.Info("Connect tracing enabled: the process opening each TCP connection on this node is recorded when it connects")
 		}
 	}
 	a.workers.Add(1)
@@ -339,26 +376,120 @@ func (a *processAttributor) handle(event *database.NetworkEvent) bool {
 		a.inherited.Add(1)
 		return false
 	}
-	if !attributable(*event) {
+	start := attributable(*event)
+	if !start && !a.isPending(*event) {
+		a.applyTraced(event, now, false)
 		return false
 	}
-	hosts := a.hostIPs.Load()
-	local := event.SrcKind == "pod" || event.DstKind == "pod" || (hosts != nil && ((*hosts)[event.SrcIP] || (*hosts)[event.DstIP]))
-	if !local {
-		return false
+	if start {
+		hosts := a.hostIPs.Load()
+		local := event.SrcKind == "pod" || event.DstKind == "pod" || (hosts != nil && ((*hosts)[event.SrcIP] || (*hosts)[event.DstIP]))
+		if !local {
+			return false
+		}
 	}
 	a.jobsMu.RLock()
 	defer a.jobsMu.RUnlock()
 	if a.closed {
 		return false
 	}
+	if start {
+		a.setPending(*event, true) // Before the worker can take it.
+	}
 	select {
 	case a.jobs <- processJob{event: *event, queuedAt: now}:
 		return true
 	default:
+		if start {
+			a.setPending(*event, false)
+		}
 		a.queueFull.Add(1)
+		a.applyTraced(event, now, start) // Needs no lookup.
 		return false
 	}
+}
+
+// setPending counts a flow start in or out of the queue.
+func (a *processAttributor) setPending(event database.NetworkEvent, queued bool) {
+	key := flowKey(event, false)
+	a.flowMu.Lock()
+	defer a.flowMu.Unlock()
+	if a.pending == nil {
+		a.pending = map[string]int{}
+	}
+	switch {
+	case queued:
+		a.pending[key]++
+	case a.pending[key] <= 1:
+		delete(a.pending, key)
+	default:
+		a.pending[key]--
+	}
+}
+
+// isPending reports whether the flow's start, in either orientation, waits
+// in the queue.
+func (a *processAttributor) isPending(event database.NetworkEvent) bool {
+	a.flowMu.Lock()
+	defer a.flowMu.Unlock()
+	return a.pending[flowKey(event, false)] > 0 || a.pending[flowKey(event, true)] > 0
+}
+
+// applyTraced applies the opener connect tracing recorded, for an event that
+// gets no lookups. keep remembers it for the flow's later events; a later
+// event's result is not kept, or it would hide what its start's lookup finds.
+func (a *processAttributor) applyTraced(event *database.NetworkEvent, now time.Time, keep bool) {
+	if opener, ok := a.connectOpener(*event); ok {
+		flow := flowProcesses{src: opener, hasSrc: true, used: now}
+		flow.apply(event)
+		if keep {
+			a.remember(*event, flow)
+		}
+		a.traced.Add(1)
+	}
+}
+
+// connectOpener is the process connect tracing saw open this TCP flow.
+func (a *processAttributor) connectOpener(event database.NetworkEvent) (processIdentity, bool) {
+	tcp := strings.HasPrefix(string(event.EventType), "TCP") || event.EventType == database.EventTLSSNI || (event.EventType == database.EventTimeout && event.Protocol == "TCP")
+	if a.connects == nil || !tcp {
+		return processIdentity{}, false
+	}
+	src, err := netip.ParseAddr(event.SrcIP)
+	if err != nil {
+		return processIdentity{}, false
+	}
+	dst, err := netip.ParseAddr(event.DstIP)
+	if err != nil {
+		return processIdentity{}, false
+	}
+	record, ok := a.connects.opener(netip.AddrPortFrom(src, event.SrcPort), netip.AddrPortFrom(dst, event.DstPort), event.Timestamp)
+	if !ok {
+		return processIdentity{}, false
+	}
+	identity := processIdentity{PID: record.pid, Command: record.command}
+	if record.containerID != "" && a.containers != nil {
+		if namespace, pod, name, ok := a.containers(record.containerID); ok {
+			identity.Pod, identity.Container = namespace+"/"+pod, name
+		}
+	}
+	if identity.Pod == "" && event.SrcKind == "pod" {
+		identity.Pod = event.SrcNamespace + "/" + event.SrcName // Its own network namespace: the pod's.
+	}
+	return identity, true
+}
+
+// kernelEnd reports whether a kernel tunnel device owns this end of a UDP
+// flow: it receives on the device's port here, or this node sends to that
+// port on another node (tunnels.go).
+func (a *processAttributor) kernelEnd(event database.NetworkEvent, c candidate) bool {
+	if !c.host || len(a.tunnels) == 0 || !strings.HasPrefix(string(event.EventType), "UDP") {
+		return false
+	}
+	if c.side == "dst" {
+		return a.tunnels[c.port] != ""
+	}
+	return a.tunnels[c.otherPort] != "" && event.DstKind == "node"
 }
 
 // stop drains queued events through onEvent and stops the worker.
@@ -375,6 +506,9 @@ func (a *processAttributor) stop() {
 		a.diag = nil
 	}
 	a.report()
+	if a.connects != nil {
+		a.connects.close()
+	}
 }
 
 // report logs and resets counters and expires remembered flows. The session
@@ -391,6 +525,7 @@ func (a *processAttributor) report() {
 	a.flowMu.Unlock()
 	attempted, matched, inherited, notLocal := a.attempted.Swap(0), a.matched.Swap(0), a.inherited.Swap(0), a.notLocal.Swap(0)
 	bothEnds, peerSkipped := a.bothEnds.Swap(0), a.peerSkipped.Swap(0)
+	traced, kernelEnds := a.traced.Swap(0), a.kernelEnds.Swap(0)
 	budgetHit, overBudget, expired := a.budgetHit.Swap(0), a.overBudget.Swap(0), a.expired.Swap(0)
 	queueFull, noSocket, snapshots, work := a.queueFull.Swap(0), a.noSocket.Swap(0), a.snapshots.Swap(0), a.work.Swap(0)
 	indexed, snapshotWork, knownMiss, noOwner := a.indexed.Swap(0), a.snapshotWork.Swap(0), a.knownMiss.Swap(0), a.noOwner.Swap(0)
@@ -399,8 +534,14 @@ func (a *processAttributor) report() {
 	examples := a.examples
 	a.examples = nil
 	a.exampleMu.Unlock()
-	if attempted+inherited+overBudget+expired+queueFull > 0 {
-		a.logger.Info("Process attribution", "attempted", attempted, "matched", matched, "both_ends", bothEnds, "second_end_skipped", peerSkipped, "from_index", indexed, "by_owner", byOwner, "inherited", inherited,
+	if a.connects != nil {
+		received, unresolved, lost, kept := a.connects.stats(now)
+		if received+lost > 0 {
+			a.logger.Info("Connect tracing", "connects", received, "unnamed", unresolved, "lost", lost, "records", kept)
+		}
+	}
+	if attempted+inherited+overBudget+expired+queueFull+traced+kernelEnds > 0 {
+		a.logger.Info("Process attribution", "attempted", attempted, "matched", matched, "traced", traced, "kernel", kernelEnds, "both_ends", bothEnds, "second_end_skipped", peerSkipped, "from_index", indexed, "by_owner", byOwner, "inherited", inherited,
 			"no_socket", noSocket, "no_owner", noOwner, "known_miss", knownMiss, "not_local", notLocal, "deadline_hit", budgetHit, "over_budget", overBudget,
 			"expired", expired, "queue_full", queueFull, "flows", flows, "snapshots", snapshots, "tables_read", tableReads, "tables_reused", tableReuse, "socket_queries", diagLookups,
 			"snapshot_ms", time.Duration(snapshotWork).Milliseconds(), "lookup_ms", time.Duration(work).Milliseconds(), "misses", strings.Join(examples, "; "))
@@ -412,16 +553,23 @@ func (a *processAttributor) run() {
 	for queued := range a.jobs {
 		event := queued.event
 		now := time.Now()
-		if flow, ok := a.cached(event, now); ok { // Attributed meanwhile.
+		start := attributable(event)
+		if flow, ok := a.cached(event, now); ok { // Attributed meanwhile, or by the start it followed.
 			flow.apply(&event)
 			a.inherited.Add(1)
+		} else if !start {
+			a.applyTraced(&event, now, false) // Its start found nothing.
 		} else if now.Sub(queued.queuedAt) > processQueueAge {
 			a.expired.Add(1)
+			a.applyTraced(&event, now, true)
 		} else {
 			if now.Sub(a.snapshot.at) > processSnapshotEvery && a.podWork.ready(now) {
 				a.refresh(now)
 			}
 			a.attribute(&event, queued.queuedAt, now)
+		}
+		if start {
+			a.setPending(event, false)
 		}
 		a.onEvent(event)
 	}
@@ -518,13 +666,28 @@ func (a *processAttributor) noteHostPID(pid int) {
 }
 
 func (a *processAttributor) attribute(event *database.NetworkEvent, queuedAt, now time.Time) {
+	var flow flowProcesses
+	// Recorded when it connected: found even after the connection closed,
+	// with no lookup.
+	if opener, ok := a.connectOpener(*event); ok {
+		flow.set("src", opener)
+		a.traced.Add(1)
+	}
 	candidates := a.candidates(*event, queuedAt, now)
-	if len(candidates) == 0 {
+	if len(candidates) == 0 && !flow.hasSrc {
 		a.notLocal.Add(1)
 		return
 	}
-	var flow flowProcesses
+	found := false // A lookup matched; another needs budget to spare.
 	for _, c := range candidates {
+		if c.side == "src" && flow.hasSrc {
+			continue
+		}
+		if a.kernelEnd(*event, c) {
+			flow.set(c.side, kernelProcess)
+			a.kernelEnds.Add(1)
+			continue
+		}
 		miss := missKey(*event, c)
 		if miss != "" && now.Before(a.misses[miss]) {
 			a.knownMiss.Add(1)
@@ -534,7 +697,7 @@ func (a *processAttributor) attribute(event *database.NetworkEvent, queuedAt, no
 		if c.host {
 			budget = &a.hostWork
 		}
-		second := flow.hasSrc || flow.hasDst
+		second := found
 		if second && !budget.spare(now) {
 			a.peerSkipped.Add(1)
 			continue
@@ -555,11 +718,8 @@ func (a *processAttributor) attribute(event *database.NetworkEvent, queuedAt, no
 			}
 			continue
 		}
-		if c.side == "src" {
-			flow.src, flow.hasSrc = identity, true
-		} else {
-			flow.dst, flow.hasDst = identity, true
-		}
+		flow.set(c.side, identity)
+		found = true
 		a.matched.Add(1)
 		if c.host {
 			a.noteHostPID(identity.PID)
@@ -838,6 +998,11 @@ func (a *processAttributor) refresh(now time.Time) {
 	}
 	snapshot := &procSnapshot{at: now, byPod: map[string][]procEntry{}, hostIPs: a.addresses()}
 	a.hostIPs.Store(&snapshot.hostIPs)
+	if a.tunnelLookup != nil {
+		if ports, err := a.tunnelLookup(); err == nil {
+			a.tunnels = ports
+		}
+	}
 	for uid, until := range a.remote {
 		if now.After(until) {
 			delete(a.remote, uid)

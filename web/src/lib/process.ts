@@ -19,6 +19,19 @@ export interface EndProcess {
 
 export interface EndProcesses { src?: EndProcess; dst?: EndProcess }
 
+/**
+ * Whether the kernel itself owns the end: a VXLAN or Geneve tunnel device on
+ * the node sends and receives encapsulated traffic between nodes on its port.
+ */
+export function isKernel(process: EndProcess | undefined): boolean {
+  return process?.command === 'kernel' && !process.pid && !process.pod;
+}
+
+/** What a kernel-owned end means, sent from or received at it. */
+export function kernelHelp(which: 'src' | 'dst'): string {
+  return `The kernel ${which === 'src' ? 'sent' : 'received'} this itself: a tunnel device on the node (VXLAN or Geneve, such as Cilium's cilium_vxlan) owns the port and carries pod traffic between nodes inside it. No process takes part.`;
+}
+
 /** The process recorded at each end, if any. */
 export function endProcesses(event: NetworkEvent): EndProcesses {
   if (event.ProcessSide !== 'src' && event.ProcessSide !== 'dst') return {};

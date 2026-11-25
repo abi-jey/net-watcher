@@ -3,7 +3,7 @@ import type { NetworkEvent } from '../lib/api.ts';
 import { bytes, dateTime, endpoint, isSet } from '../lib/format.ts';
 import { deviceName, eventLabel, family, interfaceRole, ipScope, rcodeName, routeInfo, scopeLabel, scopeTag } from '../lib/network.ts';
 import { describe, is, negate, type Term } from '../lib/filter.ts';
-import { describeProbe, endProcesses, healthCheckEvidence, healthChecks, isHealthCheck, splitPod, type EndProcess } from '../lib/process.ts';
+import { describeProbe, endProcesses, healthCheckEvidence, healthChecks, isHealthCheck, isKernel, kernelHelp, splitPod, type EndProcess } from '../lib/process.ts';
 import { href } from '../lib/hooks.ts';
 import { Attribution } from './ui.tsx';
 import { Icon } from './icons.tsx';
@@ -72,6 +72,7 @@ function remoteName(event: NetworkEvent): string {
 
 /** What a process did, where it runs and how it was identified. */
 function processTitle(process: EndProcess, which: 'src' | 'dst'): string {
+  if (isKernel(process)) return kernelHelp(which);
   const role = which === 'src' ? 'opened this connection (owns the source socket)' : 'accepted this connection (owns the destination socket)';
   const where = process.pod ? ` in pod ${process.pod}${process.container ? `, container ${process.container}` : ''}` : ' on the node, outside any pod';
   return `Process ${process.command} ${role}${where}; ${process.pid ? `host PID ${process.pid}` : 'identified by its socket owner, PID not readable'}`;
@@ -226,6 +227,7 @@ export function EventRow({ event, expanded, onToggle, onFilter, fresh }: { event
 }
 
 function ProcessFacts({ process, which }: { process: EndProcess; which: 'src' | 'dst' }) {
+  if (isKernel(process)) return <><dt>Process</dt><dd><span className="mono">kernel</span><div className="muted small">{kernelHelp(which)}</div></dd></>;
   return <>
     <dt>Process</dt>
     <dd>
