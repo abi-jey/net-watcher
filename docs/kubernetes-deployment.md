@@ -273,7 +273,8 @@ volumeMounts:
 `CAP_SYS_PTRACE` is needed only to *read* other processes' `/proc` entries
 (their network namespace link, socket tables and file-descriptor links); the
 collector never attaches to, traces or signals a process, and needs no
-`hostPID`, eBPF or writable host mount. Command-line arguments are never read.
+`hostPID` or writable host mount (and no eBPF, unless connect tracing below
+is enabled). Command-line arguments are never read.
 Where the container runtime confines containers with an AppArmor profile, that
 profile also denies these reads, and the collector logs `Process attribution
 unavailable ... needs CAP_SYS_PTRACE` at start even with the capability; the
@@ -304,11 +305,11 @@ second's allowance left; otherwise it is skipped and counted as
 that lists `peer-process` in its `X-Net-Watcher-Accepts` response header, so
 an older ingester keeps receiving events it accepts (without them).
 
-The opener is the end most often missed: the source socket is looked up first,
-yet a kubelet health check typically lasts under a millisecond, and packets
-reach the collector in ring blocks up to 64 ms later, so the kubelet's socket
-has usually closed. The server's listener outlives the connection, so the
-accepting process is still found. Health checks are therefore recognised from
+Without connect tracing (below), the opener is the end most often missed: the
+source socket is looked up first, yet a kubelet health check typically lasts
+under a millisecond, and packets reach the collector in ring blocks up to 64 ms
+later, so the kubelet's socket has usually closed. The server's listener
+outlives the connection, so the accepting process is still found. Health checks are therefore recognised from
 the pods' specs instead: a TCP connection from a node to a port that the
 liveness, readiness or startup probe of a pod on that node targets (HTTP, TCP
 or gRPC; named ports resolved; probes of another host excluded) records
@@ -340,14 +341,62 @@ nearly empty), so one read serves every lookup for that namespace queued
 before it started. Endpoints that cannot match (kernel tunnels such as VXLAN,
 ports with no listener) are skipped for a minute.
 
+Ends that a kernel tunnel device owns are attributed to `kernel` without a
+lookup. A VXLAN or Geneve device (Cilium's `cilium_vxlan` on 8472, Flannel's
+`flannel.1`) carries pod traffic between nodes inside UDP: no process sends or
+receives it, and its port's socket is the kernel's, held by no process. The
+collector reads its host's tunnel devices and their ports from rtnetlink
+(no privilege) with every process snapshot. A UDP flow to such a port on this
+node ends in the kernel; one this node sends to that port on another node
+(tunnels of one cluster share the port) starts there.
+
+#### Optional connect tracing
+
+With `--connect-tracing` as well, an eBPF program records the process that
+opens each TCP connection on the node, at the moment it connects. Socket
+lookups run after the packet is captured and miss connections that have
+already closed, which is most kubelet health checks and any short-lived
+client (`curl`, a cron job). The record is made at the entry of the kernel's
+`tcp_connect` function (fentry), which runs in the connecting process for
+every network namespace, pods and host alike, once the source port is chosen.
+It holds the process ID, the cgroup and the socket's addresses and ports. The
+collector names the process from `/proc` as the record arrives (its command,
+not the connecting thread's, and its container) and keeps the record for a
+minute, the shortest time Linux takes to reuse those addresses and ports for
+another connection. Lookups of the opener then cost nothing, and use none of
+the budget. The program only reads: it cannot change, delay or drop a
+connection. It is assembled by the collector (no C toolchain), using field
+offsets from the kernel's BTF (`/sys/kernel/btf/vmlinux`, kernel 5.8+).
+
+```yaml
+args:
+  - --process-attribution
+  - --connect-tracing
+securityContext:
+  capabilities:
+    drop: ["ALL"]
+    add: ["NET_RAW", "SYS_PTRACE", "BPF", "PERFMON"]
+```
+
+`CAP_BPF` loads the program and its ring buffer; `CAP_PERFMON` allows a
+tracing program, which may read kernel memory: that is the added trust. Neither
+is `CAP_SYS_ADMIN`, and the collector stays unprivileged. Without them the
+collector logs `Connect tracing unavailable` and attributes as before. The
+accepting side is still found by socket lookups, and UDP is not traced.
+
 Every 30 seconds the collector logs `Process attribution` with its counters
-(`attempted`, `matched`, `both_ends`, `second_end_skipped`, `by_owner`, `inherited`, `no_socket`, `no_owner`,
+(`attempted`, `matched`, `traced` (openers from connect tracing), `kernel`
+(tunnel ends), `both_ends`, `second_end_skipped`, `by_owner`, `inherited`, `no_socket`, `no_owner`,
 `known_miss`, `deadline_hit`, `over_budget`, `expired`, `tables_read`,
 `tables_reused`, `socket_queries`, `lookup_ms`, `snapshot_ms`) and up to four example misses
-with their reason.
+with their reason. With connect tracing it also logs `Connect tracing`:
+`connects` recorded, `unnamed` (the process had exited before it could be
+read), `lost` (records the kernel dropped for a full ring buffer) and
+`records` kept.
 
-Connections stay unattributed when the socket closed before the lookup ran,
-when neither end runs on a node with a collector, or during bursts beyond the
+Connections stay unattributed when the socket closed before the lookup ran
+(the opener of a TCP connection is still known with connect tracing), when
+neither end runs on a node with a collector, or during bursts beyond the
 budget. The Processes page shows the attributed share of connections. Remove
 the flag, capability and mount to disable it.
 

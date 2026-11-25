@@ -1,7 +1,10 @@
 package watcher
 
 import (
+	"bytes"
+	"encoding/binary"
 	"fmt"
+	"golang.org/x/sys/unix"
 	"net"
 	"net/netip"
 	"os"
@@ -102,7 +105,7 @@ func writeFakeProc(t *testing.T, root string, processes []fakeProcess) {
 	}
 }
 
-func newTestAttributor(t *testing.T) (*processAttributor, chan database.NetworkEvent) {
+func newTestAttributor(t *testing.T, configure ...func(*processAttributor)) (*processAttributor, chan database.NetworkEvent) {
 	t.Helper()
 	root := t.TempDir()
 	hostTables := map[string]string{"tcp": socketRow("192.0.2.10", 51000, "140.82.121.34", 443, "01", "900") +
@@ -134,6 +137,9 @@ func newTestAttributor(t *testing.T) (*processAttributor, chan database.NetworkE
 		},
 		onEvent: func(event database.NetworkEvent) { events <- event },
 		logger:  log.Default(),
+	}
+	for _, change := range configure {
+		change(a)
 	}
 	if err := a.start(); err != nil {
 		t.Fatal(err)
@@ -312,7 +318,7 @@ func TestProcessAttributionNeverBlocksPackets(t *testing.T) {
 }
 
 func TestProcessAttributionRequiresNamespaceAccess(t *testing.T) {
-	if _, err := newProcessAttributor(t.TempDir(), nil, 0, log.Default(), func(database.NetworkEvent) {}); err == nil {
+	if _, err := newProcessAttributor(t.TempDir(), nil, 0, false, log.Default(), func(database.NetworkEvent) {}); err == nil {
 		t.Fatal("started without a readable host procfs")
 	}
 }
@@ -536,5 +542,104 @@ func TestProbeMatchYieldsToAnotherObservedOpener(t *testing.T) {
 		if kept := event.Probe != ""; kept != c.keep {
 			t.Errorf("%s: probe kept = %v, want %v", c.name, kept, c.keep)
 		}
+	}
+}
+
+type fakeConnects map[connectKey]connectRecord
+
+func (f fakeConnects) opener(src, dst netip.AddrPort, _ time.Time) (connectRecord, bool) {
+	record, ok := f[connectKey{src, dst}]
+	return record, ok
+}
+func (f fakeConnects) stats(time.Time) (uint64, uint64, uint64, int) { return 0, 0, 0, len(f) }
+func (f fakeConnects) close()                                        {}
+
+// A health check whose kubelet socket has closed: connect tracing names the
+// opener without a lookup, and the server's lookup still runs as the first
+// one, needing only a ready budget, not a spare one.
+func TestTracedOpenerOfAClosedConnection(t *testing.T) {
+	src, dst := netip.MustParseAddrPort("192.0.2.10:52999"), netip.MustParseAddrPort("10.2.0.8:8080")
+	a, events := newTestAttributor(t, func(a *processAttributor) {
+		a.connects = fakeConnects{{src, dst}: {pid: 301, command: "kubelet", at: time.Now()}}
+	})
+	a.podWork.spend(a.podWork.available * 3 / 4) // Ready, nothing to spare.
+	check := database.NetworkEvent{EventType: database.EventTCPStart, Timestamp: time.Now(), SrcIP: "192.0.2.10", SrcPort: 52999, DstIP: "10.2.0.8", DstPort: 8080, SrcKind: "node"}
+	podSide(&check, "dst")
+	got := attributed(t, a, events, check)
+	if got.ProcessSide != "src" || got.ProcessCommand != "kubelet" || got.ProcessPID != 301 || got.ProcessPod != "" {
+		t.Fatalf("opener: side=%q command=%q pid=%d pod=%q", got.ProcessSide, got.ProcessCommand, got.ProcessPID, got.ProcessPod)
+	}
+	if got.PeerProcessCommand != "python3" || got.PeerProcessPod != "demo/api-1" {
+		t.Fatalf("acceptor: %q %q", got.PeerProcessCommand, got.PeerProcessPod)
+	}
+	if a.traced.Load() != 1 || a.peerSkipped.Load() != 0 {
+		t.Fatalf("traced=%d second_end_skipped=%d", a.traced.Load(), a.peerSkipped.Load())
+	}
+	// A pod's connection names the pod even before its container is known.
+	podSrc := netip.MustParseAddrPort("10.2.0.8:40999")
+	a.connects.(fakeConnects)[connectKey{podSrc, netip.MustParseAddrPort("10.96.0.1:443")}] = connectRecord{pid: 4242, command: "worker", containerID: "unknown", at: time.Now()}
+	outgoing := database.NetworkEvent{EventType: database.EventTCPStart, Timestamp: time.Now(), SrcIP: "10.2.0.8", SrcPort: 40999, DstIP: "10.96.0.1", DstPort: 443}
+	podSide(&outgoing, "src")
+	if identity, ok := a.connectOpener(outgoing); !ok || identity.Pod != "demo/api-1" || identity.Command != "worker" || identity.Container != "" {
+		t.Fatalf("pod opener %+v %t", identity, ok)
+	}
+}
+
+// Ends of a kernel tunnel are the kernel's: no lookup, no process scan.
+func TestKernelTunnelEnds(t *testing.T) {
+	a, events := newTestAttributor(t, func(a *processAttributor) {
+		a.tunnelLookup = func() (map[uint16]string, error) { return map[uint16]string{8472: "vxlan cilium_vxlan"}, nil }
+	})
+	sent := attributed(t, a, events, database.NetworkEvent{EventType: database.EventUDPStart, SrcIP: "192.0.2.10", SrcPort: 53735, DstIP: "192.0.2.20", DstPort: 8472, SrcKind: "node", DstKind: "node"})
+	if sent.ProcessSide != "src" || sent.ProcessCommand != "kernel" || sent.ProcessPID != 0 {
+		t.Fatalf("sent: %+v", sent)
+	}
+	received := attributed(t, a, events, database.NetworkEvent{EventType: database.EventUDPStart, SrcIP: "192.0.2.20", SrcPort: 40000, DstIP: "192.0.2.10", DstPort: 8472, SrcKind: "node", DstKind: "node"})
+	if received.ProcessSide != "dst" || received.ProcessCommand != "kernel" {
+		t.Fatalf("received: %+v", received)
+	}
+	if a.kernelEnds.Load() != 2 || a.attempted.Load() != 0 {
+		t.Fatalf("kernel=%d attempted=%d: tunnel ends must not be looked up", a.kernelEnds.Load(), a.attempted.Load())
+	}
+	// Not a tunnel: TCP to that port, or UDP to it at an address that is no node.
+	for _, event := range []database.NetworkEvent{
+		{EventType: database.EventTCPStart, SrcIP: "192.0.2.10", SrcPort: 53736, DstIP: "192.0.2.20", DstPort: 8472, SrcKind: "node", DstKind: "node"},
+		{EventType: database.EventUDPStart, SrcIP: "192.0.2.10", SrcPort: 53737, DstIP: "203.0.113.9", DstPort: 8472, SrcKind: "node"},
+	} {
+		if got := attributed(t, a, events, event); got.ProcessCommand == "kernel" {
+			t.Fatalf("not a tunnel end: %+v", got)
+		}
+	}
+}
+
+func TestTunnelInfoFromLinkAttributes(t *testing.T) {
+	attr := func(kind uint16, value []byte) []byte {
+		length := unix.SizeofRtAttr + len(value)
+		out := make([]byte, (length+3)&^3)
+		binary.NativeEndian.PutUint16(out[0:], uint16(length))
+		binary.NativeEndian.PutUint16(out[2:], kind)
+		copy(out[unix.SizeofRtAttr:], value)
+		return out
+	}
+	port := func(n uint16) []byte { return binary.BigEndian.AppendUint16(nil, n) }
+	join := func(parts ...[]byte) []byte { return bytes.Join(parts, nil) }
+	vxlan := join(attr(unix.IFLA_INFO_KIND, []byte("vxlan\x00")),
+		attr(unix.IFLA_INFO_DATA|unix.NLA_F_NESTED, join(attr(unix.IFLA_VXLAN_ID, []byte{1, 0, 0, 0}), attr(unix.IFLA_VXLAN_PORT, port(8472)))))
+	if kind, got := tunnelInfo(vxlan); kind != "vxlan" || got != 8472 {
+		t.Fatalf("vxlan: %q %d", kind, got)
+	}
+	geneve := join(attr(unix.IFLA_INFO_KIND, []byte("geneve")), attr(unix.IFLA_INFO_DATA, attr(unix.IFLA_GENEVE_PORT, port(6081))))
+	if kind, got := tunnelInfo(geneve); kind != "geneve" || got != 6081 {
+		t.Fatalf("geneve: %q %d", kind, got)
+	}
+	if _, got := tunnelInfo(join(attr(unix.IFLA_INFO_KIND, []byte("veth")))); got != 0 {
+		t.Fatal("veth has no tunnel port")
+	}
+	if _, got := tunnelInfo([]byte{0xff, 0xff, 1}); got != 0 {
+		t.Fatal("garbage parsed")
+	}
+	// The host's own links list without privilege.
+	if _, err := tunnelPorts(); err != nil {
+		t.Fatal(err)
 	}
 }

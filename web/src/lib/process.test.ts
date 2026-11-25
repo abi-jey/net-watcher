@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { NetworkEvent } from './api.ts';
 import { format, negate } from './filter.ts';
-import { describeProbe, endProcesses, healthCheckEvidence, healthChecks, isHealthCheck, probeMatches, splitPod } from './process.ts';
+import { describeProbe, endProcesses, healthCheckEvidence, healthChecks, isHealthCheck, isKernel, probeMatches, splitPod } from './process.ts';
 
 const event = (fields: Partial<NetworkEvent>): NetworkEvent => ({ ProcessSide: '', ProcessCommand: '', ProcessPID: 0, ProcessPod: '', ProcessContainer: '', DstKind: '', ...fields }) as NetworkEvent;
 
@@ -44,4 +44,12 @@ test('probe descriptions', () => {
 test('splitPod', () => {
   assert.deepEqual(splitPod('cloudflared/cloudflared-nrm9h'), { namespace: 'cloudflared', name: 'cloudflared-nrm9h' });
   assert.deepEqual(splitPod('lonely'), { namespace: '', name: 'lonely' });
+});
+
+test('kernel tunnel ends', () => {
+  const tunnel = event({ ProcessSide: 'dst', ProcessCommand: 'kernel', ProcessPID: 0 });
+  assert.equal(isKernel(endProcesses(tunnel).dst), true);
+  // A process that happens to be called kernel has a PID or a pod.
+  assert.equal(isKernel({ command: 'kernel', pid: 42, pod: '', container: '' }), false);
+  assert.equal(isKernel(undefined), false);
 });

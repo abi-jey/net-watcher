@@ -102,6 +102,7 @@ func main() {
 		ownedCIDRs := startCmd.String("owned-cidrs", "", "Comma-separated operator-owned CIDRs for network map classification")
 		processAttribution := startCmd.Bool("process-attribution", false, "Attribute flows on this node to processes and containers from read-only host procfs (needs CAP_SYS_PTRACE)")
 		processProcRoot := startCmd.String("process-proc-root", "/host/proc", "Read-only host procfs mount for process attribution")
+		connectTracing := startCmd.Bool("connect-tracing", false, "With --process-attribution, record the process opening each TCP connection when it connects, by eBPF (needs CAP_BPF and CAP_PERFMON)")
 		processBudget := startCmd.Duration("process-budget", watcher.DefaultProcessBudget, "CPU time per second process attribution may spend on lookups: two thirds for pods, one third for host processes (1ms-1s)")
 		includeVirtual := startCmd.Bool("include-virtual", false, "Include bridge/veth interfaces")
 		ingestURL := startCmd.String("ingest-url", "", "Authenticated central ingestion base URL for this collector")
@@ -338,7 +339,7 @@ func main() {
 				ref, ok := inventory.Container(id)
 				return ref.Namespace, ref.Pod, ref.Name, ok
 			}
-			if err := w.EnableProcessAttribution(*processProcRoot, containers, *processBudget); err != nil {
+			if err := w.EnableProcessAttribution(*processProcRoot, containers, *processBudget, *connectTracing); err != nil {
 				log.Warn("Process attribution unavailable; continuing packet capture", "error", err)
 			}
 		}
