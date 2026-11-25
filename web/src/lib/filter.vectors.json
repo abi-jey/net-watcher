@@ -59,5 +59,7 @@
   { "input": "-dst.process.container=keda-operator", "canonical": "not dst.process.container = keda-operator" },
   { "input": "src.process.pod = none or process = (kubelet, keda)", "canonical": "src.process.pod = none or process = (kubelet, keda)" },
   { "input": "probe != none", "canonical": "probe != none" },
-  { "input": "probe ~ readiness or probe = none", "canonical": "probe ~ readiness or probe = none" }
+  { "input": "probe ~ readiness or probe = none", "canonical": "probe ~ readiness or probe = none" },
+  { "input": "flow = 5e1f0c2a9b3d4e6f", "canonical": "flow = 5e1f0c2a9b3d4e6f" },
+  { "input": "type = UDP_UPDATE and src.bytes > 1M", "canonical": "type = UDP_UPDATE and src.bytes > 1M" }
 ]

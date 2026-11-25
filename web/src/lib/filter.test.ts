@@ -39,10 +39,10 @@ test('type toggles hide types and keep the shorter list', () => {
   assert.deepEqual(hiddenTypes(filter)?.hidden, []);
   filter = toggleType(filter, 'DNS');
   assert.equal(format(filter), 'port = 53 and type != DNS');
-  for (const type of ['TCP_START', 'TCP_END', 'UDP_START', 'UDP_END', 'TLS_SNI']) filter = toggleType(filter, type);
+  for (const type of ['TCP_START', 'TCP_UPDATE', 'TCP_END', 'UDP_START', 'UDP_UPDATE', 'UDP_END', 'TLS_SNI']) filter = toggleType(filter, type);
   assert.equal(format(filter), 'port = 53 and type = (ICMP, TIMEOUT, GAP)');
   filter = toggleType(filter, 'ICMP');
-  assert.deepEqual(hiddenTypes(filter)?.hidden.length, 7);
+  assert.deepEqual(hiddenTypes(filter)?.hidden.length, 9);
   assert.equal(hiddenTypes(parse('type = dns or port = 1')), null, 'a type inside an alternative is edited as text');
   assert.deepEqual(hiddenTypes(parse('iface.type = uplink'))?.hidden, [], 'interface type is another field');
   assert.equal(format(toggleType(parse('type != DNS'), 'DNS')), '');

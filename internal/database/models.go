@@ -12,10 +12,14 @@ const (
 	EventTCPEnd   EventType = "TCP_END"
 	EventUDPStart EventType = "UDP_START"
 	EventUDPEnd   EventType = "UDP_END"
-	EventDNS      EventType = "DNS"
-	EventTLSSNI   EventType = "TLS_SNI"
-	EventICMP     EventType = "ICMP"
-	EventTimeout  EventType = "TIMEOUT"
+	// Progress of a flow still open, written every few minutes while it
+	// carries traffic.
+	EventTCPUpdate EventType = "TCP_UPDATE"
+	EventUDPUpdate EventType = "UDP_UPDATE"
+	EventDNS       EventType = "DNS"
+	EventTLSSNI    EventType = "TLS_SNI"
+	EventICMP      EventType = "ICMP"
+	EventTimeout   EventType = "TIMEOUT"
 	// EventGap records observations that were knowingly lost or withheld, so an
 	// audit can distinguish "nothing happened" from "nothing was recorded".
 	EventGap EventType = "GAP"
@@ -62,12 +66,32 @@ type NetworkEvent struct {
 	TLSSNI string `gorm:"index"`
 
 	// Connection lifecycle
-	Hostname  string // Resolved hostname from DNS cache
-	DNSAge    int64  // Milliseconds since DNS resolution
-	Duration  int64  // Milliseconds (for END events or compacted)
+	Hostname string // Resolved hostname from DNS cache
+	DNSAge   int64  // Milliseconds since DNS resolution
+	Duration int64  // Milliseconds (for END events or compacted)
+	// ByteCount is the bytes this record accounts for: for a flow's update or
+	// end, those since the flow's previous record (its start or last update),
+	// so adding up ByteCount over records never counts a byte twice and puts
+	// it in the time it moved. Without updates, an end's ByteCount is the
+	// flow's total. A DNS lookup's is its query and response.
 	ByteCount int64
 	Reason    string    // FIN, RST, TIMEOUT
 	EndTime   time.Time // End timestamp for compacted events
+
+	// FlowID links one collector's records of one flow: its start, updates,
+	// end and TLS server name. Random per flow; empty on other records and on
+	// records from collectors before it existed. Omitted from JSON when unset
+	// (as are the totals below), so batches without them match what older
+	// ingesters accept.
+	FlowID string `json:",omitempty"`
+	// The flow's totals so far, by the address that sent them: SrcBytes and
+	// SrcPackets were sent by the record's source (the end that opened a
+	// flow), DstBytes and DstPackets by its destination. On a DNS lookup they
+	// are the query and the response. Zero when not counted.
+	SrcBytes   int64 `json:",omitempty"`
+	DstBytes   int64 `json:",omitempty"`
+	SrcPackets int64 `json:",omitempty"`
+	DstPackets int64 `json:",omitempty"`
 
 	// ICMP specific
 	ICMPType uint8

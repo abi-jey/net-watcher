@@ -86,11 +86,11 @@ func TestDNSReusedQueryIDExpiresBeforeNextGlobalScan(t *testing.T) {
 	at := time.Now().Add(-time.Minute)
 	client, resolver := "[10.0.0.1]:12345", "[10.0.0.53]:53"
 	query := dnsMessage(t, 1, false, "api.test", nil)
-	sm.TrackDNSPacket("test", client, resolver, "UDP", query, at, false)
+	sm.TrackDNSPacket("test", client, resolver, "UDP", query, at, false, 0)
 	sm.dns.prune(at.Add(dnsWindow - 100*time.Millisecond))
 	newTime := at.Add(dnsWindow + 100*time.Millisecond)
-	sm.TrackDNSPacket("test", client, resolver, "UDP", query, newTime, false)
-	sm.TrackDNSPacket("test", resolver, client, "UDP", dnsMessage(t, 1, true, "api.test", []layers.DNSResourceRecord{addressRecord("api.test", "203.0.113.1", 60)}), newTime.Add(time.Millisecond), false)
+	sm.TrackDNSPacket("test", client, resolver, "UDP", query, newTime, false, 0)
+	sm.TrackDNSPacket("test", resolver, client, "UDP", dnsMessage(t, 1, true, "api.test", []layers.DNSResourceRecord{addressRecord("api.test", "203.0.113.1", 60)}), newTime.Add(time.Millisecond), false, 0)
 	rows := resolutions(t, sm)
 	if len(rows) != 1 || !rows[0].QueryTime.Equal(newTime) {
 		t.Fatalf("reused ID retained expired query: %+v", rows)

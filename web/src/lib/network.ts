@@ -110,7 +110,7 @@ export function family(eventType: string): Family {
 }
 
 const eventLabels: Record<string, string> = {
-  TCP_START: 'TCP open', TCP_END: 'TCP close', UDP_START: 'UDP flow', UDP_END: 'UDP end', DNS: 'DNS',
+  TCP_START: 'TCP open', TCP_UPDATE: 'TCP update', TCP_END: 'TCP close', UDP_START: 'UDP flow', UDP_UPDATE: 'UDP update', UDP_END: 'UDP end', DNS: 'DNS',
   TLS_SNI: 'TLS hello', ICMP: 'ICMP', TIMEOUT: 'Timed out', GAP: 'Loss',
 };
 export const eventLabel = (eventType: string) => eventLabels[eventType] ?? eventType;

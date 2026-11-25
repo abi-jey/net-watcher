@@ -476,6 +476,57 @@ not done. DNS queries the device sends to a public resolver appear as ordinary
 `DNS` events with `route=exit-node`; queries answered by MagicDNS on the device
 itself never reach the node.
 
+### Records: one per action
+
+A process sending to one destination is one action, and is recorded as one
+flow. A process that reaches five destinations makes five flows.
+
+- **Flows (TCP and UDP).** A flow is one pair of addresses and ports, in both
+  directions. A TCP flow lasts from its SYN to its FIN or RST. A UDP flow
+  ends once neither end has sent for 2 minutes. A packet seen on several
+  interfaces of a node (a pod's link, the tunnel device) counts once.
+  - Every record of a flow on one node carries the same `FlowID`: its start
+    (`TCP_START`, `UDP_START`), its TLS server name, its updates and its end
+    (`TCP_END`, `UDP_END`, `TIMEOUT`).
+  - Records carry the flow's totals so far, by the end that sent them.
+    `SrcBytes` and `SrcPackets` were sent by the source, the end that opened
+    the flow. `DstBytes` and `DstPackets` were sent by the destination.
+- **Updates.** An open flow that carried traffic gets a `TCP_UPDATE` or
+  `UDP_UPDATE` record every 5 minutes, so a long transfer's volume shows
+  while it lasts rather than when it stops.
+  - `ByteCount` on an update or end is the bytes since the flow's previous
+    record. Summaries and charts add `ByteCount` over all records, so no byte
+    counts twice and each lands in the hour it moved.
+  - A flow without updates has its total in its end's `ByteCount`, as before.
+- **DNS lookups.** One lookup is one `DNS` record on each node that sees it.
+  - Copies of a message seen on another interface of the node within a second
+    are dropped.
+  - A query sent again belongs to the same lookup.
+  - The response records the lookup: its question, answers and the query's
+    time, `DstBytes` for the query (retransmissions included) and `SrcBytes`
+    for the response. The response's source is the resolver.
+  - A query waits for its response up to 10 seconds, then is recorded on its
+    own as unanswered.
+  - DNS on port 53 gets no separate UDP flow. Anything else on port 53 stays
+    an ordinary UDP flow.
+- **Kernel tunnels.** Traffic of a VXLAN or Geneve device (Cilium's
+  `cilium_vxlan` on 8472) is one flow per pair of hosts. Without this, every
+  pod connection the tunnel carries would appear twice: once as itself on the
+  tunnel device, and once as a tunnel flow from the source port the kernel
+  picks for it.
+
+Each node records its own end of a flow between nodes. The Events page's
+**Flows** view (the default) shows each flow or lookup as one row from all its
+records on every node, with each node's process; a lookup reads from the
+client that asked to its resolver (↑ the query, ↓ the response). Flows one opener (a process,
+or an address when no process is known) makes to one destination again and
+again, such as health checks or a name looked up repeatedly, collapse into one
+row that expands to them. **Records** lists every stored record as it is.
+
+A collector forwards `FlowID` and the totals only to an ingester that
+advertises the `flows` capability. An older ingester gets the records without
+them, and its sums stay right because of how `ByteCount` is counted.
+
 ### Filtering events
 
 `GET /api/events` accepts, besides `from`, `to`, `limit`, `cursor`, `eventType`,
@@ -499,6 +550,9 @@ The `f` parameter takes a filter expression combining any of these, with
 `src.`/`dst.` prefixes for one end; `src.process` is the process that opened
 the connection, `dst.process` the one that accepted it, and a bare `process`
 either; `probe != none` selects health checks and `probe = none` hides them.
+`flow = <FlowID>` selects one flow's records on a node. `src.bytes` and
+`dst.bytes` compare a flow's totals sent by each end (`src.bytes > 100M`
+finds large uploads). `bytes` compares what each record accounts for.
 Invalid values are rejected with 400. A process identity (command, pod
 and container at one end) walks the partial indexes of recorded and peer
 processes, and a single route walks its own, so rare matches return quickly

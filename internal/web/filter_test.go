@@ -70,7 +70,7 @@ func filterEvents(t *testing.T, db *gorm.DB, now time.Time, n int, seed uint64) 
 	for i := range events {
 		e := database.NetworkEvent{
 			Timestamp:   now.Add(-time.Duration(r.IntN(3600)) * time.Second),
-			EventType:   database.EventType(pick("TCP_START", "TCP_END", "UDP_START", "UDP_END", "DNS", "TLS_SNI", "ICMP", "GAP")),
+			EventType:   database.EventType(pick("TCP_START", "TCP_UPDATE", "TCP_END", "UDP_START", "UDP_UPDATE", "UDP_END", "DNS", "TLS_SNI", "ICMP", "GAP")),
 			CollectorID: pick("abja", "desktop", ""), Interface: pick("lxc12", "enp0s25", "eni3", "tailscale0", "ts1", "cilium_host", "wlan0", "lo", ""),
 			IPVersion: uint8(number(4, 6)), SrcIP: pick(ips...), DstIP: pick(ips...), SrcPort: uint16(number(0, 53, 443, 1500, 40000, 65535)), DstPort: uint16(number(0, 53, 443, 8472, 40000)),
 			SrcKind: pick("pod", "node", "service", "endpoint", ""), DstKind: pick("pod", "node", ""),
@@ -79,7 +79,8 @@ func filterEvents(t *testing.T, db *gorm.DB, now time.Time, n int, seed uint64) 
 			Route: pick("exit-node", "subnet-router", "via-tailnet", ""), TailnetPeer: pick("100.101.1.2", ""), TailnetPeerName: pick("phone.tail.ts.net.", ""),
 			Hostname: pick(names...), DNSQuery: pick(names...), TLSSNI: pick(names...), DNSResponseCode: pick("No Error", "Non-Existent Domain", "Server Failure ", ""),
 			ByteCount: number(0, 100, 1500, 2<<20), Duration: number(0, 250, 5000, 120_000),
-			Probe: pick("api:liveness", "api:liveness,readiness; sidecar:startup", ""),
+			Probe:  pick("api:liveness", "api:liveness,readiness; sidecar:startup", ""),
+			FlowID: pick("5e1f0c2a9b3d4e6f", "0a0b0c0d0e0f1011", ""), SrcBytes: number(0, 74, 1500, 3<<20), DstBytes: number(0, 66, 40_000),
 		}
 		// Process fields are set together, as the collector sets them.
 		if r.IntN(2) == 0 {
@@ -151,7 +152,7 @@ func randomFilter(r *rand.Rand, depth int) string {
 		switch name {
 		case "ipv":
 			pool = []string{"4", "6"}
-		case "bytes":
+		case "bytes", "src.bytes", "dst.bytes":
 			pool = []string{"0", "100", "1.5k", "2M", "100-2000"}
 		case "duration":
 			pool = []string{"0", "250ms", "5s", "2m", "1-6000"}
@@ -159,7 +160,7 @@ func randomFilter(r *rand.Rand, depth int) string {
 			pool = []string{"0", "53", "443", "40000", "1000-50000"}
 		}
 	default:
-		pool = []string{"abja", "desktop", "default", "kube-system", "Monitoring", "api-1", "curl", "demo/api-1", "api", "100.101.1.2", "phone.tail.ts.net.", "NXDOMAIN", "lxc12", "api:liveness", "none"}
+		pool = []string{"abja", "desktop", "default", "kube-system", "Monitoring", "api-1", "curl", "demo/api-1", "api", "100.101.1.2", "phone.tail.ts.net.", "NXDOMAIN", "lxc12", "api:liveness", "5e1f0c2a9b3d4e6f", "none"}
 	}
 	ops := []string{"=", "!="}
 	if field.kind == numberField {

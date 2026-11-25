@@ -380,13 +380,12 @@ func (w *Watcher) processPacket(packet gopacket.Packet, ifaceName string) {
 		dst := fmt.Sprintf("[%s]:%d", dstIP, udp.DstPort)
 		length := len(packet.Data())
 
-		// Track UDP "connection"
-		w.sessionManager.TrackUDP(ifaceName, src, dst, uint16(udp.SrcPort), uint16(udp.DstPort), length, isIPv6)
-
-		// Check for DNS (port 53)
-		if udp.SrcPort == 53 || udp.DstPort == 53 {
-			w.sessionManager.TrackDNSPacket(ifaceName, src, dst, "UDP", udp.Payload, packet.Metadata().Timestamp, isIPv6)
+		// DNS on port 53 is recorded as lookups, which count its packets;
+		// anything else there is a UDP flow like any other.
+		if (udp.SrcPort == 53 || udp.DstPort == 53) && w.sessionManager.TrackDNSPacket(ifaceName, src, dst, "UDP", udp.Payload, packet.Metadata().Timestamp, isIPv6, length) {
+			return
 		}
+		w.sessionManager.TrackUDP(ifaceName, src, dst, uint16(udp.SrcPort), uint16(udp.DstPort), length, isIPv6)
 		return
 	}
 

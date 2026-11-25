@@ -330,6 +330,12 @@ a.ep-name:hover { color: var(--accent-work); }
   to { background: transparent; }
 }
 @media (prefers-reduced-motion: reduce) { .ev.fresh .ev-row { animation: none; } }
+/* A repeat row's flows, indented under it. */
+.ev-children { list-style: none; margin: 0; padding: 0 0 0 18px; background: var(--surface-work-inset); border-top: 1px solid var(--border-light); }
+.ev-children .ev:last-child { border-bottom: 0; }
+.ev-repeat > .ev-row .type { font-variant-numeric: tabular-nums; }
+.flow-records ol { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.flow-records summary { font-size: 12.5px; }
 .ev-details { padding: 14px 16px 16px; background: var(--surface-work-inset); border-top: 1px solid var(--border-light); display: flex; flex-direction: column; gap: 12px; }
 .facts { display: grid; gap: 14px 24px; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
 .facts h3 { margin-bottom: 8px; }

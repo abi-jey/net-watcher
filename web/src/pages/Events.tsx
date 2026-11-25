@@ -6,8 +6,9 @@ import { dateTime } from '../lib/format.ts';
 import { addCondition, allOf, conditions, format, fromLegacy, legacyParams, tryParse, type Term } from '../lib/filter.ts';
 import { Pacer } from '../lib/pacer.ts';
 import { endProcesses } from '../lib/process.ts';
-import { Banner, Empty, ErrorBanner, Spinner } from '../components/ui.tsx';
-import { EventRow } from '../components/EventRow.tsx';
+import { groupRecords, type Row } from '../lib/flows.ts';
+import { Banner, Empty, ErrorBanner, Segmented, Spinner } from '../components/ui.tsx';
+import { EventRow, FlowRow, RepeatRow } from '../components/EventRow.tsx';
 import { FilterBar, type Suggestions } from '../components/FilterBar.tsx';
 import { Icon } from '../components/icons.tsx';
 
@@ -22,15 +23,24 @@ const autoLoadLimit = 3000;
  * Links and bookmarks from before filters were expressions carry one-value
  * parameters; they are read into the filter.
  */
-function readSearch(query: URLSearchParams): { window: string; text: string; legacy: boolean } {
+function readSearch(query: URLSearchParams): { window: string; text: string; legacy: boolean; view: View } {
   const window = query.get('w') ?? '24h';
   const raw = query.get('f') ?? '';
+  const view: View = query.get('v') === 'records' ? 'records' : 'flows';
   const legacy = fromLegacy(query);
-  if (!legacy.length) return { window, text: raw, legacy: false };
+  if (!legacy.length) return { window, text: raw, legacy: false, view };
   const parsed = tryParse(raw);
   const text = parsed.error ? [format(allOf(legacy)), `(${raw})`].join(' and ') : format(allOf([...legacy, ...conditions(parsed.term)]));
-  return { window, text, legacy: true };
+  return { window, text, legacy: true, view };
 }
+
+/**
+ * Flows: one row for what happened, from all its records (a flow's open,
+ * updates and close on each node, a DNS lookup), and one for flows an opener
+ * repeats to one destination. Records: every stored record as it is.
+ */
+type View = 'flows' | 'records';
+const views: { value: View; label: string }[] = [{ value: 'flows', label: 'Flows' }, { value: 'records', label: 'Records' }];
 
 /** Values seen in the loaded events, offered while adding a condition. */
 function suggestionsFrom(events: NetworkEvent[], nodes: string[]): Suggestions {
@@ -71,17 +81,20 @@ export function Events({ query }: { query: URLSearchParams }) {
   const [range, setRange] = useState(() => windowRange(search.window));
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<Error>();
-  const [expanded, setExpanded] = useState<number>();
+  const [expanded, setExpanded] = useState<string>();
+  const [openChild, setOpenChild] = useState<string>();
   const [live, setLive] = useState(false);
   const controller = useRef<AbortController>(undefined);
   const sentinel = useRef<HTMLDivElement>(null);
 
   // Older one-value links become the filter text in the URL.
   useEffect(() => {
-    if (search.legacy) setQuery(['events'], { w: search.window, f: search.text || undefined, ...Object.fromEntries(legacyParams.map(param => [param, undefined])) });
-  }, [search.legacy, search.window, search.text]);
+    if (search.legacy) setQuery(['events'], { w: search.window, f: search.text || undefined, v: search.view === 'records' ? 'records' : undefined, ...Object.fromEntries(legacyParams.map(param => [param, undefined])) });
+  }, [search.legacy, search.window, search.text, search.view]);
 
-  const apply = (text: string, window = search.window) => setQuery(['events'], { w: window, f: text || undefined });
+  const viewParam = (view: View) => (view === 'records' ? 'records' : undefined);
+  const apply = (text: string, window = search.window) => setQuery(['events'], { w: window, f: text || undefined, v: viewParam(search.view) });
+  const setView = (view: View) => { setExpanded(undefined); setOpenChild(undefined); setQuery(['events'], { w: search.window, f: search.text || undefined, v: viewParam(view) }); };
   const onFilter = (condition: Term) => {
     setExpanded(undefined);
     apply(format(addCondition(tryParse(search.text).term, condition)));
@@ -152,6 +165,12 @@ export function Events({ query }: { query: URLSearchParams }) {
   }, [canAutoLoad]);
 
   const nodes = useMemo(() => (collectors.data?.collectors ?? []).map(collector => collector.CollectorID).filter(Boolean), [collectors.data]);
+  const rows = useMemo<Row[]>(() => (search.view === 'flows' ? groupRecords(events)
+    : events.map(event => ({ kind: 'record', key: `record|${event.ID}`, last: event.Timestamp, event }))), [events, search.view]);
+  const toggle = (key: string) => { setOpenChild(undefined); setExpanded(current => (current === key ? undefined : key)); };
+  const fresh = (row: Row) => (row.kind === 'record' ? liveTail.fresh.has(row.event.ID)
+    : row.kind === 'flow' ? row.flow.records.some(record => liveTail.fresh.has(record.ID))
+      : row.repeat.flows.some(flow => flow.records.some(record => liveTail.fresh.has(record.ID))));
   const suggestions = useMemo(() => suggestionsFrom(events, nodes), [events, nodes]);
   const filtered = search.text.trim() !== '';
   // The server checks values the browser does not (ports, prefixes, units):
@@ -162,8 +181,11 @@ export function Events({ query }: { query: URLSearchParams }) {
   return (
     <>
       <div className="page-header">
-        <div><h1>Events</h1><p>Every stored observation, newest first. Select a row for its details; select a tag in a row to show only, or hide, events sharing it.</p></div>
+        <div><h1>Events</h1><p>{search.view === 'flows'
+          ? 'What happened, newest first: each flow or DNS lookup once, from all its records on every node; flows one process repeats to one destination together. Select a row for its details; select a tag to show only, or hide, what shares it.'
+          : 'Every stored record, newest first. Select a row for its details; select a tag in a row to show only, or hide, events sharing it.'}</p></div>
         <div className="live-controls">
+          <Segmented label="Show" value={search.view} options={views} onChange={setView} />
           {live && <button type="button" className="ghost small" onClick={liveTail.toggleHold} aria-pressed={liveTail.held}><Icon name={liveTail.held ? 'play' : 'pause'} size={12} />{liveTail.held ? 'Resume' : 'Pause'}</button>}
           <label className="switch"><input type="checkbox" checked={live} onChange={event => setLive(event.target.checked)} /><span>Live tail</span></label>
         </div>
@@ -179,10 +201,12 @@ export function Events({ query }: { query: URLSearchParams }) {
           </div>
         </div>
         <ol aria-label="Events" aria-live={live ? 'off' : undefined}>
-          {events.map(event => (
-            <EventRow key={event.ID} event={event} fresh={liveTail.fresh.has(event.ID)} expanded={expanded === event.ID}
-              onToggle={() => setExpanded(current => (current === event.ID ? undefined : event.ID))} onFilter={onFilter} />
-          ))}
+          {rows.map(row => row.kind === 'record'
+            ? <EventRow key={row.key} event={row.event} fresh={fresh(row)} expanded={expanded === row.key} onToggle={() => toggle(row.key)} onFilter={onFilter} />
+            : row.kind === 'flow'
+              ? <FlowRow key={row.key} flow={row.flow} fresh={fresh(row)} expanded={expanded === row.key} onToggle={() => toggle(row.key)} onFilter={onFilter} />
+              : <RepeatRow key={row.key} repeat={row.repeat} fresh={fresh(row)} expanded={expanded === row.key} onToggle={() => toggle(row.key)} onFilter={onFilter}
+                openFlow={openChild} onToggleFlow={key => setOpenChild(current => (current === key ? undefined : key))} />)}
         </ol>
         {!events.length && (loading ? <Empty><Spinner /> Searching…</Empty> : page?.complete ? <Empty>No {filtered ? 'matching ' : ''}events between {dateTime(page.from)} and {dateTime(page.to)}.</Empty> : null)}
         <div ref={sentinel} />
@@ -193,7 +217,7 @@ export function Events({ query }: { query: URLSearchParams }) {
         )}
         <div className="table-foot">
           <span className="muted small" aria-live="polite">
-            {events.length.toLocaleString()} shown
+            {events.length.toLocaleString()} records shown{search.view === 'flows' ? ` as ${rows.length.toLocaleString()} rows` : ''}
             {page && !live && (page.complete && !page.nextCursor ? ' · whole window searched' : ` · back to ${dateTime(page.searchedFrom)}`)}
           </span>
           {loading && events.length > 0 && <span className="muted small"><Spinner /> Loading older events…</span>}

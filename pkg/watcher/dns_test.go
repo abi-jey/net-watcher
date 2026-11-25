@@ -56,13 +56,13 @@ func TestDNSMatchedEvidenceIsClientScopedAndTTLBounded(t *testing.T) {
 	sm := testManager(t)
 	at := time.Now().Add(-time.Second)
 	client, resolver := "[10.2.0.8]:40500", "[10.2.0.53]:53"
-	sm.TrackDNSPacket("veth-test", client, resolver, "UDP", dnsMessage(t, 42, false, "API.Example.test", nil), at, false)
+	sm.TrackDNSPacket("veth-test", client, resolver, "UDP", dnsMessage(t, 42, false, "API.Example.test", nil), at, false, 0)
 	answers := []layers.DNSResourceRecord{
 		{Name: []byte("api.example.test"), Type: layers.DNSTypeCNAME, Class: layers.DNSClassIN, TTL: 10, CNAME: []byte("edge.example.test")},
 		addressRecord("edge.example.test", "203.0.113.20", 60),
 		addressRecord("unrelated.test", "203.0.113.99", 60),
 	}
-	sm.TrackDNSPacket("veth-test", resolver, client, "UDP", dnsMessage(t, 42, true, "api.example.test", answers), at.Add(time.Millisecond), false)
+	sm.TrackDNSPacket("veth-test", resolver, client, "UDP", dnsMessage(t, 42, true, "api.example.test", answers), at.Add(time.Millisecond), false, 0)
 	rows := resolutions(t, sm)
 	if len(rows) != 1 || rows[0].IP != "203.0.113.20" || rows[0].TTL != 10 || rows[0].TransactionID != 42 {
 		t.Fatalf("incorrect evidence: %+v", rows)
@@ -105,7 +105,7 @@ func TestDNSRejectsUnprovenMappings(t *testing.T) {
 			at := time.Now()
 			client, resolver := "[10.2.0.8]:40500", "[10.2.0.53]:53"
 			if scenario != "unsolicited" {
-				sm.TrackDNSPacket("eth0", client, resolver, "UDP", dnsMessage(t, 42, false, "api.test", nil), at, false)
+				sm.TrackDNSPacket("eth0", client, resolver, "UDP", dnsMessage(t, 42, false, "api.test", nil), at, false, 0)
 			}
 			message := layers.DNS{ID: 42, QR: true, Questions: []layers.DNSQuestion{{Name: []byte("api.test"), Type: layers.DNSTypeA, Class: layers.DNSClassIN}}, Answers: []layers.DNSResourceRecord{addressRecord("api.test", "203.0.113.20", 60)}}
 			switch scenario {
@@ -128,7 +128,8 @@ func TestDNSRejectsUnprovenMappings(t *testing.T) {
 			case "unrelated-answer":
 				message.Answers[0].Name = []byte("other.test")
 			}
-			sm.TrackDNSPacket("eth0", resolver, client, "UDP", serializeDNS(t, message), at.Add(time.Millisecond), false)
+			sm.TrackDNSPacket("eth0", resolver, client, "UDP", serializeDNS(t, message), at.Add(time.Millisecond), false, 0)
+			sm.releaseParked(time.Now(), true) // No query is coming for an unmatched response.
 			if got := resolutions(t, sm); len(got) != 0 {
 				t.Fatalf("false DNS evidence: %+v", got)
 			}
@@ -141,9 +142,9 @@ func TestDNSZeroTTLAndDuplicateResponse(t *testing.T) {
 	at := time.Now()
 	query := dnsMessage(t, 1, false, "zero.test", nil)
 	response := dnsMessage(t, 1, true, "zero.test", []layers.DNSResourceRecord{addressRecord("zero.test", "203.0.113.20", 0)})
-	sm.TrackDNSPacket("veth0", "[10.2.0.8]:1000", "[10.2.0.53]:53", "UDP", query, at, false)
+	sm.TrackDNSPacket("veth0", "[10.2.0.8]:1000", "[10.2.0.53]:53", "UDP", query, at, false, 0)
 	for range 2 {
-		sm.TrackDNSPacket("veth0", "[10.2.0.53]:53", "[10.2.0.8]:1000", "UDP", response, at.Add(time.Millisecond), false)
+		sm.TrackDNSPacket("veth0", "[10.2.0.53]:53", "[10.2.0.8]:1000", "UDP", response, at.Add(time.Millisecond), false, 0)
 	}
 	if got := resolutions(t, sm); len(got) != 1 {
 		t.Fatalf("expected one historical mapping: %d", len(got))
@@ -211,8 +212,8 @@ func TestDNSPodIPReuseDoesNotInheritEvidence(t *testing.T) {
 	identity := `{"UID":"old-pod"}`
 	sm.contextLookup = func(string, uint16, string, time.Time) kube.Attribution { return kube.Attribution{Context: identity} }
 	at := time.Now().Add(-time.Second)
-	sm.TrackDNSPacket("veth0", "[10.2.0.8]:1000", "[10.2.0.53]:53", "UDP", dnsMessage(t, 1, false, "api.test", nil), at, false)
-	sm.TrackDNSPacket("veth0", "[10.2.0.53]:53", "[10.2.0.8]:1000", "UDP", dnsMessage(t, 1, true, "api.test", []layers.DNSResourceRecord{addressRecord("api.test", "203.0.113.20", 60)}), at.Add(time.Millisecond), false)
+	sm.TrackDNSPacket("veth0", "[10.2.0.8]:1000", "[10.2.0.53]:53", "UDP", dnsMessage(t, 1, false, "api.test", nil), at, false, 0)
+	sm.TrackDNSPacket("veth0", "[10.2.0.53]:53", "[10.2.0.8]:1000", "UDP", dnsMessage(t, 1, true, "api.test", []layers.DNSResourceRecord{addressRecord("api.test", "203.0.113.20", 60)}), at.Add(time.Millisecond), false, 0)
 	identity = `{"UID":"replacement-pod"}`
 	sm.TrackTCP("veth0", "[10.2.0.8]:5000", "[203.0.113.20]:443", true, false, false, 60, false)
 	sm.flushEvents()

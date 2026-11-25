@@ -133,6 +133,15 @@ the CNAME chain and address record bounds correlation with later connection even
 Zero-TTL replies remain historical evidence but are never reused as cached mappings.
 Unexpired bindings are restored from SQLite after a collector restart.
 
+Each lookup is one `DNS` record on a node: the response, holding the question,
+the query's time and both messages' sizes. The node's other copies of the
+query and response (on a pod's link and the tunnel device, say) are not
+recorded again. A query with no response within 10 seconds is recorded on its
+own. Evidence is unchanged: it comes from the first matching copy. Each
+interface is captured on its own, so a response can be handled before its
+query from another interface; it waits up to a second for the query, and
+matches it only if the query was captured first.
+
 New connections store references to the evidence valid when observed. Expired
 records remain available as historical evidence rather than being mistaken for a
 current DNS mapping. Unsolicited, failed, truncated and unmatched replies remain

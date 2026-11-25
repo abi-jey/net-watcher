@@ -133,7 +133,7 @@ var rcodeValues = func() map[string]string {
 
 var eventTypeValues = func() map[string]string {
 	values := map[string]string{}
-	for _, t := range []database.EventType{database.EventTCPStart, database.EventTCPEnd, database.EventUDPStart, database.EventUDPEnd, database.EventDNS,
+	for _, t := range []database.EventType{database.EventTCPStart, database.EventTCPEnd, database.EventUDPStart, database.EventUDPEnd, database.EventTCPUpdate, database.EventUDPUpdate, database.EventDNS,
 		database.EventTLSSNI, database.EventICMP, database.EventTimeout, database.EventGap, database.EventTCP, database.EventUDP, database.EventHourlySummary} {
 		values[strings.ToLower(string(t))] = string(t)
 	}
@@ -161,7 +161,11 @@ var filterFields, filterAliases = func() (map[string]*filterField, map[string]st
 		"domain":       {kind: domainField, columns: []string{"hostname", "dns_query", "tls_sni"}, entity: true},
 		"rcode":        {kind: enumField, columns: []string{"dns_response_code"}, values: rcodeValues, shown: sortedKeys(rcodeNames)},
 		"bytes":        {kind: numberField, columns: []string{"byte_count"}, unit: byteCount},
-		"duration":     {kind: numberField, columns: []string{"duration"}, unit: milliseconds},
+		// The flow's totals so far, by the end that sent them.
+		"src.bytes": {kind: numberField, columns: []string{"src_bytes"}, unit: byteCount},
+		"dst.bytes": {kind: numberField, columns: []string{"dst_bytes"}, unit: byteCount},
+		"flow":      {kind: stringField, columns: []string{"flow_id"}},
+		"duration":  {kind: numberField, columns: []string{"duration"}, unit: milliseconds},
 	}
 	for name, column := range map[string]string{"ip": "ip", "port": "port", "kind": "kind", "ns": "namespace", "name": "name", "workload": "workload"} {
 		kind, values, unit := stringField, map[string]string(nil), (func(string) (int64, error))(nil)
@@ -1045,6 +1049,8 @@ func eventText(e *database.NetworkEvent, column string) string {
 		return e.TailnetPeer
 	case "probe":
 		return e.Probe
+	case "flow_id":
+		return e.FlowID
 	case "tailnet_peer_name":
 		return e.TailnetPeerName
 	case "hostname":
@@ -1081,6 +1087,10 @@ func eventNumber(e *database.NetworkEvent, column string) int64 {
 		return int64(e.DstPort)
 	case "byte_count":
 		return e.ByteCount
+	case "src_bytes":
+		return e.SrcBytes
+	case "dst_bytes":
+		return e.DstBytes
 	case "duration":
 		return e.Duration
 	}
