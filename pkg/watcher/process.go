@@ -318,7 +318,11 @@ func (a *processAttributor) start() error {
 			a.logger.Warn("Connect tracing unavailable; openers of short connections will often be missed", "error", err)
 		} else {
 			a.connects = tracer
-			a.logger.Info("Connect tracing enabled: the process opening each TCP connection on this node is recorded when it connects")
+			udp := "unavailable: the kernel's BTF lacks the socket inode fields"
+			if tracer.udpReader != nil {
+				udp = fmt.Sprintf("traced at %d send functions", len(tracer.udpLinks))
+			}
+			a.logger.Info("Connect tracing enabled: the process opening each TCP connection on this node is recorded when it connects, and the one sending on each UDP socket as it sends", "udp_senders", udp)
 		}
 	}
 	a.workers.Add(1)
