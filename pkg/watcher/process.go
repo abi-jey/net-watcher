@@ -216,6 +216,10 @@ type processAttributor struct {
 
 	flowMu sync.Mutex
 	flows  map[string]flowProcesses
+	// pending counts queued flow starts by flow key: until a start is looked
+	// up, the flow's later events (a short connection's end) queue behind it
+	// and inherit what it finds.
+	pending map[string]int
 
 	// A few failed lookups per report interval, with their reason, so
 	// operators can see why connections stay unattributed.
@@ -269,7 +273,7 @@ func (a *processAttributor) start() error {
 		return fmt.Errorf("host procfs at %s: %w", a.root, err)
 	}
 	a.jobs = make(chan processJob, processQueueSize)
-	a.flows = map[string]flowProcesses{}
+	a.flows, a.pending = map[string]flowProcesses{}, map[string]int{}
 	a.remote = map[string]time.Time{}
 	a.misses = map[string]time.Time{}
 	a.resume = map[string]int{}
@@ -372,43 +376,83 @@ func (a *processAttributor) handle(event *database.NetworkEvent) bool {
 		a.inherited.Add(1)
 		return false
 	}
-	if !attributable(*event) {
+	start := attributable(*event)
+	if !start && !a.isPending(*event) {
+		a.applyTraced(event, now, false)
 		return false
 	}
-	hosts := a.hostIPs.Load()
-	local := event.SrcKind == "pod" || event.DstKind == "pod" || (hosts != nil && ((*hosts)[event.SrcIP] || (*hosts)[event.DstIP]))
-	if !local {
-		return false
+	if start {
+		hosts := a.hostIPs.Load()
+		local := event.SrcKind == "pod" || event.DstKind == "pod" || (hosts != nil && ((*hosts)[event.SrcIP] || (*hosts)[event.DstIP]))
+		if !local {
+			return false
+		}
 	}
 	a.jobsMu.RLock()
 	defer a.jobsMu.RUnlock()
 	if a.closed {
 		return false
 	}
+	if start {
+		a.setPending(*event, true) // Before the worker can take it.
+	}
 	select {
 	case a.jobs <- processJob{event: *event, queuedAt: now}:
 		return true
 	default:
+		if start {
+			a.setPending(*event, false)
+		}
 		a.queueFull.Add(1)
-		a.applyTraced(event, now) // Needs no lookup.
+		a.applyTraced(event, now, start) // Needs no lookup.
 		return false
 	}
 }
 
+// setPending counts a flow start in or out of the queue.
+func (a *processAttributor) setPending(event database.NetworkEvent, queued bool) {
+	key := flowKey(event, false)
+	a.flowMu.Lock()
+	defer a.flowMu.Unlock()
+	if a.pending == nil {
+		a.pending = map[string]int{}
+	}
+	switch {
+	case queued:
+		a.pending[key]++
+	case a.pending[key] <= 1:
+		delete(a.pending, key)
+	default:
+		a.pending[key]--
+	}
+}
+
+// isPending reports whether the flow's start, in either orientation, waits
+// in the queue.
+func (a *processAttributor) isPending(event database.NetworkEvent) bool {
+	a.flowMu.Lock()
+	defer a.flowMu.Unlock()
+	return a.pending[flowKey(event, false)] > 0 || a.pending[flowKey(event, true)] > 0
+}
+
 // applyTraced applies the opener connect tracing recorded, for an event that
-// gets no lookups.
-func (a *processAttributor) applyTraced(event *database.NetworkEvent, now time.Time) {
+// gets no lookups. keep remembers it for the flow's later events; a later
+// event's result is not kept, or it would hide what its start's lookup finds.
+func (a *processAttributor) applyTraced(event *database.NetworkEvent, now time.Time, keep bool) {
 	if opener, ok := a.connectOpener(*event); ok {
 		flow := flowProcesses{src: opener, hasSrc: true, used: now}
 		flow.apply(event)
-		a.remember(*event, flow)
+		if keep {
+			a.remember(*event, flow)
+		}
 		a.traced.Add(1)
 	}
 }
 
 // connectOpener is the process connect tracing saw open this TCP flow.
 func (a *processAttributor) connectOpener(event database.NetworkEvent) (processIdentity, bool) {
-	if a.connects == nil || (event.EventType != database.EventTCPStart && event.EventType != database.EventTLSSNI) {
+	tcp := strings.HasPrefix(string(event.EventType), "TCP") || event.EventType == database.EventTLSSNI || (event.EventType == database.EventTimeout && event.Protocol == "TCP")
+	if a.connects == nil || !tcp {
 		return processIdentity{}, false
 	}
 	src, err := netip.ParseAddr(event.SrcIP)
@@ -509,17 +553,23 @@ func (a *processAttributor) run() {
 	for queued := range a.jobs {
 		event := queued.event
 		now := time.Now()
-		if flow, ok := a.cached(event, now); ok { // Attributed meanwhile.
+		start := attributable(event)
+		if flow, ok := a.cached(event, now); ok { // Attributed meanwhile, or by the start it followed.
 			flow.apply(&event)
 			a.inherited.Add(1)
+		} else if !start {
+			a.applyTraced(&event, now, false) // Its start found nothing.
 		} else if now.Sub(queued.queuedAt) > processQueueAge {
 			a.expired.Add(1)
-			a.applyTraced(&event, now)
+			a.applyTraced(&event, now, true)
 		} else {
 			if now.Sub(a.snapshot.at) > processSnapshotEvery && a.podWork.ready(now) {
 				a.refresh(now)
 			}
 			a.attribute(&event, queued.queuedAt, now)
+		}
+		if start {
+			a.setPending(event, false)
 		}
 		a.onEvent(event)
 	}

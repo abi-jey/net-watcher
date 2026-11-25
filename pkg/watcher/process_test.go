@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -641,5 +642,52 @@ func TestTunnelInfoFromLinkAttributes(t *testing.T) {
 	// The host's own links list without privilege.
 	if _, err := tunnelPorts(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// A short connection's end arrives while its start still waits for a
+// lookup: it follows the start through the queue and inherits both ends.
+func TestEndOfAShortConnectionFollowsItsStart(t *testing.T) {
+	gate := make(chan struct{})
+	var once sync.Once
+	a, events := newTestAttributor(t, func(a *processAttributor) {
+		deliver := a.onEvent
+		a.onEvent = func(event database.NetworkEvent) {
+			once.Do(func() { <-gate }) // The worker is busy with an earlier event.
+			deliver(event)
+		}
+	})
+	earlier := database.NetworkEvent{EventType: database.EventTCPStart, SrcIP: "10.2.0.8", SrcPort: 40000, DstIP: "10.96.0.1", DstPort: 443}
+	podSide(&earlier, "src")
+	start := database.NetworkEvent{EventType: database.EventTCPStart, SrcIP: "192.0.2.10", SrcPort: 52000, DstIP: "10.2.0.8", DstPort: 8080, SrcKind: "node"}
+	podSide(&start, "dst")
+	end := start
+	end.EventType, end.Reason = database.EventTCPEnd, "FIN"
+	for _, event := range []*database.NetworkEvent{&earlier, &start, &end} {
+		if !a.handle(event) {
+			t.Fatalf("%s was not queued", event.EventType)
+		}
+	}
+	close(gate)
+	var got []database.NetworkEvent
+	for range 3 {
+		select {
+		case event := <-events:
+			got = append(got, event)
+		case <-time.After(5 * time.Second):
+			t.Fatal("events not returned")
+		}
+	}
+	last := got[2]
+	if last.EventType != database.EventTCPEnd || last.ProcessCommand != "kubelet" || last.PeerProcessCommand != "python3" {
+		t.Fatalf("end: %+v", last)
+	}
+	if a.isPending(start) {
+		t.Fatal("the start is still counted as queued")
+	}
+	// With nothing queued for its flow, an end is not queued.
+	orphan := database.NetworkEvent{EventType: database.EventTCPEnd, SrcIP: "192.0.2.10", SrcPort: 52555, DstIP: "10.2.0.8", DstPort: 8080}
+	if a.handle(&orphan) {
+		t.Fatal("an end without a queued start was queued")
 	}
 }
