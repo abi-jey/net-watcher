@@ -206,6 +206,9 @@ pre { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font-family: va
 .switch input { accent-color: var(--accent-solid); margin: 0; }
 .switch:has(input:checked) { border-color: var(--green); color: var(--text-h); }
 .switch:has(input:checked)::before { content: ''; width: 7px; height: 7px; border-radius: 50%; background: var(--green); animation: pulse 1.6s ease-in-out infinite; }
+/* A setting, not something live: no pulse. */
+.switch.steady:has(input:checked) { border-color: var(--accent-solid); }
+.switch.steady:has(input:checked)::before { background: var(--accent-solid); animation: none; }
 @keyframes pulse { 50% { opacity: 0.3; } }
 button.small, .button.small { min-height: 26px; padding: 2px 8px; font-size: 12px; }
 .collector-line { display: flex; align-items: center; gap: 12px; padding: 8px 0; border-bottom: 1px solid var(--border-light); }
