@@ -7,6 +7,7 @@ import { addCondition, allOf, conditions, format, fromLegacy, legacyParams, tryP
 import { Pacer } from '../lib/pacer.ts';
 import { endProcesses } from '../lib/process.ts';
 import { groupRecords, type Row } from '../lib/flows.ts';
+import { asQuery, forgetSearch, namesSearch, saveSearch, savedSearch, type SearchParams } from '../lib/savedSearch.ts';
 import { Banner, Empty, ErrorBanner, Segmented, Spinner } from '../components/ui.tsx';
 import { EventRow, FlowRow, RepeatRow } from '../components/EventRow.tsx';
 import { FilterBar, type Suggestions } from '../components/FilterBar.tsx';
@@ -73,7 +74,11 @@ function suggestionsFrom(events: NetworkEvent[], nodes: string[]): Suggestions {
 }
 
 export function Events({ query }: { query: URLSearchParams }) {
-  const search = readSearch(query);
+  // Remember search: Events opened without a search (the sidebar, a new tab)
+  // shows the kept one.
+  const [remember, setRemember] = useState(() => savedSearch() !== undefined);
+  const restored = remember && !namesSearch(query) ? savedSearch() : undefined;
+  const search = readSearch(restored ? asQuery(restored) : query);
   const key = `${search.window}|${search.text}`;
   const collectors = useResource<HealthResponse>('/api/collectors', 60_000);
   const [events, setEvents] = useState<NetworkEvent[]>([]);
@@ -92,9 +97,25 @@ export function Events({ query }: { query: URLSearchParams }) {
     if (search.legacy) setQuery(['events'], { w: search.window, f: search.text || undefined, v: search.view === 'records' ? 'records' : undefined, ...Object.fromEntries(legacyParams.map(param => [param, undefined])) });
   }, [search.legacy, search.window, search.text, search.view]);
 
-  const viewParam = (view: View) => (view === 'records' ? 'records' : undefined);
-  const apply = (text: string, window = search.window) => setQuery(['events'], { w: window, f: text || undefined, v: viewParam(search.view) });
-  const setView = (view: View) => { setExpanded(undefined); setOpenChild(undefined); setQuery(['events'], { w: search.window, f: search.text || undefined, v: viewParam(view) }); };
+  const restoredQuery = restored ? asQuery(restored).toString() : '';
+  useEffect(() => {
+    if (restoredQuery) setQuery(['events'], Object.fromEntries(new URLSearchParams(restoredQuery)));
+  }, [restoredQuery]);
+
+  const viewParam = (view: View) => (view === 'records' ? 'records' as const : undefined);
+  // A search made here is kept when remembering; one a link brought is not
+  // until it is changed here.
+  const show = (next: SearchParams) => {
+    setQuery(['events'], { ...next });
+    if (remember) saveSearch(next);
+  };
+  const apply = (text: string, window = search.window) => show({ w: window, f: text || undefined, v: viewParam(search.view) });
+  const setView = (view: View) => { setExpanded(undefined); setOpenChild(undefined); show({ w: search.window, f: search.text || undefined, v: viewParam(view) }); };
+  const toggleRemember = (on: boolean) => {
+    setRemember(on);
+    if (on) saveSearch({ w: search.window, f: search.text || undefined, v: viewParam(search.view) });
+    else forgetSearch();
+  };
   const onFilter = (condition: Term) => {
     setExpanded(undefined);
     apply(format(addCondition(tryParse(search.text).term, condition)));
@@ -187,6 +208,9 @@ export function Events({ query }: { query: URLSearchParams }) {
         <div className="live-controls">
           <Segmented label="Show" value={search.view} options={views} onChange={setView} />
           {live && <button type="button" className="ghost small" onClick={liveTail.toggleHold} aria-pressed={liveTail.held}><Icon name={liveTail.held ? 'play' : 'pause'} size={12} />{liveTail.held ? 'Resume' : 'Pause'}</button>}
+          <label className="switch steady" title="Keep this search (filter, window and view) in this browser: opening Events from the menu or a new tab shows it again. Links that carry their own filter still show theirs.">
+            <input type="checkbox" checked={remember} onChange={event => toggleRemember(event.target.checked)} /><span>Remember search</span>
+          </label>
           <label className="switch"><input type="checkbox" checked={live} onChange={event => setLive(event.target.checked)} /><span>Live tail</span></label>
         </div>
       </div>

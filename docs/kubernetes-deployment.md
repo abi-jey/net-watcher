@@ -544,6 +544,13 @@ torrent client's peers, a server's clients. That row reads from the peers to
 the port, with ↑ what the peers sent and ↓ what the port sent. **Records**
 lists every stored record as it is.
 
+The search (filter, window and view) is part of the page's address, so a
+reload or a bookmark keeps it. With **Remember search** on, the browser also
+keeps it in local storage: opening Events from the menu or in a new tab shows
+it again. A link that carries its own filter, such as one from the Processes
+page, still shows that filter, and only replaces the remembered search once
+it is changed on the Events page. Turning the switch off forgets it.
+
 A collector forwards `FlowID` and the totals only to an ingester that
 advertises the `flows` capability. An older ingester gets the records without
 them, and its sums stay right because of how `ByteCount` is counted.
